@@ -14,6 +14,7 @@ import (
 	"github.com/nageoffer/ragent-go/internal/framework/config"
 	"github.com/nageoffer/ragent-go/internal/framework/convention"
 	"github.com/nageoffer/ragent-go/internal/framework/middleware"
+	"github.com/nageoffer/ragent-go/internal/framework/ratelimit"
 )
 
 func main() {
@@ -25,6 +26,23 @@ func main() {
 		slog.Error("failed to load config", "err", err)
 		os.Exit(1)
 	}
+
+	rdb := cfg.Redis.NewClient()
+	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		slog.Warn("redis not available, rate limiter disabled", "err", err)
+	}
+
+	queueLimiter := ratelimit.NewFairQueueLimiter(
+		"rag:chat",
+		rdb,
+		ratelimit.LimiterConfig{
+			MaxConcurrent:  cfg.RAG.RateLimit.Global.MaxConcurrent,
+			MaxWaitSeconds: cfg.RAG.RateLimit.Global.MaxWaitSeconds,
+			LeaseSeconds:   cfg.RAG.RateLimit.Global.LeaseSeconds,
+			PollIntervalMs: cfg.RAG.RateLimit.Global.PollIntervalMs,
+		},
+	)
+	defer queueLimiter.Shutdown()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -38,6 +56,20 @@ func main() {
 	{
 		api.GET("/health", func(c *gin.Context) {
 			c.JSON(http.StatusOK, convention.Success("ok"))
+		})
+		api.GET("/limiter-test", func(c *gin.Context) {
+			err := queueLimiter.Acquire(c.Request.Context(), ratelimit.AcquireRequest{
+				MaxWait: time.Duration(cfg.RAG.RateLimit.Global.MaxWaitSeconds) * time.Second,
+				OnAcquire: func() {
+					c.JSON(http.StatusOK, convention.Success("acquired"))
+				},
+				OnTimeout: func() {
+					c.JSON(http.StatusOK, convention.Failure("A000001", "系统繁忙，请稍后再试"))
+				},
+			})
+			if err != nil {
+				c.JSON(http.StatusOK, convention.Failure("A000001", "队列超时"))
+			}
 		})
 	}
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
 )
 
@@ -50,6 +51,13 @@ type RedisConfig struct {
 
 func (r RedisConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", r.Host, r.Port)
+}
+
+func (r RedisConfig) NewClient() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:     r.Addr(),
+		Password: r.Password,
+	})
 }
 
 type RocketMQConfig struct {
