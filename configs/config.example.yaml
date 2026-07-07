@@ -1,0 +1,178 @@
+# config.example.yaml — ragent-go
+# 复制为 configs/config.yaml 后填入你的实际配置。
+# configs/config.yaml 不提交到 git。
+
+server:
+  port: 9090
+
+database:
+  host: ${POSTGRES_HOST}
+  port: ${POSTGRES_PORT}
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  name: ${POSTGRES_DB}
+  sslmode: disable
+
+redis:
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAME_SERVER}
+  producer:
+    group: ragent-producer_pg
+    send-message-timeout: 2000
+
+milvus:
+  uri: ${MILVUS_URI}
+
+rag:
+  vector:
+    type: pg
+
+  default:
+    collection-name: rag_default_store
+    dimension: 1536
+    metric-type: COSINE
+
+  query-rewrite:
+    enabled: true
+    max-history-messages: 4
+    max-history-chars: 500
+
+  rate-limit:
+    global:
+      enabled: true
+      max-concurrent: 1
+      max-wait-seconds: 3
+      lease-seconds: 30
+      poll-interval-ms: 200
+
+  memory:
+    history-keep-turns: 4
+    summary-start-turns: 5
+    summary-enabled: true
+    ttl-minutes: 60
+    summary-max-chars: 200
+    title-max-length: 30
+
+  semaphore:
+    document-upload:
+      name: rag:document:upload
+      max-concurrent: 10
+      max-wait-seconds: 5
+      lease-seconds: 300
+
+  knowledge:
+    schedule:
+      scan-delay-ms: 10000
+      lock-seconds: 900
+      batch-size: 20
+      min-interval-seconds: 60
+
+  mcp:
+    servers:
+      - name: default
+        url: ${MCP_SERVER_URL}
+
+  search:
+    channels:
+      vector-global:
+        confidence-threshold: 0.6
+        top-k-multiplier: 3
+      intent-directed:
+        min-intent-score: 0.4
+        top-k-multiplier: 2
+
+  trace:
+    enabled: true
+    max-error-length: 1000
+
+ai:
+  providers:
+    ollama:
+      url: ${OLLAMA_URL}
+      endpoints:
+        chat: /v1/chat/completions
+        embedding: /api/embed
+    bailian:
+      url: https://dashscope.aliyuncs.com
+      api-key: ${BAILIAN_API_KEY}
+      endpoints:
+        chat: /compatible-mode/v1/chat/completions
+        rerank: /api/v1/services/rerank/text-rerank/text-rerank
+    siliconflow:
+      url: https://api.siliconflow.cn
+      api-key: ${SILICONFLOW_API_KEY}
+      endpoints:
+        chat: /v1/chat/completions
+        embedding: /v1/embeddings
+
+  selection:
+    failure-threshold: 2
+    open-duration-ms: 30000
+
+  stream:
+    message-chunk-size: 1
+
+  chat:
+    default-model: qwen3-max
+    deep-thinking-model: qwen3-max
+    candidates:
+      - id: qwen-plus
+        provider: bailian
+        model: qwen-plus-latest
+        priority: 1
+      - id: qwen3-max
+        provider: bailian
+        model: qwen3-max
+        supports-thinking: true
+        priority: 3
+      - id: glm-4.7
+        provider: siliconflow
+        model: Pro/zai-org/GLM-4.7
+        supports-thinking: true
+        priority: 0
+      - id: qwen3-local
+        provider: ollama
+        model: qwen3:8b-fp16
+        priority: 2
+
+  embedding:
+    default-model: qwen-emb-8b
+    candidates:
+      - id: qwen-emb-8b
+        provider: siliconflow
+        model: Qwen/Qwen3-Embedding-8B
+        dimension: 1536
+        priority: 1
+      - id: qwen-emb-local
+        provider: ollama
+        model: qwen3-embedding:8b-fp16
+        dimension: 1536
+        priority: 2
+
+  rerank:
+    default-model: qwen3-rerank
+    candidates:
+      - id: qwen3-rerank
+        provider: bailian
+        model: qwen3-rerank
+        priority: 1
+      - id: rerank-noop
+        provider: noop
+        model: noop
+        priority: 100
+
+rustfs:
+  url: ${RUSTFS_URL}
+  access-key-id: ${RUSTFS_ACCESS_KEY_ID}
+  secret-access-key: ${RUSTFS_SECRET_ACCESS_KEY}
+
+auth:
+  token-name: Authorization
+  timeout-seconds: 2592000
+
+app:
+  demo-mode: false

@@ -1,0 +1,39 @@
+# .gitignore — ragent-go
+# ============================================================
+
+# Binaries
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Config (本地真实配置，不提交)
+configs/config.yaml
+
+# Test artifacts
+testdata/sse/*.txt
+coverage.out
+*.test
+
+# Logs
+*.log
+
+# Env files (可能含密钥)
+.env
+.env.local
+.env.*.local
