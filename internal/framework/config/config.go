@@ -187,23 +187,22 @@ type AIConfig struct {
 	Chat      AIChatConfig      `mapstructure:"chat"`
 	Embedding AIEmbeddingConfig `mapstructure:"embedding"`
 	Rerank    AIRerankConfig    `mapstructure:"rerank"`
+	VLM       AIVLMConfig       `mapstructure:"vlm"`
 }
 
-type AIProvidersConfig struct {
-	Ollama      AIProviderConfig `mapstructure:"ollama"`
-	Bailian     AIProviderConfig `mapstructure:"bailian"`
-	SiliconFlow AIProviderConfig `mapstructure:"siliconflow"`
-}
+type AIProvidersConfig map[string]AIProviderConfig
 
 type AIProviderConfig struct {
 	URL       string            `mapstructure:"url"`
 	APIKey    string            `mapstructure:"api-key"`
+	Protocol  string            `mapstructure:"protocol"`
 	Endpoints map[string]string `mapstructure:"endpoints"`
 }
 
 type AISelectionConfig struct {
-	FailureThreshold int `mapstructure:"failure-threshold"`
-	OpenDurationMs   int `mapstructure:"open-duration-ms"`
+	FailureThreshold          int `mapstructure:"failure-threshold"`
+	OpenDurationMs            int `mapstructure:"open-duration-ms"`
+	FirstPacketTimeoutSeconds int `mapstructure:"first-packet-timeout-seconds"`
 }
 
 type AIStreamConfig struct {
@@ -220,8 +219,10 @@ type AICandidateConfig struct {
 	ID               string `mapstructure:"id"`
 	Provider         string `mapstructure:"provider"`
 	Model            string `mapstructure:"model"`
+	URL              string `mapstructure:"url"`
 	SupportsThinking bool   `mapstructure:"supports-thinking"`
 	Priority         int    `mapstructure:"priority"`
+	Enabled          *bool  `mapstructure:"enabled"`
 }
 
 type AIEmbeddingConfig struct {
@@ -233,8 +234,10 @@ type AIEmbeddingCandidateConfig struct {
 	ID        string `mapstructure:"id"`
 	Provider  string `mapstructure:"provider"`
 	Model     string `mapstructure:"model"`
+	URL       string `mapstructure:"url"`
 	Dimension int    `mapstructure:"dimension"`
 	Priority  int    `mapstructure:"priority"`
+	Enabled   *bool  `mapstructure:"enabled"`
 }
 
 type AIRerankConfig struct {
@@ -246,7 +249,51 @@ type AIRerankCandidateConfig struct {
 	ID       string `mapstructure:"id"`
 	Provider string `mapstructure:"provider"`
 	Model    string `mapstructure:"model"`
+	URL      string `mapstructure:"url"`
 	Priority int    `mapstructure:"priority"`
+	Enabled  *bool  `mapstructure:"enabled"`
+}
+
+type AIVLMConfig struct {
+	DefaultModel string                 `mapstructure:"default-model"`
+	Candidates   []AIVLMCandidateConfig `mapstructure:"candidates"`
+}
+
+type AIVLMCandidateConfig struct {
+	ID       string `mapstructure:"id"`
+	Provider string `mapstructure:"provider"`
+	Model    string `mapstructure:"model"`
+	URL      string `mapstructure:"url"`
+	Priority int    `mapstructure:"priority"`
+	Enabled  *bool  `mapstructure:"enabled"`
+}
+
+func (c AIVLMCandidateConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+func (c AICandidateConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+func (c AIEmbeddingCandidateConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+func (c AIRerankCandidateConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type RustFSConfig struct {

@@ -91,27 +91,46 @@ rag:
 
 ai:
   providers:
+    openai:
+      url: https://api.openai.com
+      api-key: ${OPENAI_API_KEY}
+      protocol: openai-compatible
+      endpoints:
+        chat: /v1/chat/completions
+        embedding: /v1/embeddings
+    anthropic:
+      url: https://api.anthropic.com
+      api-key: ${ANTHROPIC_API_KEY}
+      protocol: anthropic
+      endpoints:
+        chat: /v1/messages
     ollama:
       url: ${OLLAMA_URL}
+      protocol: openai-compatible
       endpoints:
         chat: /v1/chat/completions
         embedding: /api/embed
     bailian:
       url: https://dashscope.aliyuncs.com
       api-key: ${BAILIAN_API_KEY}
+      protocol: openai-compatible
       endpoints:
         chat: /compatible-mode/v1/chat/completions
         rerank: /api/v1/services/rerank/text-rerank/text-rerank
     siliconflow:
       url: https://api.siliconflow.cn
       api-key: ${SILICONFLOW_API_KEY}
+      protocol: openai-compatible
       endpoints:
         chat: /v1/chat/completions
         embedding: /v1/embeddings
+    noop:
+      protocol: noop
 
   selection:
     failure-threshold: 2
     open-duration-ms: 30000
+    first-packet-timeout-seconds: 60
 
   stream:
     message-chunk-size: 1
