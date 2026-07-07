@@ -42,5 +42,14 @@
 - [x] `cmd/ragent/main.go` — Gin 空服务，`GET /api/ragent/health` → `{"code":"0","data":"ok"}`
 - [x] `cmd/mcp-server/main.go` — 占位入口
 - [x] `.gitignore`
+- [x] 配置安全处理：`configs/config.example.yaml` + `.env.example` 提交，`configs/config.yaml` + `.env` 仅本地
+- [x] `deploy/docker-compose.yml` 改为 `${VAR:-default}` 开源友好格式
 - [ ] 启动 Go 服务验证 health 端点
 - [ ] 抓 Java 版 SSE fixture 到 `testdata/sse/baseline_chat.txt`
+
+### 配置安全说明
+
+- **提交到 git**：`configs/config.example.yaml`、`.env.example`
+- **仅本地，不提交**：`configs/config.yaml`、`.env`、`.env.local`
+- 生产环境计划使用配置中心（Apollo/Nacos/K8s ConfigMap），不依赖 `.env` 文件
+- 开源前建议跑 `gitleaks detect` 检查无密钥泄漏
