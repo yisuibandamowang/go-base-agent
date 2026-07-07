@@ -12,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nageoffer/ragent-go/internal/framework/config"
+	"github.com/nageoffer/ragent-go/internal/framework/convention"
+	"github.com/nageoffer/ragent-go/internal/framework/middleware"
 )
 
 func main() {
@@ -26,15 +28,16 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(
+		middleware.Recover(),
+		middleware.TraceID(),
+		middleware.RequestLog(),
+	)
 
 	api := r.Group("/api/ragent")
 	{
 		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{
-				"code": "0",
-				"data": "ok",
-			})
+			c.JSON(http.StatusOK, convention.Success("ok"))
 		})
 	}
 
