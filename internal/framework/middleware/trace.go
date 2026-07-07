@@ -3,7 +3,7 @@ package middleware
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	appctx "github.com/nageoffer/ragent-go/internal/framework/context"
+	appctx "go-base-agent/internal/framework/context"
 )
 
 func TraceID() gin.HandlerFunc {

@@ -1,6 +1,6 @@
 # Agentic RAG 升级规划 — 会员-支付中台
 
-> 本文档描述 ragent-go 从基础 RAG 升级为 Agentic RAG 的路径，目标应用于公司会员-支付中台。
+> 本文档描述 go-base-agent 从基础 RAG 升级为 Agentic RAG 的路径，目标应用于公司会员-支付中台。
 
 ## 背景
 

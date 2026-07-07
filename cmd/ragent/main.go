@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nageoffer/ragent-go/internal/framework/config"
-	"github.com/nageoffer/ragent-go/internal/framework/convention"
-	"github.com/nageoffer/ragent-go/internal/framework/middleware"
-	"github.com/nageoffer/ragent-go/internal/framework/ratelimit"
+	"go-base-agent/internal/framework/config"
+	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/framework/middleware"
+	"go-base-agent/internal/framework/ratelimit"
 )
 
 func main() {

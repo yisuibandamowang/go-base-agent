@@ -23,7 +23,7 @@ lint:
 
 fmt:
 	gofumpt -l -w .
-	goimports -local github.com/nageoffer/ragent-go -w .
+	goimports -local go-base-agent -w .
 
 vet:
 	$(GO) vet ./...

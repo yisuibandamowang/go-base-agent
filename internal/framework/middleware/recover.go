@@ -7,8 +7,8 @@ import (
 	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nageoffer/ragent-go/internal/framework/convention"
-	"github.com/nageoffer/ragent-go/internal/framework/exception"
+	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/framework/exception"
 )
 
 func Recover() gin.HandlerFunc {

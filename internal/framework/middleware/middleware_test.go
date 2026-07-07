@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nageoffer/ragent-go/internal/framework/convention"
-	"github.com/nageoffer/ragent-go/internal/framework/exception"
-	"github.com/nageoffer/ragent-go/internal/framework/middleware"
+	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/framework/exception"
+	"go-base-agent/internal/framework/middleware"
 )
 
 func TestRecover_PanicReturnsResult(t *testing.T) {

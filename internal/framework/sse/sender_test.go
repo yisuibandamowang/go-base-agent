@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nageoffer/ragent-go/internal/framework/sse"
+	"go-base-agent/internal/framework/sse"
 )
 
 func setupGin() *gin.Engine {

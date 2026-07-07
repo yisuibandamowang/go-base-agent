@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nageoffer/ragent-go/internal/framework/trace"
+	"go-base-agent/internal/framework/trace"
 )
 
 func TestTraced_SingleNode(t *testing.T) {

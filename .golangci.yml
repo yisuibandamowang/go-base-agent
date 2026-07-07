@@ -19,7 +19,7 @@ linters-settings:
     enable:
       - shadow
   goimports:
-    local-prefixes: github.com/nageoffer/ragent-go
+    local-prefixes: go-base-agent
   misspell:
     locale: US
 

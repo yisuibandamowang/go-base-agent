@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	appctx "github.com/nageoffer/ragent-go/internal/framework/context"
+	appctx "go-base-agent/internal/framework/context"
 )
 
 func RequestLog() gin.HandlerFunc {

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nageoffer/ragent-go/internal/framework/snowflake"
+	"go-base-agent/internal/framework/snowflake"
 )
 
 func TestNextID_GeneratesUniqueIDs(t *testing.T) {

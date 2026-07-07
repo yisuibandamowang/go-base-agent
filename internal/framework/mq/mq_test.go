@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nageoffer/ragent-go/internal/framework/mq"
+	"go-base-agent/internal/framework/mq"
 )
 
 func TestNoopProducer_Send(t *testing.T) {
