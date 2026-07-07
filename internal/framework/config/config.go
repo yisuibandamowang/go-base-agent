@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
@@ -55,8 +56,12 @@ func (r RedisConfig) Addr() string {
 
 func (r RedisConfig) NewClient() *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr:     r.Addr(),
-		Password: r.Password,
+		Addr:         r.Addr(),
+		Password:     r.Password,
+		DialTimeout:  3 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		MaxRetries:   3,
 	})
 }
 

@@ -10,11 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/middleware"
 	"go-base-agent/internal/framework/ratelimit"
+
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -28,7 +29,9 @@ func main() {
 	}
 
 	rdb := cfg.Redis.NewClient()
-	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pingCancel()
+	if _, err := rdb.Ping(pingCtx).Result(); err != nil {
 		slog.Warn("redis not available, rate limiter disabled", "err", err)
 	}
 
