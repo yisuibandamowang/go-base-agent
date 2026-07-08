@@ -14,6 +14,10 @@ import (
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/middleware"
 	"go-base-agent/internal/framework/ratelimit"
+	"go-base-agent/internal/infra/chat"
+	"go-base-agent/internal/infra/embedding"
+	"go-base-agent/internal/infra/model"
+	"go-base-agent/internal/infra/rerank"
 
 	"github.com/gin-gonic/gin"
 )
@@ -46,6 +50,8 @@ func main() {
 		},
 	)
 	defer queueLimiter.Shutdown()
+
+	setupAI(cfg, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -104,4 +110,92 @@ func main() {
 		slog.Error("server forced to shutdown", "err", err)
 	}
 	slog.Info("server exited")
+}
+
+// setupAI wires AI infrastructure components and validates configuration.
+// Services are assembled but not yet bound to HTTP handlers (2B).
+func setupAI(cfg *config.Config, logger *slog.Logger) {
+	aiCfg := cfg.AI
+
+	// 1. Model layer: HealthStore + Selector + RoutingExecutor
+	health := model.NewHealthStore(aiCfg.Selection)
+	selector := model.NewSelector(aiCfg, health)
+	executor := model.NewRoutingExecutor(health)
+
+	// 2. Chat layer: OpenAI-compatible clients for each provider
+	chatClients := buildChatClients(aiCfg)
+	llmService := chat.NewRoutingLLMService(
+		selector, health, executor,
+		chatClients,
+		chat.NewFirstPacketProbe(),
+		time.Duration(aiCfg.Selection.FirstPacketTimeoutSeconds)*time.Second,
+	)
+
+	// 3. Embedding layer: OpenAI-compatible clients
+	embClients := buildEmbeddingClients(aiCfg)
+	embService := embedding.NewRoutingEmbeddingService(
+		executor, selector,
+		embClients,
+		embeddingDimension(aiCfg),
+	)
+
+	// 4. Rerank layer: Noop fallback
+	rerankClients := buildRerankClients(aiCfg)
+	rerankService := rerank.NewRoutingRerankService(executor, selector, rerankClients)
+
+	logger.Info("ai infra wired",
+		"chat_providers", len(chatClients),
+		"embed_providers", len(embClients),
+		"rerank_providers", len(rerankClients),
+	)
+
+	_ = llmService
+	_ = embService
+	_ = rerankService
+}
+
+func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
+	var clients []chat.ChatClient
+	for name, provider := range aiCfg.Providers {
+		switch provider.Protocol {
+		case "openai-compatible":
+			clients = append(clients, chat.NewOpenAICompatibleChatClient(name, nil))
+		case "anthropic":
+			logger := slog.Default()
+			logger.Warn("anthropic protocol not yet implemented, skipping", "provider", name)
+		case "noop":
+			// skip noop for chat
+		default:
+			slog.Warn("unknown protocol, skipping", "provider", name, "protocol", provider.Protocol)
+		}
+	}
+	return clients
+}
+
+func buildEmbeddingClients(aiCfg config.AIConfig) []embedding.Client {
+	var clients []embedding.Client
+	for name, provider := range aiCfg.Providers {
+		switch provider.Protocol {
+		case "openai-compatible":
+			clients = append(clients, embedding.NewOpenAICompatibleEmbeddingClient(name, nil))
+		case "noop":
+			// skip
+		default:
+			// anthropic doesn't do embedding
+		}
+	}
+	return clients
+}
+
+func buildRerankClients(aiCfg config.AIConfig) []rerank.Client {
+	return []rerank.Client{&rerank.NoopClient{}}
+}
+
+func embeddingDimension(aiCfg config.AIConfig) int {
+	if len(aiCfg.Embedding.Candidates) > 0 {
+		if d := aiCfg.Embedding.Candidates[0].Dimension; d > 0 {
+			return d
+		}
+	}
+	return 1536
 }
