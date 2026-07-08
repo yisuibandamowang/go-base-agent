@@ -1,0 +1,75 @@
+package rag
+
+import (
+	"strings"
+	"testing"
+
+	"go-base-agent/internal/infra/chat"
+)
+
+func TestDefaultPromptBuilder_Basic(t *testing.T) {
+	b := NewDefaultPromptBuilder()
+	req := b.Build(PromptContext{Question: "你好"})
+
+	if len(req.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(req.Messages))
+	}
+	if req.Messages[0].Role != chat.RoleSystem {
+		t.Fatal("first should be system")
+	}
+	if !strings.Contains(req.Messages[0].Content, "有帮助的AI助手") {
+		t.Fatal("unexpected system prompt")
+	}
+	if req.Messages[1].Role != chat.RoleUser {
+		t.Fatal("second should be user")
+	}
+	if req.Messages[1].Content != "你好" {
+		t.Fatalf("unexpected user content: %s", req.Messages[1].Content)
+	}
+}
+
+func TestDefaultPromptBuilder_WithKbContext(t *testing.T) {
+	b := NewDefaultPromptBuilder()
+	req := b.Build(PromptContext{
+		Question:  "什么是RAG",
+		KbContext: "RAG是检索增强生成技术。",
+	})
+
+	content := req.Messages[1].Content
+	if !strings.Contains(content, "RAG是检索增强生成技术") {
+		t.Fatal("kb context should be in user message")
+	}
+	if !strings.Contains(content, "什么是RAG") {
+		t.Fatal("question should be in user message")
+	}
+}
+
+func TestDefaultPromptBuilder_WithHistory(t *testing.T) {
+	b := NewDefaultPromptBuilder()
+	req := b.Build(PromptContext{
+		Question: "继续",
+		History: []chat.Message{
+			chat.NewUserMessage("上一条用户消息"),
+			chat.NewAssistantMessage("上一条助手消息"),
+		},
+	})
+
+	if len(req.Messages) != 4 {
+		t.Fatalf("expected 4 messages (system + 2 history + user), got %d", len(req.Messages))
+	}
+	if req.Messages[1].Role != chat.RoleUser {
+		t.Fatal("history[0] should be user")
+	}
+	if req.Messages[2].Role != chat.RoleAssistant {
+		t.Fatal("history[1] should be assistant")
+	}
+}
+
+func TestDefaultPromptBuilder_CustomSystemPrompt(t *testing.T) {
+	b := &DefaultPromptBuilder{SystemPrompt: "你是一个专业的客服助手。"}
+	req := b.Build(PromptContext{Question: "退款"})
+
+	if req.Messages[0].Content != "你是一个专业的客服助手。" {
+		t.Fatalf("unexpected system prompt: %s", req.Messages[0].Content)
+	}
+}

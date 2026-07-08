@@ -9,12 +9,13 @@ import (
 // Pipeline orchestrates the RAG chat flow: prompt → LLM → SSE events.
 // Aligns with Java StreamChatPipeline (minimal subset for 2B-3).
 type Pipeline struct {
-	llm chat.LLMService
+	llm    chat.LLMService
+	prompt PromptBuilder
 }
 
 // NewPipeline creates a new RAG pipeline.
-func NewPipeline(llm chat.LLMService) *Pipeline {
-	return &Pipeline{llm: llm}
+func NewPipeline(llm chat.LLMService, prompt PromptBuilder) *Pipeline {
+	return &Pipeline{llm: llm, prompt: prompt}
 }
 
 // StreamChat implements Service.StreamChat.
@@ -25,13 +26,8 @@ func (p *Pipeline) StreamChat(question, conversationID, taskID string, deepThink
 		thinkingVal = &v
 	}
 
-	req := chat.Request{
-		Messages: []chat.Message{
-			chat.NewSystemMessage("你是一个有帮助的AI助手。"),
-			chat.NewUserMessage(question),
-		},
-		Thinking: thinkingVal,
-	}
+	req := p.prompt.Build(PromptContext{Question: question})
+	req.Thinking = thinkingVal
 
 	cb := &pipelineCallback{sender: sender, buf: make([]byte, 0, 1024)}
 	handle, err := p.llm.StreamChat(nil, req, cb)
