@@ -67,6 +67,11 @@ func main() {
 	kbSvc := service.NewKnowledgeBaseService(kbRepo)
 	kbHandler := handler.NewKnowledgeBaseHandler(kbSvc)
 
+	docRepo := repo.NewKnowledgeDocumentRepo(gormDB)
+	chunkRepo := repo.NewKnowledgeChunkRepo(gormDB)
+	docSvc := service.NewDocumentService(docRepo, chunkRepo, kbRepo)
+	docHandler := handler.NewDocumentHandler(docSvc)
+
 	ragCtl := rag.NewController(rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
 		&rag.NoopRewriter{},
@@ -106,9 +111,26 @@ func main() {
 		// Knowledge base CRUD
 		kb := api.Group("/knowledge-base")
 		{
+			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
+
+			// Document management (must register before :id to avoid conflict)
+			kb.POST("/:kbId/docs/upload", docHandler.Upload)
+			kb.GET("/:kbId/docs", docHandler.ListDocs)
+			kb.GET("/docs/search", docHandler.SearchDocs)
+			kb.GET("/docs/:docId/chunk-logs", docHandler.ChunkLogs)
+			kb.GET("/docs/:docId/chunks", docHandler.ListChunks)
+			kb.PUT("/docs/:docId/chunks/:chunkId", docHandler.UpdateChunk)
+			kb.DELETE("/docs/:docId/chunks/:chunkId", docHandler.DeleteChunk)
+			kb.PATCH("/docs/:docId/chunks/:chunkId/enable", docHandler.ToggleChunk)
+			kb.PATCH("/docs/:docId/chunks/batch-enable", docHandler.BatchToggleChunks)
+			kb.POST("/docs/:docId/chunk", docHandler.ChunkDoc)
+			kb.GET("/docs/:docId", docHandler.GetDoc)
+			kb.PUT("/docs/:docId", docHandler.UpdateDoc)
+			kb.DELETE("/docs/:docId", docHandler.DeleteDoc)
+			kb.PATCH("/docs/:docId/enable", docHandler.ToggleDoc)
+
 			kb.POST("", kbHandler.Create)
 			kb.GET("", kbHandler.List)
-			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
 			kb.GET("/:id", kbHandler.Get)
 			kb.PUT("/:id", kbHandler.Update)
 			kb.DELETE("/:id", kbHandler.Delete)
