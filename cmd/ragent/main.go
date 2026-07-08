@@ -54,7 +54,7 @@ func main() {
 
 	llmService := setupAI(cfg, logger)
 
-	ragCtl := rag.NewController(rag.NewPipeline(llmService, rag.NewDefaultPromptBuilder()))
+	ragCtl := rag.NewController(rag.NewPipeline(llmService, rag.NewDefaultPromptBuilder(), &rag.NoopRewriter{}))
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
