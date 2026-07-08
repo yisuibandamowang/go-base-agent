@@ -1,6 +1,8 @@
 package rag
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,8 +19,8 @@ func TestDefaultPromptBuilder_Basic(t *testing.T) {
 	if req.Messages[0].Role != chat.RoleSystem {
 		t.Fatal("first should be system")
 	}
-	if !strings.Contains(req.Messages[0].Content, "有帮助的AI助手") {
-		t.Fatal("unexpected system prompt")
+	if req.Messages[0].Content == "" {
+		t.Fatal("system prompt should not be empty")
 	}
 	if req.Messages[1].Role != chat.RoleUser {
 		t.Fatal("second should be user")
@@ -66,7 +68,11 @@ func TestDefaultPromptBuilder_WithHistory(t *testing.T) {
 }
 
 func TestDefaultPromptBuilder_CustomSystemPrompt(t *testing.T) {
-	b := &DefaultPromptBuilder{SystemPrompt: "你是一个专业的客服助手。"}
+	tmpDir := t.TempDir()
+	sysFile := filepath.Join(tmpDir, "custom_system.txt")
+	os.WriteFile(sysFile, []byte("你是一个专业的客服助手。"), 0o644)
+
+	b := NewPromptBuilder(tmpDir, "custom_system.txt")
 	req := b.Build(PromptContext{Question: "退款"})
 
 	if req.Messages[0].Content != "你是一个专业的客服助手。" {

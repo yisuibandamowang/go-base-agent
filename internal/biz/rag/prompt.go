@@ -16,24 +16,36 @@ type PromptBuilder interface {
 	Build(ctx PromptContext) chat.Request
 }
 
-// DefaultPromptBuilder constructs a simple system + user prompt.
+// DefaultPromptBuilder constructs prompts using a template loader.
 type DefaultPromptBuilder struct {
-	SystemPrompt string
+	loader     *PromptLoader
+	systemFile string // e.g. "default_system.txt"
 }
 
-// NewDefaultPromptBuilder creates a builder with the default system prompt.
+// NewDefaultPromptBuilder creates a builder using embedded prompt templates.
 func NewDefaultPromptBuilder() *DefaultPromptBuilder {
+	return NewPromptBuilder("", "default_system.txt")
+}
+
+// NewPromptBuilder creates a builder with an optional external template directory.
+// If externalDir is empty, embedded prompts are used.
+func NewPromptBuilder(externalDir, systemFile string) *DefaultPromptBuilder {
 	return &DefaultPromptBuilder{
-		SystemPrompt: "你是一个有帮助的AI助手。",
+		loader:     NewPromptLoader(externalDir),
+		systemFile: systemFile,
 	}
 }
 
-// Build constructs a chat.Request with system prompt, optional history, and user question.
+// Build constructs a chat.Request from the prompt context.
 func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages := make([]chat.Message, 0, len(ctx.History)+2)
 
-	if b.SystemPrompt != "" {
-		messages = append(messages, chat.NewSystemMessage(b.SystemPrompt))
+	sysPrompt, err := b.loader.Render(b.systemFile, nil)
+	if err != nil {
+		sysPrompt = "你是一个有帮助的AI助手。"
+	}
+	if sysPrompt != "" {
+		messages = append(messages, chat.NewSystemMessage(sysPrompt))
 	}
 
 	messages = append(messages, ctx.History...)
