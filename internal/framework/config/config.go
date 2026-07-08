@@ -20,7 +20,7 @@ type Config struct {
 	RAG      RAGConfig      `mapstructure:"rag"`
 	AI       AIConfig       `mapstructure:"ai"`
 	RustFS   RustFSConfig   `mapstructure:"rustfs"`
-	Auth     AuthConfig     `mapstructure:"auth"`
+	Auth     AuthConfig     `mapstructure:"sa-token"`
 	App      AppConfig      `mapstructure:"app"`
 }
 
@@ -305,6 +305,7 @@ type RustFSConfig struct {
 type AuthConfig struct {
 	TokenName      string `mapstructure:"token-name"`
 	TimeoutSeconds int    `mapstructure:"timeout-seconds"`
+	JWTSecret      string `mapstructure:"jwt-secret"`
 }
 
 type AppConfig struct {

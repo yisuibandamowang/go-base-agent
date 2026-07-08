@@ -10,10 +10,16 @@ import (
 	"syscall"
 	"time"
 
-	"go-base-agent/internal/biz/knowledge/handler"
-	"go-base-agent/internal/biz/knowledge/repo"
-	"go-base-agent/internal/biz/knowledge/service"
+	conversationHandler "go-base-agent/internal/biz/conversation/handler"
+	conversationRepo "go-base-agent/internal/biz/conversation/repo"
+	conversationService "go-base-agent/internal/biz/conversation/service"
+	knowledgeHandler "go-base-agent/internal/biz/knowledge/handler"
+	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
+	knowledgeService "go-base-agent/internal/biz/knowledge/service"
 	"go-base-agent/internal/biz/rag"
+	userHandler "go-base-agent/internal/biz/user/handler"
+	userRepoPkg "go-base-agent/internal/biz/user/repo"
+	userService "go-base-agent/internal/biz/user/service"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/db"
@@ -61,22 +67,41 @@ func main() {
 	)
 	defer queueLimiter.Shutdown()
 
-	llmService := setupAI(cfg, logger)
+	llmService, embService := setupAI(cfg, logger)
 
-	kbRepo := repo.NewKnowledgeBaseRepo(gormDB)
-	kbSvc := service.NewKnowledgeBaseService(kbRepo)
-	kbHandler := handler.NewKnowledgeBaseHandler(kbSvc)
+	userRepo := userRepoPkg.NewUserRepo(gormDB)
+	authSvc := userService.NewAuthService(userRepo, cfg.Auth)
+	authHandler := userHandler.NewAuthHandler(authSvc)
 
-	docRepo := repo.NewKnowledgeDocumentRepo(gormDB)
-	chunkRepo := repo.NewKnowledgeChunkRepo(gormDB)
-	docSvc := service.NewDocumentService(docRepo, chunkRepo, kbRepo)
-	docHandler := handler.NewDocumentHandler(docSvc)
+	kbRepo := knowledgeRepo.NewKnowledgeBaseRepo(gormDB)
+	kbSvc := knowledgeService.NewKnowledgeBaseService(kbRepo)
+	kbHandler := knowledgeHandler.NewKnowledgeBaseHandler(kbSvc)
+
+	docRepo := knowledgeRepo.NewKnowledgeDocumentRepo(gormDB)
+	chunkRepo := knowledgeRepo.NewKnowledgeChunkRepo(gormDB)
+	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo)
+	docHandler := knowledgeHandler.NewDocumentHandler(docSvc)
+
+	convRepo := conversationRepo.NewConversationRepo(gormDB)
+	msgRepo := conversationRepo.NewMessageRepo(gormDB)
+	fbRepo := conversationRepo.NewFeedbackRepo(gormDB)
+	convSvc := conversationService.NewConversationService(convRepo, msgRepo, fbRepo)
+	convHandler := conversationHandler.NewConversationHandler(convSvc)
+
+	dbMemStore := conversationService.NewDBMemoryStore(gormDB, convRepo, msgRepo)
+	memSvc := rag.NewDefaultMemoryService(dbMemStore, cfg.RAG.Memory.HistoryKeepTurns)
+
+	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
+	llmRewriter := rag.NewLLMRewriter(llmService,
+		cfg.RAG.QueryRewrite.MaxHistoryMessages,
+		cfg.RAG.QueryRewrite.MaxHistoryChars,
+	)
 
 	ragCtl := rag.NewController(rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
-		&rag.NoopRewriter{},
-		&rag.NoopRetriever{},
-		&rag.NoopMemoryService{},
+		llmRewriter,
+		pgRetriever,
+		memSvc,
 	))
 
 	gin.SetMode(gin.ReleaseMode)
@@ -86,6 +111,7 @@ func main() {
 		middleware.TraceID(),
 		middleware.RequestLog(),
 		middleware.DB(gormDB),
+		middleware.Auth(authSvc),
 	)
 
 	api := r.Group("/api/ragent")
@@ -108,12 +134,27 @@ func main() {
 			}
 		})
 
-		// Knowledge base CRUD
+		auth := api.Group("/auth")
+		{
+			auth.POST("/login", authHandler.Login)
+			auth.POST("/logout", authHandler.Logout)
+			auth.GET("/current-user", authHandler.CurrentUser)
+		}
+
+		conv := api.Group("/conversations")
+		{
+			conv.GET("", convHandler.List)
+			conv.GET("/:conversationId", convHandler.Get)
+			conv.GET("/:conversationId/messages", convHandler.Messages)
+			conv.PUT("/:conversationId/title", convHandler.UpdateTitle)
+			conv.DELETE("/:conversationId", convHandler.Delete)
+			conv.POST("/feedback", convHandler.SubmitFeedback)
+		}
+
 		kb := api.Group("/knowledge-base")
 		{
 			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
 
-			// Document management (must register before :id to avoid conflict)
 			kb.POST("/:kbId/docs/upload", docHandler.Upload)
 			kb.GET("/:kbId/docs", docHandler.ListDocs)
 			kb.GET("/docs/search", docHandler.SearchDocs)
@@ -137,7 +178,6 @@ func main() {
 		}
 	}
 
-	// RAG v3 chat endpoints
 	ragGroup := r.Group("/rag/v3")
 	{
 		ragGroup.GET("/chat", ragCtl.Chat)
@@ -179,16 +219,13 @@ func main() {
 	slog.Info("server exited")
 }
 
-// setupAI wires AI infrastructure components.
-func setupAI(cfg *config.Config, logger *slog.Logger) chat.LLMService {
+func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service) {
 	aiCfg := cfg.AI
 
-	// 1. Model layer: HealthStore + Selector + RoutingExecutor
 	health := model.NewHealthStore(aiCfg.Selection)
 	selector := model.NewSelector(aiCfg, health)
 	executor := model.NewRoutingExecutor(health)
 
-	// 2. Chat layer: OpenAI-compatible clients for each provider
 	chatClients := buildChatClients(aiCfg)
 	llmService := chat.NewRoutingLLMService(
 		selector, health, executor,
@@ -197,7 +234,6 @@ func setupAI(cfg *config.Config, logger *slog.Logger) chat.LLMService {
 		time.Duration(aiCfg.Selection.FirstPacketTimeoutSeconds)*time.Second,
 	)
 
-	// 3. Embedding layer: OpenAI-compatible clients
 	embClients := buildEmbeddingClients(aiCfg)
 	embService := embedding.NewRoutingEmbeddingService(
 		executor, selector,
@@ -205,7 +241,6 @@ func setupAI(cfg *config.Config, logger *slog.Logger) chat.LLMService {
 		embeddingDimension(aiCfg),
 	)
 
-	// 4. Rerank layer: Noop fallback
 	rerankClients := buildRerankClients(aiCfg)
 	rerankService := rerank.NewRoutingRerankService(executor, selector, rerankClients)
 
@@ -215,9 +250,8 @@ func setupAI(cfg *config.Config, logger *slog.Logger) chat.LLMService {
 		"rerank_providers", len(rerankClients),
 	)
 
-	_ = embService
 	_ = rerankService
-	return llmService
+	return llmService, embService
 }
 
 func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
@@ -230,7 +264,6 @@ func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
 			logger := slog.Default()
 			logger.Warn("anthropic protocol not yet implemented, skipping", "provider", name)
 		case "noop":
-			// skip noop for chat
 		default:
 			slog.Warn("unknown protocol, skipping", "provider", name, "protocol", provider.Protocol)
 		}
@@ -245,9 +278,7 @@ func buildEmbeddingClients(aiCfg config.AIConfig) []embedding.Client {
 		case "openai-compatible":
 			clients = append(clients, embedding.NewOpenAICompatibleEmbeddingClient(name, nil))
 		case "noop":
-			// skip
 		default:
-			// anthropic doesn't do embedding
 		}
 	}
 	return clients

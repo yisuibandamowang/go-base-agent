@@ -97,9 +97,9 @@ func (h *KnowledgeBaseHandler) ChunkStrategies(c *gin.Context) {
 
 // userID 从请求上下文获取当前用户 ID。
 func userID(c *gin.Context) string {
-	// TODO: 从 JWT token 解析用户 ID
-	// 当前占位，后续对接 auth 中间件
-	_ = middleware.GetDB(c)
+	if user := middleware.GetLoginUser(c); user != nil {
+		return user.UserID
+	}
 	return "system"
 }
 
