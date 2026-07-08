@@ -1,6 +1,8 @@
 package rag
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -12,7 +14,7 @@ import (
 
 // Service defines the RAG chat service interface.
 type Service interface {
-	StreamChat(question, conversationID, taskID string, deepThinking bool, sender *SSESender)
+	StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender)
 	StopTask(taskID string)
 }
 
@@ -54,7 +56,16 @@ func (ctl *Controller) Chat(c *gin.Context) {
 		return
 	}
 
-	ctl.svc.StreamChat(question, conversationID, taskID, deepThinking, sender)
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	go func() {
+		<-c.Request.Context().Done()
+		slog.Info("rag: client disconnected", "taskId", taskID)
+		cancel()
+	}()
+
+	ctl.svc.StreamChat(ctx, question, conversationID, taskID, deepThinking, sender)
 }
 
 // Stop handles POST /rag/v3/stop — cancel a running task.

@@ -48,8 +48,8 @@ func TestPipeline_StreamChat_Basic(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{})
-	go p.StreamChat("test", "conv-1", "task-1", false, s)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
 
 	<-done
 
@@ -82,8 +82,8 @@ func TestPipeline_StreamChat_DeepThinking(t *testing.T) {
 	}
 
 	s, _ := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{})
-	p.StreamChat("test", "conv-1", "task-1", true, s)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p.StreamChat(context.Background(), "test", "conv-1", "task-1", true, s)
 
 	if capturedReq.Thinking == nil || !*capturedReq.Thinking {
 		t.Fatal("expected thinking=true in request")
@@ -106,8 +106,8 @@ func TestPipeline_StreamChat_Messages(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{})
-	go p.StreamChat("hello world", "conv-1", "task-1", false, s)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	go p.StreamChat(context.Background(), "hello world", "conv-1", "task-1", false, s)
 
 	<-done
 
@@ -136,8 +136,8 @@ func TestPipeline_StreamChat_ThinkingCallback(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{})
-	go p.StreamChat("test", "conv-1", "task-1", true, s)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", true, s)
 
 	<-done
 
@@ -166,8 +166,8 @@ func TestPipeline_StreamChat_Error(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{})
-	go p.StreamChat("test", "conv-1", "task-1", false, s)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
 
 	<-done
 

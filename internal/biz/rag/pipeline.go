@@ -1,30 +1,44 @@
 package rag
 
 import (
+	"context"
 	"log/slog"
 
 	"go-base-agent/internal/infra/chat"
 )
 
-// Pipeline orchestrates the RAG chat flow: prompt → LLM → SSE events.
-// Aligns with Java StreamChatPipeline (minimal subset for 2B-3).
+// Pipeline orchestrates the RAG chat flow.
+// Aligns with Java StreamChatPipeline.
 type Pipeline struct {
-	llm     chat.LLMService
-	prompt  PromptBuilder
-	rewrite QueryRewriter
+	llm      chat.LLMService
+	prompt   PromptBuilder
+	rewrite  QueryRewriter
+	retrieve Retriever
+	memory   MemoryService
 }
 
 // NewPipeline creates a new RAG pipeline.
-func NewPipeline(llm chat.LLMService, prompt PromptBuilder, rewrite QueryRewriter) *Pipeline {
-	return &Pipeline{llm: llm, prompt: prompt, rewrite: rewrite}
+func NewPipeline(llm chat.LLMService, prompt PromptBuilder, rewrite QueryRewriter, retrieve Retriever, memory MemoryService) *Pipeline {
+	return &Pipeline{llm: llm, prompt: prompt, rewrite: rewrite, retrieve: retrieve, memory: memory}
 }
 
 // StreamChat implements Service.StreamChat.
-func (p *Pipeline) StreamChat(question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
-	result, _ := p.rewrite.Rewrite(nil, question, nil)
+func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+
+	result, _ := p.rewrite.Rewrite(ctx, question, nil)
 	q := question
 	if result != nil && result.RewrittenQuestion != "" {
 		q = result.RewrittenQuestion
+	}
+
+	history, _ := p.memory.LoadHistory(ctx, conversationID)
+
+	chunks, _ := p.retrieve.Retrieve(ctx, q, 10)
+	var kbCtx string
+	if len(chunks) > 0 {
+		for _, c := range chunks {
+			kbCtx += c.Text + "\n"
+		}
 	}
 
 	var thinkingVal *bool
@@ -33,17 +47,31 @@ func (p *Pipeline) StreamChat(question, conversationID, taskID string, deepThink
 		thinkingVal = &v
 	}
 
-	req := p.prompt.Build(PromptContext{Question: q})
+	req := p.prompt.Build(PromptContext{
+		Question:  q,
+		History:   history,
+		KbContext: kbCtx,
+	})
 	req.Thinking = thinkingVal
 
-	cb := &pipelineCallback{sender: sender, buf: make([]byte, 0, 1024)}
-	handle, err := p.llm.StreamChat(nil, req, cb)
+	cb := &pipelineCallback{sender: sender}
+	if ctx.Err() != nil {
+		slog.Info("rag pipeline: cancelled before llm call", "err", ctx.Err())
+		sender.SendFinish("", "")
+		sender.SendDone()
+		sender.Close()
+		return
+	}
+	handle, err := p.llm.StreamChat(ctx, req, cb)
 	if err != nil {
 		slog.Error("rag pipeline: stream chat failed", "err", err)
 		cb.OnError(err)
 		return
 	}
 	_ = handle
+	_ = kbCtx
+
+	_ = history
 }
 
 // StopTask implements Service.StopTask.
