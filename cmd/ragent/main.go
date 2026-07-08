@@ -52,9 +52,9 @@ func main() {
 	)
 	defer queueLimiter.Shutdown()
 
-	setupAI(cfg, logger)
+	llmService := setupAI(cfg, logger)
 
-	ragCtl := rag.NewController(&rag.StubService{})
+	ragCtl := rag.NewController(rag.NewPipeline(llmService))
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -122,9 +122,8 @@ func main() {
 	slog.Info("server exited")
 }
 
-// setupAI wires AI infrastructure components and validates configuration.
-// Services are assembled but not yet bound to HTTP handlers (2B).
-func setupAI(cfg *config.Config, logger *slog.Logger) {
+// setupAI wires AI infrastructure components.
+func setupAI(cfg *config.Config, logger *slog.Logger) chat.LLMService {
 	aiCfg := cfg.AI
 
 	// 1. Model layer: HealthStore + Selector + RoutingExecutor
@@ -159,9 +158,9 @@ func setupAI(cfg *config.Config, logger *slog.Logger) {
 		"rerank_providers", len(rerankClients),
 	)
 
-	_ = llmService
 	_ = embService
 	_ = rerankService
+	return llmService
 }
 
 func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
