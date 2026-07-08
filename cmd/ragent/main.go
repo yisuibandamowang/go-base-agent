@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/middleware"
@@ -53,6 +54,8 @@ func main() {
 
 	setupAI(cfg, logger)
 
+	ragCtl := rag.NewController(&rag.StubService{})
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(
@@ -80,6 +83,13 @@ func main() {
 				c.JSON(http.StatusOK, convention.Failure("A000001", "队列超时"))
 			}
 		})
+	}
+
+	// RAG v3 chat endpoints
+	ragGroup := r.Group("/rag/v3")
+	{
+		ragGroup.GET("/chat", ragCtl.Chat)
+		ragGroup.POST("/stop", ragCtl.Stop)
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
