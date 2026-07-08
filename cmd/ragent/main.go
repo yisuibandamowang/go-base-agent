@@ -13,6 +13,7 @@ import (
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/framework/middleware"
 	"go-base-agent/internal/framework/ratelimit"
 	"go-base-agent/internal/infra/chat"
@@ -31,6 +32,11 @@ func main() {
 	if err != nil {
 		slog.Error("failed to load config", "err", err)
 		os.Exit(1)
+	}
+
+	gormDB, err := db.NewDB(cfg.Database)
+	if err != nil {
+		slog.Warn("database not available, starting without DB", "err", err)
 	}
 
 	rdb := cfg.Redis.NewClient()
@@ -67,6 +73,7 @@ func main() {
 		middleware.Recover(),
 		middleware.TraceID(),
 		middleware.RequestLog(),
+		middleware.DB(gormDB),
 	)
 
 	api := r.Group("/api/ragent")
@@ -123,6 +130,11 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("server forced to shutdown", "err", err)
+	}
+	if gormDB != nil {
+		if err := db.Close(gormDB); err != nil {
+			slog.Error("failed to close database", "err", err)
+		}
 	}
 	slog.Info("server exited")
 }
