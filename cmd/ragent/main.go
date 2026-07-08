@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"go-base-agent/internal/biz/knowledge/handler"
+	"go-base-agent/internal/biz/knowledge/repo"
+	"go-base-agent/internal/biz/knowledge/service"
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
@@ -60,6 +63,10 @@ func main() {
 
 	llmService := setupAI(cfg, logger)
 
+	kbRepo := repo.NewKnowledgeBaseRepo(gormDB)
+	kbSvc := service.NewKnowledgeBaseService(kbRepo)
+	kbHandler := handler.NewKnowledgeBaseHandler(kbSvc)
+
 	ragCtl := rag.NewController(rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
 		&rag.NoopRewriter{},
@@ -95,6 +102,17 @@ func main() {
 				c.JSON(http.StatusOK, convention.Failure("A000001", "队列超时"))
 			}
 		})
+
+		// Knowledge base CRUD
+		kb := api.Group("/knowledge-base")
+		{
+			kb.POST("", kbHandler.Create)
+			kb.GET("", kbHandler.List)
+			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
+			kb.GET("/:id", kbHandler.Get)
+			kb.PUT("/:id", kbHandler.Update)
+			kb.DELETE("/:id", kbHandler.Delete)
+		}
 	}
 
 	// RAG v3 chat endpoints
