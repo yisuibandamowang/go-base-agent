@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -16,12 +17,13 @@ import (
 
 // DocumentHandler 文档管理 HTTP 处理层。
 type DocumentHandler struct {
-	svc *service.DocumentService
+	svc       *service.DocumentService
+	fileStore *FileStore
 }
 
 // NewDocumentHandler 创建 DocumentHandler。
-func NewDocumentHandler(svc *service.DocumentService) *DocumentHandler {
-	return &DocumentHandler{svc: svc}
+func NewDocumentHandler(svc *service.DocumentService, fs *FileStore) *DocumentHandler {
+	return &DocumentHandler{svc: svc, fileStore: fs}
 }
 
 // Upload POST /knowledge-base/:id/docs/upload
@@ -99,6 +101,13 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
+
+	// Save file content for later retrieval
+	if file != nil {
+		data, _ := io.ReadAll(file)
+		h.fileStore.Put(resp.ID, header.Filename, data)
+	}
+
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
@@ -278,4 +287,21 @@ func (h *DocumentHandler) Preview(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, convention.Success(content))
+}
+
+// File GET /knowledge-base/docs/:docId/file
+func (h *DocumentHandler) File(c *gin.Context) {
+	docID := c.Param("docId")
+	f, ok := h.fileStore.Get(docID)
+	if ok {
+		c.Data(http.StatusOK, "application/octet-stream", f.Data)
+		return
+	}
+	// Fallback: return chunk content as text
+	content, err := h.svc.PreviewDocument(c.Request.Context(), docID)
+	if err != nil {
+		c.String(http.StatusOK, "")
+		return
+	}
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(content))
 }

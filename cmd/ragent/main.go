@@ -86,7 +86,8 @@ func main() {
 	docRepo := knowledgeRepo.NewKnowledgeDocumentRepo(gormDB)
 	chunkRepo := knowledgeRepo.NewKnowledgeChunkRepo(gormDB)
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo)
-	docHandler := knowledgeHandler.NewDocumentHandler(docSvc)
+	fileStore := knowledgeHandler.NewFileStore()
+	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 
 	convRepo := conversationRepo.NewConversationRepo(gormDB)
 	msgRepo := conversationRepo.NewMessageRepo(gormDB)
@@ -257,7 +258,7 @@ func main() {
 			kb.DELETE("/docs/:docId", docHandler.DeleteDoc)
 			kb.PATCH("/docs/:docId/enable", docHandler.ToggleDoc)
 			kb.GET("/docs/:docId/preview", docHandler.Preview)
-			kb.GET("/docs/:docId/file", stub("file"))
+			kb.GET("/docs/:docId/file", docHandler.File)
 
 			kb.POST("", kbHandler.Create)
 			kb.GET("", kbHandler.List)
