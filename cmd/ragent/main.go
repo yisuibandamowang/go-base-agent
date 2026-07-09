@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	adminHandler "go-base-agent/internal/biz/admin/handler"
+	adminRepo "go-base-agent/internal/biz/admin/repo"
+	adminService "go-base-agent/internal/biz/admin/service"
 	conversationHandler "go-base-agent/internal/biz/conversation/handler"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
@@ -99,6 +102,11 @@ func main() {
 	intentSvc := intentService.NewIntentService(intentTreeRepo, termMappingRepo, gormDB)
 	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
 
+	adminRepoObj := adminRepo.NewAdminRepo(gormDB)
+	sampleQRepo := adminRepo.NewSampleQuestionRepo(gormDB)
+	adminSvc := adminService.NewAdminService(adminRepoObj, sampleQRepo, gormDB)
+	adminH := adminHandler.NewAdminHandler(adminSvc)
+
 	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
 	llmRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
@@ -173,6 +181,23 @@ func main() {
 			it.POST("/term-mappings", intentTreeHandler.CreateTermMapping)
 			it.PUT("/term-mappings/:id", intentTreeHandler.UpdateTermMapping)
 			it.DELETE("/term-mappings/:id", intentTreeHandler.DeleteTermMapping)
+		}
+
+		admin := api.Group("/admin")
+		{
+			admin.GET("/dashboard", adminH.Dashboard)
+			admin.GET("/traces", adminH.ListTraceRuns)
+			admin.GET("/traces/:traceId", adminH.TraceDetail)
+
+			admin.GET("/sample-questions", adminH.ListSampleQuestions)
+			admin.POST("/sample-questions", adminH.CreateSampleQuestion)
+			admin.PUT("/sample-questions/:id", adminH.UpdateSampleQuestion)
+			admin.DELETE("/sample-questions/:id", adminH.DeleteSampleQuestion)
+
+			admin.GET("/users", adminH.ListUsers)
+			admin.POST("/users", adminH.CreateUser)
+			admin.PUT("/users/:id", adminH.UpdateUser)
+			admin.DELETE("/users/:id", adminH.DeleteUser)
 		}
 
 		kb := api.Group("/knowledge-base")
