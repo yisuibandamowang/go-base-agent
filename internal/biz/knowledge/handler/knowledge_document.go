@@ -268,3 +268,14 @@ func (h *DocumentHandler) CreateChunkStub(c *gin.Context) {
 		"message": "create chunk stub",
 	}))
 }
+
+// Preview GET /knowledge-base/docs/:docId/preview
+func (h *DocumentHandler) Preview(c *gin.Context) {
+	docID := c.Param("docId")
+	content, err := h.svc.PreviewDocument(c.Request.Context(), docID)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(content))
+}

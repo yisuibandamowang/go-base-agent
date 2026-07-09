@@ -256,7 +256,7 @@ func main() {
 			kb.PUT("/docs/:docId", docHandler.UpdateDoc)
 			kb.DELETE("/docs/:docId", docHandler.DeleteDoc)
 			kb.PATCH("/docs/:docId/enable", docHandler.ToggleDoc)
-			kb.GET("/docs/:docId/preview", stub("preview"))
+			kb.GET("/docs/:docId/preview", docHandler.Preview)
 			kb.GET("/docs/:docId/file", stub("file"))
 
 			kb.POST("", kbHandler.Create)

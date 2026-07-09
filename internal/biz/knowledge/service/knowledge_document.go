@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/knowledge/dto"
@@ -230,4 +231,17 @@ func (s *DocumentService) chunkToResp(c *model.KnowledgeChunk) *dto.ChunkResp {
 		CreateTime:  c.CreateTime.Format(time.RFC3339),
 		UpdateTime:  c.UpdateTime.Format(time.RFC3339),
 	}
+}
+
+// PreviewDocument returns the full text of a document by concatenating all its chunks.
+func (s *DocumentService) PreviewDocument(ctx context.Context, docID string) (string, error) {
+	chunks, _, err := s.chunkRepo.ListByDoc(ctx, docID, 1, 500)
+	if err != nil {
+		return "", fmt.Errorf("查询分块失败: %w", err)
+	}
+	var sb strings.Builder
+	for _, c := range chunks {
+		sb.WriteString(c.Content)
+	}
+	return sb.String(), nil
 }
