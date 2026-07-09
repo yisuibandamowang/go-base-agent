@@ -2,7 +2,10 @@ package handler
 
 import (
 	"fmt"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/service"
@@ -24,11 +27,73 @@ func NewDocumentHandler(svc *service.DocumentService) *DocumentHandler {
 // Upload POST /knowledge-base/:id/docs/upload
 func (h *DocumentHandler) Upload(c *gin.Context) {
 	kbID := c.Param("id")
-	var req dto.CreateDocumentReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
+
+	// Parse multipart form (max 50MB)
+	if err := c.Request.ParseMultipartForm(50 << 20); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("解析上传表单失败: %v", err)))
 		return
 	}
+
+	form := c.Request.MultipartForm
+	var req dto.CreateDocumentReq
+	var file multipart.File
+	var header *multipart.FileHeader
+
+	// File upload
+	if files := form.File["file"]; len(files) > 0 {
+		header = files[0]
+		f, err := header.Open()
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("读取文件失败: %v", err)))
+			return
+		}
+		file = f
+		defer file.Close()
+		req.DocName = header.Filename
+		req.FileSize = header.Size
+		req.FileType = strings.TrimPrefix(filepath.Ext(header.Filename), ".")
+		req.FileURL = fmt.Sprintf("upload://%s", header.Filename)
+	}
+
+	// Source type (file or url)
+	if vals, ok := form.Value["sourceType"]; ok && len(vals) > 0 {
+		req.SourceType = vals[0]
+	}
+
+	// Source location for URL type
+	if vals, ok := form.Value["sourceLocation"]; ok && len(vals) > 0 {
+		req.FileURL = vals[0]
+		if req.DocName == "" {
+			req.DocName = vals[0]
+		}
+	}
+
+	// Process mode & chunk strategy
+	if vals, ok := form.Value["processMode"]; ok && len(vals) > 0 {
+		if vals[0] == "pipeline" {
+			if pvals, ok := form.Value["pipelineId"]; ok && len(pvals) > 0 {
+				req.ChunkStrategy = "pipeline"
+				req.ChunkConfig = fmt.Sprintf(`{"pipelineId":"%s"}`, pvals[0])
+			}
+		}
+	}
+	if vals, ok := form.Value["chunkStrategy"]; ok && len(vals) > 0 {
+		req.ChunkStrategy = vals[0]
+	}
+	if vals, ok := form.Value["chunkConfig"]; ok && len(vals) > 0 {
+		req.ChunkConfig = vals[0]
+	}
+
+	if req.DocName == "" {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "缺少文件名"))
+		return
+	}
+	if req.FileType == "" {
+		req.FileType = "unknown"
+	}
+
+	_ = file // processed in pipeline
+
 	resp, err := h.svc.CreateDocument(c.Request.Context(), kbID, req, userID(c))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
