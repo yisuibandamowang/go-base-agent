@@ -21,9 +21,9 @@ func NewDocumentHandler(svc *service.DocumentService) *DocumentHandler {
 	return &DocumentHandler{svc: svc}
 }
 
-// Upload POST /knowledge-base/:kbId/docs/upload
+// Upload POST /knowledge-base/:id/docs/upload
 func (h *DocumentHandler) Upload(c *gin.Context) {
-	kbID := c.Param("kbId")
+	kbID := c.Param("id")
 	var req dto.CreateDocumentReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
@@ -37,9 +37,9 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
-// ListDocs GET /knowledge-base/:kbId/docs
+// ListDocs GET /knowledge-base/:id/docs
 func (h *DocumentHandler) ListDocs(c *gin.Context) {
-	kbID := c.Param("kbId")
+	kbID := c.Param("id")
 	page, size := pagination(c)
 	records, total, err := h.svc.ListDocumentsByKB(c.Request.Context(), kbID, page, size)
 	if err != nil {

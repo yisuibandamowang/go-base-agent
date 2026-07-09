@@ -204,8 +204,8 @@ func main() {
 		{
 			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
 
-			kb.POST("/:kbId/docs/upload", docHandler.Upload)
-			kb.GET("/:kbId/docs", docHandler.ListDocs)
+			kb.POST("/:id/docs/upload", docHandler.Upload)
+			kb.GET("/:id/docs", docHandler.ListDocs)
 			kb.GET("/docs/search", docHandler.SearchDocs)
 			kb.GET("/docs/:docId/chunk-logs", docHandler.ChunkLogs)
 			kb.GET("/docs/:docId/chunks", docHandler.ListChunks)
