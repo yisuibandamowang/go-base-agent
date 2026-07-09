@@ -182,8 +182,11 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 		return 0, 0, 0, nil, fmt.Errorf("文件内容为空")
 	}
 
-	// 2. 简单文本提取（Go 实现：直接转 string）
-	text := string(fileBytes)
+	// 2. 简单文本提取（Go 实现：直接转 string，过滤 null 字节）
+	text := sanitizeText(string(fileBytes))
+	if text == "" {
+		return 0, 0, 0, nil, fmt.Errorf("文件无有效文本内容")
+	}
 	extractDuration := time.Since(extractStart).Milliseconds()
 
 	// 3. 分块处理
@@ -529,4 +532,19 @@ func (s *DocumentService) chunkToResp(c *model.KnowledgeChunk) *dto.ChunkResp {
 		CreateTime:  c.CreateTime.Format(time.RFC3339),
 		UpdateTime:  c.UpdateTime.Format(time.RFC3339),
 	}
+}
+
+// sanitizeText removes null bytes and non-printable characters from text content.
+func sanitizeText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == 0 {
+			continue // skip null bytes
+		}
+		if r == '\t' || r == '\n' || r == '\r' || (r >= ' ' && r <= '~') || r > 127 {
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
