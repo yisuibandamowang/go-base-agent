@@ -13,6 +13,9 @@ import (
 	conversationHandler "go-base-agent/internal/biz/conversation/handler"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
+	intentHandler "go-base-agent/internal/biz/intent_tree/handler"
+	intentRepo "go-base-agent/internal/biz/intent_tree/repo"
+	intentService "go-base-agent/internal/biz/intent_tree/service"
 	knowledgeHandler "go-base-agent/internal/biz/knowledge/handler"
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
 	knowledgeService "go-base-agent/internal/biz/knowledge/service"
@@ -91,6 +94,11 @@ func main() {
 	dbMemStore := conversationService.NewDBMemoryStore(gormDB, convRepo, msgRepo)
 	memSvc := rag.NewDefaultMemoryService(dbMemStore, cfg.RAG.Memory.HistoryKeepTurns)
 
+	intentTreeRepo := intentRepo.NewIntentRepo(gormDB)
+	termMappingRepo := intentRepo.NewTermMappingRepo(gormDB)
+	intentSvc := intentService.NewIntentService(intentTreeRepo, termMappingRepo, gormDB)
+	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
+
 	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
 	llmRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
@@ -149,6 +157,22 @@ func main() {
 			conv.PUT("/:conversationId/title", convHandler.UpdateTitle)
 			conv.DELETE("/:conversationId", convHandler.Delete)
 			conv.POST("/feedback", convHandler.SubmitFeedback)
+		}
+
+		it := api.Group("/intent-tree")
+		{
+			it.GET("/tree", intentTreeHandler.GetTree)
+			it.GET("/nodes", intentTreeHandler.ListNodes)
+			it.POST("/nodes", intentTreeHandler.CreateNode)
+			it.GET("/nodes/:id", intentTreeHandler.GetNode)
+			it.PUT("/nodes/:id", intentTreeHandler.UpdateNode)
+			it.DELETE("/nodes/:id", intentTreeHandler.DeleteNode)
+			it.PATCH("/nodes/:id/enable", intentTreeHandler.ToggleNode)
+
+			it.GET("/term-mappings", intentTreeHandler.ListTermMappings)
+			it.POST("/term-mappings", intentTreeHandler.CreateTermMapping)
+			it.PUT("/term-mappings/:id", intentTreeHandler.UpdateTermMapping)
+			it.DELETE("/term-mappings/:id", intentTreeHandler.DeleteTermMapping)
 		}
 
 		kb := api.Group("/knowledge-base")
