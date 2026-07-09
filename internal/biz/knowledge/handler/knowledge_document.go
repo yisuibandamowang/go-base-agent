@@ -294,14 +294,41 @@ func (h *DocumentHandler) File(c *gin.Context) {
 	docID := c.Param("docId")
 	f, ok := h.fileStore.Get(docID)
 	if ok {
-		c.Data(http.StatusOK, "application/octet-stream", f.Data)
+		contentType := detectMIME(f.Name)
+		c.Data(http.StatusOK, contentType, f.Data)
 		return
 	}
-	// Fallback: return chunk content as text
+	// Fallback: return chunk content as inline text
 	content, err := h.svc.PreviewDocument(c.Request.Context(), docID)
 	if err != nil {
 		c.String(http.StatusOK, "")
 		return
 	}
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(content))
+}
+
+func detectMIME(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".pdf":
+		return "application/pdf"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".md", ".markdown":
+		return "text/markdown; charset=utf-8"
+	case ".txt", ".csv", ".json":
+		return "text/plain; charset=utf-8"
+	default:
+		return "text/plain; charset=utf-8"
+	}
 }
