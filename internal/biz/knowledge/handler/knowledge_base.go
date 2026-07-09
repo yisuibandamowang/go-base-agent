@@ -87,10 +87,10 @@ func (h *KnowledgeBaseHandler) Delete(c *gin.Context) {
 
 // ChunkStrategies GET /knowledge-base/chunk-strategies
 func (h *KnowledgeBaseHandler) ChunkStrategies(c *gin.Context) {
-	strategies := []map[string]string{
-		{"code": "fixed_size", "name": "固定大小分块"},
-		{"code": "paragraph", "name": "段落分块"},
-		{"code": "semantic", "name": "语义分块（Markdown标题）"},
+	strategies := []map[string]interface{}{
+		{"value": "fixed_size", "label": "固定大小分块", "defaultConfig": map[string]int{"size": 500, "overlap": 50}},
+		{"value": "paragraph", "label": "段落分块", "defaultConfig": map[string]int{"maxChars": 1000}},
+		{"value": "semantic", "label": "语义分块（Markdown标题）", "defaultConfig": map[string]int{"maxChars": 1500}},
 	}
 	c.JSON(http.StatusOK, convention.Success(strategies))
 }
