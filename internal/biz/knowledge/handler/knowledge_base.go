@@ -104,7 +104,7 @@ func userID(c *gin.Context) string {
 }
 
 func pagination(c *gin.Context) (int, int) {
-	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+	page, err := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	if err != nil || page < 1 {
 		page = 1
 	}

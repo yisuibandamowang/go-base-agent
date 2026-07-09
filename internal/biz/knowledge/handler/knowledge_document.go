@@ -261,7 +261,7 @@ func (h *DocumentHandler) BatchToggleChunks(c *gin.Context) {
 
 // ChunkLogs GET /knowledge-base/docs/:docId/chunk-logs
 func (h *DocumentHandler) ChunkLogs(c *gin.Context) {
-	c.JSON(http.StatusOK, convention.Success[any]([]any{}))
+	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp[any]([]any{}, 0, 1, 10)))
 }
 
 // ChunkDoc POST /knowledge-base/docs/:docId/chunk
