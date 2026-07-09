@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -317,7 +318,7 @@ type AppConfig struct {
 // 加载链：
 //  1. godotenv 加载 .env → os.Getenv()
 //  2. 读取 config.yaml 原始内容
-//  3. os.ExpandEnv 替换 ${VAR} 占位符
+//  3. expandEnv 替换 ${VAR} 和 ${VAR:default} 占位符（对齐 Spring `${VAR:default}` 语法）
 //  4. viper 解析 YAML 并反序列化到 Config 结构体
 //
 // 本地开发：env=配置文件覆盖 .env 中的环境变量。
@@ -330,7 +331,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	expanded := os.ExpandEnv(string(raw))
+	expanded := expandEnv(string(raw))
 
 	v := viper.New()
 	v.SetConfigType("yaml")
@@ -347,4 +348,28 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// expandEnv 替换字符串中的环境变量占位符。
+// 支持两种语法：
+//
+//	${VAR}        — os.ExpandEnv 标准语法
+//	${VAR:default} — 对齐 Spring 语法，若 VAR 未设置则使用 default
+var envPattern = regexp.MustCompile(`\$\{([^}:]+)(?::([^}]*))?\}`)
+
+func expandEnv(s string) string {
+	return envPattern.ReplaceAllStringFunc(s, func(match string) string {
+		parts := envPattern.FindStringSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		name := parts[1]
+		if val, ok := os.LookupEnv(name); ok {
+			return val
+		}
+		if len(parts) >= 3 && parts[2] != "" {
+			return parts[2]
+		}
+		return match
+	})
 }
