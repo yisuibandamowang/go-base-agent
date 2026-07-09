@@ -65,7 +65,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 			kbCtx += c.Text + "\n"
 		}
 	} else {
-		slog.Warn("rag: no chunks found for question", "question", q[:minInt(len(q), 50)])
+		slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
 	}
 
 	var thinkingVal *bool
@@ -96,9 +96,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		return
 	}
 	slog.Info("rag pipeline: llm stream started")
-	_ = handle
-	_ = kbCtx
-	_ = history
+	handle.Wait()
 }
 
 // StopTask implements Service.StopTask.
@@ -135,6 +133,14 @@ func (c *pipelineCallback) OnError(err error) {
 	_ = c.sender.SendFinish("", "")
 	_ = c.sender.SendDone()
 	c.sender.Close()
+}
+
+func runeLimit(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 func minInt(a, b int) int {

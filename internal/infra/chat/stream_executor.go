@@ -97,6 +97,11 @@ func (h *streamHandle) Cancel() {
 	h.cancelled.Store(true)
 }
 
+// Wait blocks until the stream completes or is cancelled.
+func (h *streamHandle) Wait() {
+	<-h.done
+}
+
 type streamError struct {
 	code int
 	body string

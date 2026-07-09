@@ -200,15 +200,24 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 	if err != nil {
 		return extractDuration, chunkDuration, 0, nil, fmt.Errorf("知识库不存在")
 	}
-	_ = kb // embedding model
 	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
 	for _, c := range chunks {
+		vec, embErr := s.emb.EmbedWithModel(ctx, c.Content, kb.EmbeddingModel)
+		if embErr != nil {
+			slog.Warn("chunk task: embed failed", "chunkId", c.ID, "err", embErr)
+			continue
+		}
 		vecChunks = append(vecChunks, rag.VectorChunk{
-			ChunkID: c.ID,
-			DocID:   doc.ID,
-			Content: c.Content,
-			Index:   c.ChunkIndex,
+			ChunkID:       c.ID,
+			DocID:         doc.ID,
+			Content:       c.Content,
+			Embedding:     vec,
+			EmbeddingText: c.Content,
+			Index:         c.ChunkIndex,
 		})
+	}
+	if len(vecChunks) == 0 {
+		return extractDuration, chunkDuration, 0, nil, fmt.Errorf("所有分块向量化失败")
 	}
 	embedDuration := time.Since(embedStart).Milliseconds()
 

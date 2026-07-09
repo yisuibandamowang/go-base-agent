@@ -72,6 +72,7 @@ func (f *fakeChatClient) StreamChat(ctx context.Context, req Request, cb StreamC
 type noopStreamHandle struct{}
 
 func (n *noopStreamHandle) Cancel() {}
+func (n *noopStreamHandle) Wait()   {}
 
 func TestLLMService_Chat_Success(t *testing.T) {
 	svc := testRoutingService([]ChatClient{&fakeChatClient{name: "openai"}})

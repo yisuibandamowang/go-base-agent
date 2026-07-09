@@ -32,6 +32,7 @@ func (f *fakeLLMService) StreamChat(ctx context.Context, req chat.Request, cb ch
 type fakeHandle struct{}
 
 func (f *fakeHandle) Cancel() {}
+func (f *fakeHandle) Wait()   {}
 
 func TestPipeline_StreamChat_Basic(t *testing.T) {
 	done := make(chan struct{})

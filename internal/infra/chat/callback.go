@@ -13,6 +13,7 @@ type StreamCallback interface {
 // Aligns with Java StreamCancellationHandle.
 type StreamHandle interface {
 	Cancel()
+	Wait()
 }
 
 // noopStreamCallback is a no-op implementation for testing.

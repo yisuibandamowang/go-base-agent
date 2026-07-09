@@ -56,5 +56,6 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	}
 
 	messages = append(messages, chat.NewUserMessage(content))
-	return chat.Request{Messages: messages}
+	maxTokens := 1024
+	return chat.Request{Messages: messages, MaxTokens: &maxTokens}
 }
