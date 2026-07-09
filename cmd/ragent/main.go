@@ -150,22 +150,36 @@ func main() {
 			}
 		})
 
-		auth := api.Group("/auth")
-		{
-			auth.POST("/login", authHandler.Login)
-			auth.POST("/logout", authHandler.Logout)
-			auth.GET("/current-user", authHandler.CurrentUser)
-		}
+		// Auth — 同时注册 /auth/* 和 /user/me
+		api.POST("/auth/login", authHandler.Login)
+		api.POST("/auth/logout", authHandler.Logout)
+		api.GET("/auth/current-user", authHandler.CurrentUser)
+		api.GET("/user/me", authHandler.CurrentUser)
 
+		// Users
+		api.GET("/users", adminH.ListUsers)
+		api.POST("/users", adminH.CreateUser)
+		api.PUT("/users/:id", adminH.UpdateUser)
+		api.DELETE("/users/:id", adminH.DeleteUser)
+
+		// Conversations
 		conv := api.Group("/conversations")
 		{
 			conv.GET("", convHandler.List)
 			conv.GET("/:conversationId", convHandler.Get)
 			conv.GET("/:conversationId/messages", convHandler.Messages)
+			conv.PUT("/:conversationId", convHandler.UpdateTitle)
 			conv.PUT("/:conversationId/title", convHandler.UpdateTitle)
 			conv.DELETE("/:conversationId", convHandler.Delete)
 			conv.POST("/feedback", convHandler.SubmitFeedback)
+			conv.POST("/messages/:messageId/feedback", convHandler.SubmitFeedback)
 		}
+
+		// Intent tree — 同时注册 /intent-tree/* 和旧风格路径
+		api.GET("/intent-tree/trees", intentTreeHandler.GetTree)
+		api.POST("/intent-tree", intentTreeHandler.CreateNode)
+		api.PUT("/intent-tree/:id", intentTreeHandler.UpdateNode)
+		api.DELETE("/intent-tree/:id", intentTreeHandler.DeleteNode)
 
 		it := api.Group("/intent-tree")
 		{
@@ -176,30 +190,53 @@ func main() {
 			it.PUT("/nodes/:id", intentTreeHandler.UpdateNode)
 			it.DELETE("/nodes/:id", intentTreeHandler.DeleteNode)
 			it.PATCH("/nodes/:id/enable", intentTreeHandler.ToggleNode)
-
-			it.GET("/term-mappings", intentTreeHandler.ListTermMappings)
-			it.POST("/term-mappings", intentTreeHandler.CreateTermMapping)
-			it.PUT("/term-mappings/:id", intentTreeHandler.UpdateTermMapping)
-			it.DELETE("/term-mappings/:id", intentTreeHandler.DeleteTermMapping)
 		}
 
-		admin := api.Group("/admin")
-		{
-			admin.GET("/dashboard", adminH.Dashboard)
-			admin.GET("/traces", adminH.ListTraceRuns)
-			admin.GET("/traces/:traceId", adminH.TraceDetail)
+		// Term mappings — 同时注册 /mappings/* 和 /intent-tree/term-mappings/*
+		api.GET("/mappings", intentTreeHandler.ListTermMappings)
+		api.POST("/mappings", intentTreeHandler.CreateTermMapping)
+		api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMapping)
+		api.DELETE("/mappings/:id", intentTreeHandler.DeleteTermMapping)
 
-			admin.GET("/sample-questions", adminH.ListSampleQuestions)
-			admin.POST("/sample-questions", adminH.CreateSampleQuestion)
-			admin.PUT("/sample-questions/:id", adminH.UpdateSampleQuestion)
-			admin.DELETE("/sample-questions/:id", adminH.DeleteSampleQuestion)
+		it.GET("/term-mappings", intentTreeHandler.ListTermMappings)
+		it.POST("/term-mappings", intentTreeHandler.CreateTermMapping)
+		it.PUT("/term-mappings/:id", intentTreeHandler.UpdateTermMapping)
+		it.DELETE("/term-mappings/:id", intentTreeHandler.DeleteTermMapping)
 
-			admin.GET("/users", adminH.ListUsers)
-			admin.POST("/users", adminH.CreateUser)
-			admin.PUT("/users/:id", adminH.UpdateUser)
-			admin.DELETE("/users/:id", adminH.DeleteUser)
-		}
+		// Admin — 同时注册 /admin/* 和 /rag/* 兼容路径
+		api.GET("/admin/dashboard/overview", adminH.Dashboard)
+		api.GET("/admin/dashboard", adminH.Dashboard)
+		api.GET("/admin/dashboard/performance", stub("performance"))
+		api.GET("/admin/dashboard/trends", stub("trends"))
 
+		api.GET("/admin/traces", adminH.ListTraceRuns)
+		api.GET("/admin/traces/:traceId", adminH.TraceDetail)
+
+		api.GET("/rag/traces/runs", adminH.ListTraceRuns)
+		api.GET("/rag/traces/runs/:id", adminH.TraceDetail)
+		api.GET("/rag/traces/runs/:id/nodes", traceNodesStub)
+
+		// Sample questions — /rag/*, /sample-questions, /admin/sample-questions
+		api.GET("/rag/sample-questions", adminH.ListSampleQuestions)
+		api.GET("/sample-questions", adminH.ListSampleQuestions)
+		api.POST("/sample-questions", adminH.CreateSampleQuestion)
+		api.PUT("/sample-questions/:id", adminH.UpdateSampleQuestion)
+		api.DELETE("/sample-questions/:id", adminH.DeleteSampleQuestion)
+
+		api.GET("/admin/sample-questions", adminH.ListSampleQuestions)
+		api.POST("/admin/sample-questions", adminH.CreateSampleQuestion)
+		api.PUT("/admin/sample-questions/:id", adminH.UpdateSampleQuestion)
+		api.DELETE("/admin/sample-questions/:id", adminH.DeleteSampleQuestion)
+
+		api.GET("/admin/users", adminH.ListUsers)
+		api.POST("/admin/users", adminH.CreateUser)
+		api.PUT("/admin/users/:id", adminH.UpdateUser)
+		api.DELETE("/admin/users/:id", adminH.DeleteUser)
+
+		// RAG settings stub
+		api.GET("/rag/settings", ragSettings(cfg))
+
+		// Knowledge base
 		kb := api.Group("/knowledge-base")
 		{
 			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
@@ -209,6 +246,7 @@ func main() {
 			kb.GET("/docs/search", docHandler.SearchDocs)
 			kb.GET("/docs/:docId/chunk-logs", docHandler.ChunkLogs)
 			kb.GET("/docs/:docId/chunks", docHandler.ListChunks)
+			kb.POST("/docs/:docId/chunks", docHandler.CreateChunkStub)
 			kb.PUT("/docs/:docId/chunks/:chunkId", docHandler.UpdateChunk)
 			kb.DELETE("/docs/:docId/chunks/:chunkId", docHandler.DeleteChunk)
 			kb.PATCH("/docs/:docId/chunks/:chunkId/enable", docHandler.ToggleChunk)
@@ -218,6 +256,8 @@ func main() {
 			kb.PUT("/docs/:docId", docHandler.UpdateDoc)
 			kb.DELETE("/docs/:docId", docHandler.DeleteDoc)
 			kb.PATCH("/docs/:docId/enable", docHandler.ToggleDoc)
+			kb.GET("/docs/:docId/preview", stub("preview"))
+			kb.GET("/docs/:docId/file", stub("file"))
 
 			kb.POST("", kbHandler.Create)
 			kb.GET("", kbHandler.List)
@@ -225,6 +265,10 @@ func main() {
 			kb.PUT("/:id", kbHandler.Update)
 			kb.DELETE("/:id", kbHandler.Delete)
 		}
+
+		// Ingestion stubs
+		api.GET("/ingestion/pipelines", stub("pipelines"))
+		api.GET("/ingestion/tasks", stub("tasks"))
 	}
 
 	ragGroup := r.Group("/rag/v3")
@@ -344,4 +388,57 @@ func embeddingDimension(aiCfg config.AIConfig) int {
 		}
 	}
 	return 1536
+}
+
+// stub returns a handler that responds with "not implemented" for stubbed endpoints.
+func stub(name string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, convention.Success(map[string]string{"message": name + " not yet implemented"}))
+	}
+}
+
+func ragSettings(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		embModels := make([]map[string]interface{}, 0)
+		for _, c := range cfg.AI.Embedding.Candidates {
+			embModels = append(embModels, map[string]interface{}{
+				"id":        c.ID,
+				"model":     c.Model,
+				"provider":  c.Provider,
+				"dimension": c.Dimension,
+			})
+		}
+		rerankModels := make([]map[string]interface{}, 0)
+		for _, c := range cfg.AI.Rerank.Candidates {
+			rerankModels = append(rerankModels, map[string]interface{}{
+				"id":       c.ID,
+				"model":    c.Model,
+				"provider": c.Provider,
+			})
+		}
+		c.JSON(http.StatusOK, convention.Success(map[string]interface{}{
+			"upload": map[string]interface{}{
+				"maxFileSize":  "50MB",
+				"allowedTypes": []string{".pdf", ".docx", ".md", ".txt", ".html", ".csv"},
+			},
+			"rag": map[string]interface{}{
+				"queryRewriteEnabled": cfg.RAG.QueryRewrite.Enabled,
+				"deepThinkingEnabled": true,
+			},
+			"ai": map[string]interface{}{
+				"embedding": map[string]interface{}{
+					"defaultModel": cfg.AI.Embedding.DefaultModel,
+					"candidates":   embModels,
+				},
+				"rerank": map[string]interface{}{
+					"defaultModel": cfg.AI.Rerank.DefaultModel,
+					"candidates":   rerankModels,
+				},
+			},
+		}))
+	}
+}
+
+func traceNodesStub(c *gin.Context) {
+	c.JSON(http.StatusOK, convention.Success[any]([]any{}))
 }

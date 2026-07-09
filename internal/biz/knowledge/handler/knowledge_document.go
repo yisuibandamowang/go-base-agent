@@ -196,3 +196,10 @@ func (h *DocumentHandler) ChunkDoc(c *gin.Context) {
 		"message": "文档分块任务已提交",
 	}))
 }
+
+// CreateChunkStub POST /knowledge-base/docs/:docId/chunks (前端兼容路径)
+func (h *DocumentHandler) CreateChunkStub(c *gin.Context) {
+	c.JSON(http.StatusOK, convention.Success(map[string]string{
+		"message": "create chunk stub",
+	}))
+}
