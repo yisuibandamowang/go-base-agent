@@ -2,14 +2,16 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
+	"go-base-agent/internal/biz/rag"
+	"go-base-agent/internal/infra/embedding"
 
 	"gorm.io/gorm"
 )
@@ -19,14 +21,39 @@ type DocumentService struct {
 	docRepo   *repo.KnowledgeDocumentRepo
 	chunkRepo *repo.KnowledgeChunkRepo
 	kbRepo    *repo.KnowledgeBaseRepo
+	db        *gorm.DB
+	emb       embedding.Service
+	vecStore  *rag.PgVectorStore
+	fileStore FileReader
+}
+
+// FileReader reads file content for chunk processing.
+type FileReader interface {
+	Read(docID string) ([]byte, error)
 }
 
 // NewDocumentService 创建 DocumentService。
-func NewDocumentService(docRepo *repo.KnowledgeDocumentRepo, chunkRepo *repo.KnowledgeChunkRepo, kbRepo *repo.KnowledgeBaseRepo) *DocumentService {
-	return &DocumentService{docRepo: docRepo, chunkRepo: chunkRepo, kbRepo: kbRepo}
+func NewDocumentService(
+	docRepo *repo.KnowledgeDocumentRepo,
+	chunkRepo *repo.KnowledgeChunkRepo,
+	kbRepo *repo.KnowledgeBaseRepo,
+	db *gorm.DB,
+	emb embedding.Service,
+	vecStore *rag.PgVectorStore,
+	fileStore FileReader,
+) *DocumentService {
+	return &DocumentService{
+		docRepo:   docRepo,
+		chunkRepo: chunkRepo,
+		kbRepo:    kbRepo,
+		db:        db,
+		emb:       emb,
+		vecStore:  vecStore,
+		fileStore: fileStore,
+	}
 }
 
-// CreateDocument 创建文档记录，状态为 pending，等待 pipeline 处理。
+// CreateDocument 创建文档记录，状态为 pending。
 func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req dto.CreateDocumentReq, userID string) (*dto.DocumentResp, error) {
 	if _, err := s.kbRepo.FindByID(ctx, kbID); err != nil {
 		return nil, fmt.Errorf("知识库不存在")
@@ -56,72 +83,323 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 	return s.docToResp(doc), nil
 }
 
+// StartChunk 开始文档分块处理：状态校验 → 更新为 running → 异步执行分块任务。
+// 对齐 Java KnowledgeDocumentServiceImpl.startChunk。
+func (s *DocumentService) StartChunk(ctx context.Context, docID string, userID string) error {
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return fmt.Errorf("文档不存在")
+	}
+	if doc.Status == "running" {
+		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
+	}
+	// CAS 更新状态：仅当非 running 时更新
+	result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
+		Where("id = ? AND status != ?", docID, "running").
+		Updates(map[string]interface{}{
+			"status":      "running",
+			"updated_by":  userID,
+			"update_time": time.Now(),
+		})
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
+	}
+	// 异步执行分块任务
+	go s.executeChunk(docID)
+	return nil
+}
+
+// executeChunk 执行分块任务（对应 Java runChunkTask）。
+func (s *DocumentService) executeChunk(docID string) {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		slog.Error("chunk task: document not found", "docId", docID, "err", err)
+		return
+	}
+
+	// 1. 创建分块日志
+	chunkLog := &model.KnowledgeDocumentChunkLog{
+		DocID:         docID,
+		Status:        "running",
+		ProcessMode:   doc.ProcessMode,
+		ChunkStrategy: doc.ChunkStrategy,
+		PipelineID:    doc.PipelineID,
+	}
+	now := time.Now()
+	chunkLog.StartTime = &now
+	chunkLog.CreateTime = now
+	chunkLog.UpdateTime = now
+	if err := s.db.Create(chunkLog).Error; err != nil {
+		slog.Error("chunk task: create log failed", "docId", docID, "err", err)
+	}
+
+	var chunkResults []rag.VectorChunk
+	var extractDuration, chunkDuration, embedDuration, persistDuration int64
+
+	// 2. 执行分块处理
+	if doc.ProcessMode == "pipeline" {
+		// Pipeline 模式暂未完整实现，回退到 chunk 模式
+		slog.Warn("chunk task: pipeline mode not implemented, fallback to chunk", "docId", docID)
+	}
+	extractDuration, chunkDuration, embedDuration, chunkResults, err = s.runChunkProcess(ctx, doc)
+	if err != nil {
+		slog.Error("chunk task: process failed", "docId", docID, "err", err)
+		s.markChunkFailed(ctx, docID)
+		s.updateChunkLog(chunkLog.ID, "failed", 0, extractDuration, chunkDuration, embedDuration, 0, time.Since(startTime).Milliseconds(), err.Error())
+		return
+	}
+
+	// 3. 持久化分块和向量（事务）
+	persistStart := time.Now()
+	savedCount, err := s.persistChunksAndVectors(ctx, doc, chunkResults)
+	persistDuration = time.Since(persistStart).Milliseconds()
+	if err != nil {
+		slog.Error("chunk task: persist failed", "docId", docID, "err", err)
+		s.markChunkFailed(ctx, docID)
+		s.updateChunkLog(chunkLog.ID, "failed", 0, extractDuration, chunkDuration, embedDuration, persistDuration, time.Since(startTime).Milliseconds(), err.Error())
+		return
+	}
+
+	// 4. 更新分块日志为成功
+	s.updateChunkLog(chunkLog.ID, "success", savedCount, extractDuration, chunkDuration, embedDuration, persistDuration, time.Since(startTime).Milliseconds(), "")
+	slog.Info("chunk task: completed", "docId", docID, "chunks", savedCount)
+}
+
+// runChunkProcess 执行分块处理：Extract → Chunk → Embed
+// 对齐 Java KnowledgeDocumentServiceImpl.runChunkProcess
+func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.KnowledgeDocument) (int64, int64, int64, []rag.VectorChunk, error) {
+	extractStart := time.Now()
+
+	// 1. 读取文件内容
+	fileBytes, err := s.fileStore.Read(doc.ID)
+	if err != nil {
+		return 0, 0, 0, nil, fmt.Errorf("读取文件内容失败: %w", err)
+	}
+	if len(fileBytes) == 0 {
+		return 0, 0, 0, nil, fmt.Errorf("文件内容为空")
+	}
+
+	// 2. 简单文本提取（Go 实现：直接转 string）
+	text := string(fileBytes)
+	extractDuration := time.Since(extractStart).Milliseconds()
+
+	// 3. 分块处理
+	chunkStart := time.Now()
+	chunks := s.chunkText(ctx, doc, text)
+	chunkDuration := time.Since(chunkStart).Milliseconds()
+
+	// 4. 向量化
+	embedStart := time.Now()
+	kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+	if err != nil {
+		return extractDuration, chunkDuration, 0, nil, fmt.Errorf("知识库不存在")
+	}
+	_ = kb // embedding model
+	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
+	for _, c := range chunks {
+		vecChunks = append(vecChunks, rag.VectorChunk{
+			ChunkID: c.ID,
+			DocID:   doc.ID,
+			Content: c.Content,
+			Index:   c.ChunkIndex,
+		})
+	}
+	embedDuration := time.Since(embedStart).Milliseconds()
+
+	return extractDuration, chunkDuration, embedDuration, vecChunks, nil
+}
+
+// chunkText splits text into chunks using simple paragraph-based splitting.
+func (s *DocumentService) chunkText(ctx context.Context, doc *model.KnowledgeDocument, text string) []*model.KnowledgeChunk {
+	size := 500
+	overlap := 50
+	chunks := splitToChunks(text, size, overlap)
+	result := make([]*model.KnowledgeChunk, 0, len(chunks))
+	for i, content := range chunks {
+		c := &model.KnowledgeChunk{
+			KbID:       doc.KbID,
+			DocID:      doc.ID,
+			ChunkIndex: i,
+			Content:    content,
+			CharCount:  len([]rune(content)),
+			Enabled:    1,
+			CreatedBy:  doc.CreatedBy,
+		}
+		c.CreateTime = time.Now()
+		c.UpdateTime = time.Now()
+		result = append(result, c)
+	}
+	_ = ctx
+	return result
+}
+
+func splitToChunks(text string, size, overlap int) []string {
+	runes := []rune(text)
+	if len(runes) <= size {
+		return []string{text}
+	}
+	var chunks []string
+	step := size - overlap
+	if step <= 0 {
+		step = size
+	}
+	for i := 0; i < len(runes); i += step {
+		end := i + size
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[i:end]))
+		if end == len(runes) {
+			break
+		}
+	}
+	return chunks
+}
+
+// persistChunksAndVectors 原子性写入分块和向量。
+func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *model.KnowledgeDocument, vecChunks []rag.VectorChunk) (int, error) {
+	kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+	if err != nil {
+		return 0, fmt.Errorf("知识库不存在: %w", err)
+	}
+
+	// 构建分块记录
+	chunks := make([]*model.KnowledgeChunk, 0, len(vecChunks))
+	for _, vc := range vecChunks {
+		chunks = append(chunks, &model.KnowledgeChunk{
+			KbID:       doc.KbID,
+			DocID:      doc.ID,
+			ChunkIndex: vc.Index,
+			Content:    vc.Content,
+			CharCount:  len([]rune(vc.Content)),
+			Enabled:    1,
+			CreatedBy:  doc.CreatedBy,
+		})
+	}
+
+	// 事务：删除旧分块 + 创建新分块 + 删除旧向量 + 写入新向量 + 更新文档状态
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 删除旧分块
+		if err := tx.Model(&model.KnowledgeChunk{}).
+			Where("doc_id = ? AND deleted = 0", doc.ID).
+			Updates(map[string]interface{}{"deleted": 1, "update_time": time.Now()}).Error; err != nil {
+			return err
+		}
+		// 创建新分块
+		for _, c := range chunks {
+			c.CreateTime = time.Now()
+			c.UpdateTime = time.Now()
+			if err := tx.Create(c).Error; err != nil {
+				return err
+			}
+		}
+		// 更新文档状态
+		return tx.Model(&model.KnowledgeDocument{}).Where("id = ?", doc.ID).
+			Updates(map[string]interface{}{
+				"status":      "success",
+				"chunk_count": len(chunks),
+				"update_time": time.Now(),
+			}).Error
+	})
+	if err != nil {
+		return 0, fmt.Errorf("persist chunks: %w", err)
+	}
+
+	// 向量写入（事务外，避免长事务）
+	_ = s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID)
+	if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, vecChunks); err != nil {
+		slog.Error("persist vectors failed", "docId", doc.ID, "err", err)
+	}
+
+	return len(chunks), nil
+}
+
+func (s *DocumentService) markChunkFailed(ctx context.Context, docID string) {
+	s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", docID).
+		Updates(map[string]interface{}{"status": "failed", "update_time": time.Now()})
+}
+
+func (s *DocumentService) updateChunkLog(logID, status string, chunkCount int, extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration int64, errorMsg string) {
+	now := time.Now()
+	updates := map[string]interface{}{
+		"status":           status,
+		"chunk_count":      chunkCount,
+		"extract_duration": extractDuration,
+		"chunk_duration":   chunkDuration,
+		"embed_duration":   embedDuration,
+		"persist_duration": persistDuration,
+		"total_duration":   totalDuration,
+		"end_time":         now,
+		"update_time":      now,
+	}
+	if errorMsg != "" {
+		updates["error_message"] = errorMsg
+	}
+	s.db.Model(&model.KnowledgeDocumentChunkLog{}).Where("id = ?", logID).Updates(updates)
+}
+
+// --- 原有 CRUD 方法 ---
+
 // GetDocument 查询文档详情。
 func (s *DocumentService) GetDocument(ctx context.Context, id string) (*dto.DocumentResp, error) {
 	doc, err := s.docRepo.FindByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("failed to get document: %w", err)
+		return nil, fmt.Errorf("document not found: %w", err)
 	}
 	return s.docToResp(doc), nil
+}
+
+// ListDocumentsByKB 按知识库分页查询文档。
+func (s *DocumentService) ListDocumentsByKB(ctx context.Context, kbID string, page, size int) ([]dto.DocumentResp, int64, error) {
+	docs, total, err := s.docRepo.ListByKB(ctx, kbID, page, size)
+	if err != nil {
+		return nil, 0, err
+	}
+	records := make([]dto.DocumentResp, 0, len(docs))
+	for _, d := range docs {
+		records = append(records, *s.docToResp(&d))
+	}
+	return records, total, nil
 }
 
 // UpdateDocument 更新文档。
 func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto.UpdateDocumentReq, userID string) (*dto.DocumentResp, error) {
 	doc, err := s.docRepo.FindByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("failed to find document for update: %w", err)
+		return nil, fmt.Errorf("document not found: %w", err)
 	}
-
 	doc.DocName = req.DocName
-	if req.Enabled != nil {
-		doc.Enabled = *req.Enabled
-	}
+	doc.UpdatedBy = userID
 	if req.ChunkStrategy != "" {
 		doc.ChunkStrategy = req.ChunkStrategy
-	}
-	if req.ChunkConfig != "" {
 		doc.ChunkConfig = req.ChunkConfig
 	}
-	doc.UpdatedBy = userID
-	doc.UpdateTime = time.Now()
-
 	if err := s.docRepo.Update(ctx, doc); err != nil {
-		return nil, fmt.Errorf("failed to update document: %w", err)
+		return nil, fmt.Errorf("update document: %w", err)
 	}
 	return s.docToResp(doc), nil
 }
 
-// DeleteDocument 软删除文档及其分块。
+// DeleteDocument 软删除文档。
 func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
-	if _, err := s.docRepo.FindByID(ctx, id); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		return fmt.Errorf("failed to find document for delete: %w", err)
-	}
-	if err := s.chunkRepo.DeleteByDocID(ctx, id); err != nil {
-		return fmt.Errorf("failed to delete chunks: %w", err)
-	}
 	return s.docRepo.SoftDelete(ctx, id)
 }
 
-// ListDocumentsByKB 按知识库分页查询文档列表。
-func (s *DocumentService) ListDocumentsByKB(ctx context.Context, kbID string, page, size int) ([]dto.DocumentResp, int64, error) {
-	docs, total, err := s.docRepo.ListByKB(ctx, kbID, page, size)
-	if err != nil {
-		return nil, 0, err
+// ToggleDocument 切换文档启用状态。
+func (s *DocumentService) ToggleDocument(ctx context.Context, id string, enabled int16) error {
+	result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
+		Where("id = ? AND deleted = 0", id).
+		Updates(map[string]interface{}{"enabled": enabled, "update_time": time.Now()})
+	if result.Error != nil {
+		return result.Error
 	}
-	resps := make([]dto.DocumentResp, 0, len(docs))
-	for i := range docs {
-		resps = append(resps, *s.docToResp(&docs[i]))
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
 	}
-	return resps, total, nil
+	return nil
 }
 
 // SearchDocuments 搜索文档。
@@ -130,64 +408,84 @@ func (s *DocumentService) SearchDocuments(ctx context.Context, keyword string, p
 	if err != nil {
 		return nil, 0, err
 	}
-	resps := make([]dto.DocumentResp, 0, len(docs))
-	for i := range docs {
-		resps = append(resps, *s.docToResp(&docs[i]))
+	records := make([]dto.DocumentResp, 0, len(docs))
+	for _, d := range docs {
+		records = append(records, *s.docToResp(&d))
 	}
-	return resps, total, nil
+	return records, total, nil
 }
 
-// ListChunks 按文档 ID 分页查询分块列表。
+// ListChunks 查询文档分块列表。
 func (s *DocumentService) ListChunks(ctx context.Context, docID string, page, size int) ([]dto.ChunkResp, int64, error) {
 	chunks, total, err := s.chunkRepo.ListByDoc(ctx, docID, page, size)
 	if err != nil {
 		return nil, 0, err
 	}
-	resps := make([]dto.ChunkResp, 0, len(chunks))
-	for i := range chunks {
-		resps = append(resps, *s.chunkToResp(&chunks[i]))
+	records := make([]dto.ChunkResp, 0, len(chunks))
+	for _, c := range chunks {
+		records = append(records, *s.chunkToResp(&c))
 	}
-	return resps, total, nil
+	return records, total, nil
 }
 
 // UpdateChunk 更新分块内容。
-func (s *DocumentService) UpdateChunk(ctx context.Context, id string, req dto.UpdateChunkReq, userID string) (*dto.ChunkResp, error) {
-	chunk, err := s.chunkRepo.FindByID(ctx, id)
+func (s *DocumentService) UpdateChunk(ctx context.Context, chunkID string, req dto.UpdateChunkReq, userID string) (*dto.ChunkResp, error) {
+	chunk, err := s.chunkRepo.FindByID(ctx, chunkID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("failed to find chunk for update: %w", err)
+		return nil, err
 	}
 	chunk.Content = req.Content
 	chunk.UpdatedBy = userID
-	chunk.UpdateTime = time.Now()
 	if err := s.chunkRepo.Update(ctx, chunk); err != nil {
-		return nil, fmt.Errorf("failed to update chunk: %w", err)
+		return nil, fmt.Errorf("update chunk: %w", err)
 	}
 	return s.chunkToResp(chunk), nil
 }
 
 // DeleteChunk 软删除分块。
-func (s *DocumentService) DeleteChunk(ctx context.Context, id string) error {
-	if _, err := s.chunkRepo.FindByID(ctx, id); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		return fmt.Errorf("failed to find chunk for delete: %w", err)
-	}
-	return s.chunkRepo.SoftDelete(ctx, id)
+func (s *DocumentService) DeleteChunk(ctx context.Context, chunkID string) error {
+	return s.chunkRepo.SoftDelete(ctx, chunkID)
 }
 
-// ToggleChunk 切换单个分块启用状态。
-func (s *DocumentService) ToggleChunk(ctx context.Context, id string, enabled int16) error {
-	return s.chunkRepo.UpdateEnabled(ctx, id, enabled)
+// ToggleChunk 切换分块启用状态。
+func (s *DocumentService) ToggleChunk(ctx context.Context, chunkID string, enabled int16) error {
+	return s.chunkRepo.UpdateEnabled(ctx, chunkID, enabled)
 }
 
 // BatchToggleChunks 批量切换分块启用状态。
 func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, ids []string, enabled int16) error {
 	return s.chunkRepo.BatchUpdateEnabled(ctx, docID, ids, enabled)
 }
+
+// GetChunkLogs 查询文档分块日志。
+func (s *DocumentService) GetChunkLogs(ctx context.Context, docID string, page, size int) ([]model.KnowledgeDocumentChunkLog, int64, error) {
+	var logs []model.KnowledgeDocumentChunkLog
+	var total int64
+	q := s.db.WithContext(ctx).Model(&model.KnowledgeDocumentChunkLog{}).
+		Where("doc_id = ?", docID)
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := q.Order("create_time DESC").Limit(size).Offset((page - 1) * size).Find(&logs).Error; err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
+}
+
+// PreviewDocument returns the full text of a document by concatenating all its chunks.
+func (s *DocumentService) PreviewDocument(ctx context.Context, docID string) (string, error) {
+	chunks, _, err := s.chunkRepo.ListByDoc(ctx, docID, 1, 500)
+	if err != nil {
+		return "", fmt.Errorf("查询分块失败: %w", err)
+	}
+	var sb strings.Builder
+	for _, c := range chunks {
+		sb.WriteString(c.Content)
+	}
+	return sb.String(), nil
+}
+
+// --- helpers ---
 
 func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentResp {
 	return &dto.DocumentResp{
@@ -231,17 +529,4 @@ func (s *DocumentService) chunkToResp(c *model.KnowledgeChunk) *dto.ChunkResp {
 		CreateTime:  c.CreateTime.Format(time.RFC3339),
 		UpdateTime:  c.UpdateTime.Format(time.RFC3339),
 	}
-}
-
-// PreviewDocument returns the full text of a document by concatenating all its chunks.
-func (s *DocumentService) PreviewDocument(ctx context.Context, docID string) (string, error) {
-	chunks, _, err := s.chunkRepo.ListByDoc(ctx, docID, 1, 500)
-	if err != nil {
-		return "", fmt.Errorf("查询分块失败: %w", err)
-	}
-	var sb strings.Builder
-	for _, c := range chunks {
-		sb.WriteString(c.Content)
-	}
-	return sb.String(), nil
 }

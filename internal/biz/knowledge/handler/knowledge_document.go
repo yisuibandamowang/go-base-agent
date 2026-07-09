@@ -261,11 +261,23 @@ func (h *DocumentHandler) BatchToggleChunks(c *gin.Context) {
 
 // ChunkLogs GET /knowledge-base/docs/:docId/chunk-logs
 func (h *DocumentHandler) ChunkLogs(c *gin.Context) {
-	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp[any]([]any{}, 0, 1, 10)))
+	docID := c.Param("docId")
+	page, size := pagination(c)
+	logs, total, err := h.svc.GetChunkLogs(c.Request.Context(), docID, page, size)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(logs, total, page, size)))
 }
 
 // ChunkDoc POST /knowledge-base/docs/:docId/chunk
 func (h *DocumentHandler) ChunkDoc(c *gin.Context) {
+	docID := c.Param("docId")
+	if err := h.svc.StartChunk(c.Request.Context(), docID, userID(c)); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
 	c.JSON(http.StatusOK, convention.Success(map[string]string{
 		"message": "文档分块任务已提交",
 	}))

@@ -35,3 +35,16 @@ func (s *FileStore) Get(docID string) (*storedFile, bool) {
 	f, ok := s.files[docID]
 	return f, ok
 }
+
+// Read implements service.FileReader for chunk processing.
+func (s *FileStore) Read(docID string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	f, ok := s.files[docID]
+	if !ok {
+		return nil, nil
+	}
+	data := make([]byte, len(f.Data))
+	copy(data, f.Data)
+	return data, nil
+}
