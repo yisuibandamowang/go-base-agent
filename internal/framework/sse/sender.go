@@ -25,7 +25,7 @@ func NewSender(c *gin.Context) *Sender {
 	return &Sender{c: c}
 }
 
-func (s *Sender) Send(event, data string) error {
+func (s *Sender) Send(event, data string) (err error) {
 	if s.closed.Load() {
 		return fmt.Errorf("sse: connection already closed")
 	}
@@ -33,7 +33,14 @@ func (s *Sender) Send(event, data string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := fmt.Fprintf(s.c.Writer, "event: %s\ndata: %s\n\n", event, data)
+	defer func() {
+		if r := recover(); r != nil {
+			s.closed.Store(true)
+			err = fmt.Errorf("sse: send panic (client disconnected): %v", r)
+		}
+	}()
+
+	_, err = fmt.Fprintf(s.c.Writer, "event: %s\ndata: %s\n\n", event, data)
 	if err != nil {
 		return fmt.Errorf("sse: write event %q: %w", event, err)
 	}

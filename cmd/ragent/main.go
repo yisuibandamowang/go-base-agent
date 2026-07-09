@@ -277,6 +277,12 @@ func main() {
 		ragGroup.GET("/chat", ragCtl.Chat)
 		ragGroup.POST("/stop", ragCtl.Stop)
 	}
+	// Also register under /api/ragent prefix for frontend compatibility
+	apiRag := api.Group("/rag/v3")
+	{
+		apiRag.GET("/chat", ragCtl.Chat)
+		apiRag.POST("/stop", ragCtl.Stop)
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{

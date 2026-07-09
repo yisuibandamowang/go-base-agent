@@ -101,7 +101,8 @@ func (c *pipelineCallback) OnComplete() {
 
 func (c *pipelineCallback) OnError(err error) {
 	slog.Error("rag pipeline: llm error", "err", err)
-	c.sender.SendFinish("", "")
-	c.sender.SendDone()
+	// Ignore send errors — client may have already disconnected
+	_ = c.sender.SendFinish("", "")
+	_ = c.sender.SendDone()
 	c.sender.Close()
 }
