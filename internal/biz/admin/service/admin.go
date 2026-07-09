@@ -263,3 +263,78 @@ func toSampleQResp(sq *adminModel.SampleQuestion) *adminDto.SampleQuestionResp {
 		UpdateTime:  sq.UpdateTime,
 	}
 }
+
+// GetPerformance returns RAG performance metrics from trace runs.
+func (s *AdminService) GetPerformance(ctx context.Context) (*adminDto.PerformanceResp, error) {
+	type row struct {
+		Count      int64 `gorm:"column:cnt"`
+		AvgLatency int64 `gorm:"column:avg_latency"`
+	}
+
+	// Success count + avg latency
+	var success row
+	s.db.WithContext(ctx).Raw(
+		`SELECT count(*) as cnt, coalesce(avg(duration_ms),0)::bigint as avg_latency
+		 FROM t_rag_trace_run WHERE status='SUCCESS' AND deleted=0`,
+	).Scan(&success)
+
+	// Error count
+	var errCount int64
+	s.db.WithContext(ctx).Raw(
+		`SELECT count(*) FROM t_rag_trace_run WHERE status='ERROR' AND deleted=0`,
+	).Scan(&errCount)
+
+	total := success.Count + errCount
+	var successRate, errorRate float64
+	if total > 0 {
+		successRate = float64(success.Count) / float64(total) * 100
+		errorRate = float64(errCount) / float64(total) * 100
+	}
+
+	return &adminDto.PerformanceResp{
+		AvgLatencyMs: success.AvgLatency,
+		SuccessRate:  successRate,
+		ErrorRate:    errorRate,
+		TotalTraces:  total,
+	}, nil
+}
+
+// GetTrends returns simple time-series data from the last 7 days.
+func (s *AdminService) GetTrends(ctx context.Context) (*adminDto.TrendsResp, error) {
+	type row struct {
+		Day   string `gorm:"column:day"`
+		Count int64  `gorm:"column:cnt"`
+	}
+
+	// Messages by day
+	var msgRows []row
+	s.db.WithContext(ctx).Raw(
+		`SELECT to_char(create_time,'YYYY-MM-DD') as day, count(*) as cnt
+		 FROM t_message WHERE deleted=0 AND create_time >= now() - interval '7 days'
+		 GROUP BY day ORDER BY day`,
+	).Scan(&msgRows)
+
+	// Conversations by day
+	var convRows []row
+	s.db.WithContext(ctx).Raw(
+		`SELECT to_char(create_time,'YYYY-MM-DD') as day, count(*) as cnt
+		 FROM t_conversation WHERE deleted=0 AND create_time >= now() - interval '7 days'
+		 GROUP BY day ORDER BY day`,
+	).Scan(&convRows)
+
+	msgPoints := make([]adminDto.TrendPoint, 0)
+	for _, r := range msgRows {
+		msgPoints = append(msgPoints, adminDto.TrendPoint{Ts: r.Day, Value: float64(r.Count)})
+	}
+	convPoints := make([]adminDto.TrendPoint, 0)
+	for _, r := range convRows {
+		convPoints = append(convPoints, adminDto.TrendPoint{Ts: r.Day, Value: float64(r.Count)})
+	}
+
+	return &adminDto.TrendsResp{
+		Series: []adminDto.TrendSeries{
+			{Name: "消息数", Data: msgPoints},
+			{Name: "会话数", Data: convPoints},
+		},
+	}, nil
+}

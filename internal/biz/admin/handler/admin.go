@@ -31,6 +31,26 @@ func (h *AdminHandler) Dashboard(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
+// Performance GET /api/ragent/admin/dashboard/performance
+func (h *AdminHandler) Performance(c *gin.Context) {
+	resp, err := h.svc.GetPerformance(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+// Trends GET /api/ragent/admin/dashboard/trends
+func (h *AdminHandler) Trends(c *gin.Context) {
+	resp, err := h.svc.GetTrends(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
 // --- 链路追踪 ---
 
 // ListTraceRuns GET /api/ragent/admin/traces

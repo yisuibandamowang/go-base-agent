@@ -56,3 +56,25 @@ func (h *AuthHandler) CurrentUser(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
+
+// ChangePassword PUT /api/ragent/user/password
+func (h *AuthHandler) ChangePassword(c *gin.Context) {
+	user := middleware.GetLoginUser(c)
+	if user == nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "未登录"))
+		return
+	}
+	var req struct {
+		OldPassword string `json:"oldPassword"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
+		return
+	}
+	if err := h.svc.ChangePassword(c.Request.Context(), user.UserID, req.OldPassword, req.NewPassword); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
+}

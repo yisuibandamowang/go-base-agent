@@ -99,3 +99,28 @@ type UserResp struct {
 	CreateTime time.Time `json:"createTime"`
 	UpdateTime time.Time `json:"updateTime"`
 }
+
+// PerformanceResp RAG 性能统计响应。
+type PerformanceResp struct {
+	AvgLatencyMs int64   `json:"avgLatencyMs"`
+	SuccessRate  float64 `json:"successRate"`
+	ErrorRate    float64 `json:"errorRate"`
+	TotalTraces  int64   `json:"totalTraces"`
+}
+
+// TrendsResp 趋势数据响应。
+type TrendsResp struct {
+	Series []TrendSeries `json:"series"`
+}
+
+// TrendSeries 趋势序列。
+type TrendSeries struct {
+	Name string       `json:"name"`
+	Data []TrendPoint `json:"data"`
+}
+
+// TrendPoint 趋势数据点。
+type TrendPoint struct {
+	Ts    string  `json:"ts"`
+	Value float64 `json:"value"`
+}

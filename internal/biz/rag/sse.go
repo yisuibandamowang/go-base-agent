@@ -113,3 +113,8 @@ func (s *SSESender) SendCancel(messageID, title string) error {
 func (s *SSESender) Close() {
 	s.inner.Close()
 }
+
+// IsClosed returns whether the connection has been closed.
+func (s *SSESender) IsClosed() bool {
+	return s.inner.IsClosed()
+}

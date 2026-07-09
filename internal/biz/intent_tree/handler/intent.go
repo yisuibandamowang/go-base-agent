@@ -166,6 +166,53 @@ func (h *IntentHandler) ListTermMappings(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(records, total, page, size)))
 }
 
+// --- 批量操作 ---
+
+// BatchEnable POST /api/ragent/intent-tree/batch/enable
+func (h *IntentHandler) BatchEnable(c *gin.Context) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
+		return
+	}
+	for _, id := range req.IDs {
+		_ = h.svc.ToggleNode(c.Request.Context(), id, 1)
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
+}
+
+// BatchDisable POST /api/ragent/intent-tree/batch/disable
+func (h *IntentHandler) BatchDisable(c *gin.Context) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
+		return
+	}
+	for _, id := range req.IDs {
+		_ = h.svc.ToggleNode(c.Request.Context(), id, 0)
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
+}
+
+// BatchDelete POST /api/ragent/intent-tree/batch/delete
+func (h *IntentHandler) BatchDelete(c *gin.Context) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
+		return
+	}
+	for _, id := range req.IDs {
+		_ = h.svc.DeleteNode(c.Request.Context(), id)
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
+}
+
 func currentUser(c *gin.Context) string {
 	if user := middleware.GetLoginUser(c); user != nil {
 		return user.UserID

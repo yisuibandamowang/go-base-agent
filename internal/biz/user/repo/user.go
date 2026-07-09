@@ -41,3 +41,10 @@ func (r *UserRepo) FindByID(ctx context.Context, id string) (*model.User, error)
 	}
 	return &user, nil
 }
+
+// UpdatePassword updates user password.
+func (r *UserRepo) UpdatePassword(ctx context.Context, userID, hashedPwd string) error {
+	return r.db.WithContext(ctx).Model(&model.User{}).
+		Where("id = ?", userID).
+		Update("password", hashedPwd).Error
+}

@@ -93,3 +93,21 @@ func (s *AuthService) ParseToken(tokenStr string) (*framework.LoginUser, error) 
 func (s *AuthService) TokenName() string {
 	return s.token
 }
+
+// ChangePassword verifies old password and updates to new password.
+func (s *AuthService) ChangePassword(ctx context.Context, userID, oldPwd, newPwd string) error {
+	user, err := s.repo.FindByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("用户不存在")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(oldPwd)); err != nil {
+		if user.Password != oldPwd {
+			return fmt.Errorf("原密码错误")
+		}
+	}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(newPwd), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("加密密码失败")
+	}
+	return s.repo.UpdatePassword(ctx, userID, string(hashed))
+}

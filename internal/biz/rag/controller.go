@@ -2,7 +2,6 @@ package rag
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -56,15 +55,9 @@ func (ctl *Controller) Chat(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(c.Request.Context())
-	defer cancel()
-
-	go func() {
-		<-c.Request.Context().Done()
-		slog.Info("rag: client disconnected", "taskId", taskID)
-		cancel()
-	}()
-
+	// Use background context — LLM pipeline completes independently.
+	// Client disconnects are handled gracefully by SSE transport layer.
+	ctx := context.Background()
 	ctl.svc.StreamChat(ctx, question, conversationID, taskID, deepThinking, sender)
 }
 

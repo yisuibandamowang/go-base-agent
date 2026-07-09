@@ -156,6 +156,7 @@ func main() {
 		api.POST("/auth/logout", authHandler.Logout)
 		api.GET("/auth/current-user", authHandler.CurrentUser)
 		api.GET("/user/me", authHandler.CurrentUser)
+		api.PUT("/user/password", authHandler.ChangePassword)
 
 		// Users
 		api.GET("/users", adminH.ListUsers)
@@ -181,6 +182,9 @@ func main() {
 		api.POST("/intent-tree", intentTreeHandler.CreateNode)
 		api.PUT("/intent-tree/:id", intentTreeHandler.UpdateNode)
 		api.DELETE("/intent-tree/:id", intentTreeHandler.DeleteNode)
+		api.POST("/intent-tree/batch/enable", intentTreeHandler.BatchEnable)
+		api.POST("/intent-tree/batch/disable", intentTreeHandler.BatchDisable)
+		api.POST("/intent-tree/batch/delete", intentTreeHandler.BatchDelete)
 
 		it := api.Group("/intent-tree")
 		{
@@ -207,8 +211,8 @@ func main() {
 		// Admin — 同时注册 /admin/* 和 /rag/* 兼容路径
 		api.GET("/admin/dashboard/overview", adminH.Dashboard)
 		api.GET("/admin/dashboard", adminH.Dashboard)
-		api.GET("/admin/dashboard/performance", stub("performance"))
-		api.GET("/admin/dashboard/trends", stub("trends"))
+		api.GET("/admin/dashboard/performance", adminH.Performance)
+		api.GET("/admin/dashboard/trends", adminH.Trends)
 
 		api.GET("/admin/traces", adminH.ListTraceRuns)
 		api.GET("/admin/traces/:traceId", adminH.TraceDetail)
