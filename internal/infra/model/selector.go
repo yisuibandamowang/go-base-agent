@@ -215,11 +215,12 @@ func (s *Selector) checkProvider(providerID string) bool {
 
 func toChatCandidate(c config.AIEmbeddingCandidateConfig) config.AICandidateConfig {
 	return config.AICandidateConfig{
-		ID:       c.ID,
-		Provider: c.Provider,
-		Model:    c.Model,
-		URL:      c.URL,
-		Priority: c.Priority,
+		ID:        c.ID,
+		Provider:  c.Provider,
+		Model:     c.Model,
+		URL:       c.URL,
+		Dimension: c.Dimension,
+		Priority:  c.Priority,
 	}
 }
 

@@ -131,11 +131,10 @@ func main() {
 		middleware.Auth(authSvc),
 	)
 
+	registerStatusRoutes(r)
+
 	api := r.Group("/api/ragent")
 	{
-		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, convention.Success("ok"))
-		})
 		api.GET("/limiter-test", func(c *gin.Context) {
 			err := queueLimiter.Acquire(c.Request.Context(), ratelimit.AcquireRequest{
 				MaxWait: time.Duration(cfg.RAG.RateLimit.Global.MaxWaitSeconds) * time.Second,
@@ -321,6 +320,26 @@ func main() {
 		}
 	}
 	slog.Info("server exited")
+}
+
+func registerStatusRoutes(r *gin.Engine) {
+	healthHandler := func(c *gin.Context) {
+		c.JSON(http.StatusOK, convention.Success("ok"))
+	}
+	for _, path := range []string{
+		"/health",
+		"/healthz",
+		"/live",
+		"/livez",
+		"/ready",
+		"/readyz",
+		"/api/ragent/health",
+	} {
+		r.GET(path, healthHandler)
+	}
+	r.GET("/metrics", func(c *gin.Context) {
+		c.String(http.StatusOK, "# HELP ragent_up RAgent process availability.\n# TYPE ragent_up gauge\nragent_up 1\n")
+	})
 }
 
 func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service) {

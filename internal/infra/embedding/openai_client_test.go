@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"go-base-agent/internal/framework/config"
@@ -123,6 +124,77 @@ func TestOpenAIEmbeddingClient_MockServer(t *testing.T) {
 	}
 	if len(results[0]) != 3 || results[0][0] != 0.1 {
 		t.Fatal("unexpected embedding values")
+	}
+}
+
+func TestOpenAIEmbeddingClient_SendsDimensionsForOllama(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if got := int(body["dimensions"].(float64)); got != 1536 {
+			t.Fatalf("expected dimensions 1536, got %d", got)
+		}
+
+		resp := map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"embedding": make([]float32, 1536)},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewOpenAICompatibleEmbeddingClient("ollama", nil)
+	client.RequiresAPIKey = false
+	target := model.Target{
+		ID: "qwen3-embedding",
+		Candidate: config.AICandidateConfig{
+			Model:     "qwen3-embedding:8b-fp16",
+			URL:       server.URL + "/v1/embeddings",
+			Dimension: 1536,
+		},
+		Provider: config.AIProviderConfig{URL: server.URL},
+	}
+
+	result, err := client.Embed(context.Background(), "hello", target)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1536 {
+		t.Fatalf("expected 1536 dimensions, got %d", len(result))
+	}
+}
+
+func TestOpenAIEmbeddingClient_RejectsDimensionMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"embedding": []float32{0.1, 0.2}},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewOpenAICompatibleEmbeddingClient("openai", nil)
+	target := model.Target{
+		ID: "test",
+		Candidate: config.AICandidateConfig{
+			Model:     "text-embedding",
+			URL:       server.URL + "/v1/embeddings",
+			Dimension: 3,
+		},
+		Provider: config.AIProviderConfig{URL: server.URL},
+	}
+
+	_, err := client.Embed(context.Background(), "hello", target)
+	if err == nil {
+		t.Fatal("expected dimension mismatch error")
+	}
+	if !strings.Contains(err.Error(), "dimension mismatch") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

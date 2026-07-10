@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"go-base-agent/internal/infra/model"
@@ -24,7 +25,9 @@ type ProbeResult struct {
 // ProbeBridge bridges a StreamCallback to capture the first packet result.
 // Aligns with Java ProbeStreamBridge.
 type ProbeBridge struct {
-	inner    StreamCallback
+	inner StreamCallback
+	once  sync.Once
+
 	received bool
 	ch       chan ProbeResult
 }
@@ -39,7 +42,7 @@ func NewProbeBridge(inner StreamCallback) *ProbeBridge {
 
 func (b *ProbeBridge) OnContent(content string) {
 	b.received = true
-	b.ch <- ProbeResult{Success: true}
+	b.notify(ProbeResult{Success: true})
 	b.inner.OnContent(content)
 }
 
@@ -49,16 +52,22 @@ func (b *ProbeBridge) OnThinking(content string) {
 
 func (b *ProbeBridge) OnComplete() {
 	if !b.received {
-		b.ch <- ProbeResult{Success: false}
+		b.notify(ProbeResult{Success: false})
 	}
 	b.inner.OnComplete()
 }
 
 func (b *ProbeBridge) OnError(err error) {
 	if !b.received {
-		b.ch <- ProbeResult{Success: false, Error: err}
+		b.notify(ProbeResult{Success: false, Error: err})
 	}
 	b.inner.OnError(err)
+}
+
+func (b *ProbeBridge) notify(result ProbeResult) {
+	b.once.Do(func() {
+		b.ch <- result
+	})
 }
 
 // AwaitResult returns the channel to wait on for the first packet result.

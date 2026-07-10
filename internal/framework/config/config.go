@@ -221,6 +221,7 @@ type AICandidateConfig struct {
 	Provider         string `mapstructure:"provider"`
 	Model            string `mapstructure:"model"`
 	URL              string `mapstructure:"url"`
+	Dimension        int    `mapstructure:"dimension"`
 	SupportsThinking bool   `mapstructure:"supports-thinking"`
 	Priority         int    `mapstructure:"priority"`
 	Enabled          *bool  `mapstructure:"enabled"`

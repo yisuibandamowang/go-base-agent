@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/infra/embedding"
 
@@ -17,8 +18,12 @@ import (
 type PgRetriever struct {
 	vectorDB *gorm.DB
 	emb      embedding.Service
-	kbRepo   *repo.KnowledgeBaseRepo
+	kbRepo   knowledgeBaseLister
 	topK     int
+}
+
+type knowledgeBaseLister interface {
+	List(ctx context.Context, page, size int) ([]knowledgeModel.KnowledgeBase, int64, error)
 }
 
 // NewPgRetriever creates a PgRetriever.
@@ -44,10 +49,6 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 	if topK <= 0 {
 		topK = r.topK
 	}
-	vec, err := r.emb.Embed(ctx, question)
-	if err != nil {
-		return nil, fmt.Errorf("embed question failed: %w", err)
-	}
 	kbs, _, err := r.kbRepo.List(ctx, 1, 100)
 	if err != nil {
 		return nil, fmt.Errorf("list knowledge bases: %w", err)
@@ -62,11 +63,15 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 		Score   float64 `gorm:"column:score"`
 	}
 	var allChunks []RetrievedChunk
-	vecStr := vecToString(vec)
 
 	for _, kb := range kbs {
+		vec, err := r.emb.EmbedWithModel(ctx, question, kb.EmbeddingModel)
+		if err != nil {
+			return nil, fmt.Errorf("embed question with model %s failed: %w", kb.EmbeddingModel, err)
+		}
+		vecStr := vecToString(vec)
 		var rows []row
-		err := r.vectorDB.WithContext(ctx).Raw(
+		err = r.vectorDB.WithContext(ctx).Raw(
 			`SELECT id, content, 1 - (embedding <=> ?) AS score
 			 FROM t_knowledge_vector
 			 WHERE collection_name = ?

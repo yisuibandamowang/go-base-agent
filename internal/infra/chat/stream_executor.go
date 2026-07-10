@@ -81,7 +81,9 @@ func (e *StreamExecutor) Execute(
 		}
 
 		if !cancelled.Load() {
-			cb.OnError(&streamError{code: 0, body: "stream ended without finish_reason"})
+			// Stream ended normally (connection closed) without explicit finish_reason.
+			// This is common with providers that don't send [DONE]. Treat as completion.
+			cb.OnComplete()
 		}
 	}()
 

@@ -61,6 +61,9 @@ func (c *OpenAICompatibleEmbeddingClient) doEmbed(ctx context.Context, texts []s
 		"model": target.Candidate.Model,
 		"input": texts,
 	}
+	if c.provider == "ollama" && target.Candidate.Dimension > 0 {
+		body["dimensions"] = target.Candidate.Dimension
+	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -92,7 +95,19 @@ func (c *OpenAICompatibleEmbeddingClient) doEmbed(ctx context.Context, texts []s
 		return nil, fmt.Errorf("embedding HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return parseEmbeddingResponse(respBody, c.provider)
+	results, err := parseEmbeddingResponse(respBody, c.provider)
+	if err != nil {
+		return nil, err
+	}
+	if target.Candidate.Dimension > 0 {
+		for i, result := range results {
+			if len(result) != target.Candidate.Dimension {
+				return nil, fmt.Errorf("%s embedding result %d dimension mismatch: expected %d, got %d",
+					c.provider, i, target.Candidate.Dimension, len(result))
+			}
+		}
+	}
+	return results, nil
 }
 
 func parseEmbeddingResponse(body []byte, provider string) ([][]float32, error) {

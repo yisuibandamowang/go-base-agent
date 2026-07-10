@@ -25,10 +25,14 @@ func NewPipeline(llm chat.LLMService, prompt PromptBuilder, rewrite QueryRewrite
 
 // StreamChat implements Service.StreamChat.
 func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+	// Timeout context: the entire pipeline should complete within 120s
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
 	// Start heartbeat to keep SSE connection alive during LLM processing
 	heartbeatDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {

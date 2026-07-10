@@ -20,11 +20,20 @@ import (
 type DocumentService struct {
 	docRepo   *repo.KnowledgeDocumentRepo
 	chunkRepo *repo.KnowledgeChunkRepo
-	kbRepo    *repo.KnowledgeBaseRepo
+	kbRepo    knowledgeBaseFinder
 	db        *gorm.DB
 	emb       embedding.Service
-	vecStore  *rag.PgVectorStore
+	vecStore  vectorStore
 	fileStore FileReader
+}
+
+type knowledgeBaseFinder interface {
+	FindByID(ctx context.Context, id string) (*model.KnowledgeBase, error)
+}
+
+type vectorStore interface {
+	DeleteDocumentVectors(ctx context.Context, collectionName, docID string) error
+	IndexDocumentChunks(ctx context.Context, collectionName, docID string, chunks []rag.VectorChunk) error
 }
 
 // FileReader reads file content for chunk processing.
@@ -324,6 +333,7 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 	_ = s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID)
 	if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, vecChunks); err != nil {
 		slog.Error("persist vectors failed", "docId", doc.ID, "err", err)
+		return 0, fmt.Errorf("persist vectors: %w", err)
 	}
 
 	return len(chunks), nil

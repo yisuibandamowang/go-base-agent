@@ -247,6 +247,43 @@ func TestDefaultFirstPacketProbe_Success(t *testing.T) {
 	}
 }
 
+func TestProbeBridge_OnContentDoesNotBlockAfterFirstPacket(t *testing.T) {
+	var contents []string
+	bridge := NewProbeBridge(&captureCallback{
+		onContent: func(c string) {
+			contents = append(contents, c)
+		},
+	})
+
+	bridge.OnContent("first")
+
+	probe := NewFirstPacketProbe()
+	result, err := probe.AwaitFirstPacket(bridge, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatal("expected first packet success")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bridge.OnContent("second")
+		bridge.OnContent("third")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("OnContent blocked after first packet probe")
+	}
+
+	if got := strings.Join(contents, ""); got != "firstsecondthird" {
+		t.Fatalf("unexpected forwarded content: %s", got)
+	}
+}
+
 func TestDefaultFirstPacketProbe_Timeout(t *testing.T) {
 	bridge := NewProbeBridge(&captureCallback{})
 	probe := NewFirstPacketProbe()
