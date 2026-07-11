@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 
 type recordingEmbeddingService struct {
 	modelIDs []string
+	failures map[string]error
 }
 
 func (s *recordingEmbeddingService) Embed(context.Context, string) ([]float32, error) {
@@ -22,6 +24,9 @@ func (s *recordingEmbeddingService) Embed(context.Context, string) ([]float32, e
 
 func (s *recordingEmbeddingService) EmbedWithModel(_ context.Context, _ string, modelID string) ([]float32, error) {
 	s.modelIDs = append(s.modelIDs, modelID)
+	if err := s.failures[modelID]; err != nil {
+		return nil, err
+	}
 	return []float32{0.1, 0.2, 0.3}, nil
 }
 
@@ -70,5 +75,63 @@ func TestPgRetriever_EmbedsQuestionWithEachKnowledgeBaseModel(t *testing.T) {
 	want := []string{"emb-1536-a", "emb-1536-b"}
 	if !reflect.DeepEqual(emb.modelIDs, want) {
 		t.Fatalf("embedding models mismatch: got %v, want %v", emb.modelIDs, want)
+	}
+}
+
+func TestPgRetriever_SkipsKnowledgeBaseWhenEmbeddingFails(t *testing.T) {
+	gdb, err := gorm.Open(postgres.New(postgres.Config{
+		DSN:                  "host=127.0.0.1 user=postgres dbname=ragent sslmode=disable",
+		PreferSimpleProtocol: true,
+	}), &gorm.Config{DryRun: true})
+	if err != nil {
+		t.Fatalf("open dry-run db: %v", err)
+	}
+
+	emb := &recordingEmbeddingService{
+		failures: map[string]error{
+			"bad-emb": errors.New("embedding HTTP 401: invalid token"),
+		},
+	}
+	retriever := &PgRetriever{
+		vectorDB: gdb,
+		emb:      emb,
+		kbRepo: fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "bad-kb", EmbeddingModel: "bad-emb", CollectionName: "collection_bad"},
+			{Name: "good-kb", EmbeddingModel: "good-emb", CollectionName: "collection_good"},
+		}},
+		topK: 10,
+	}
+
+	_, err = retriever.Retrieve(context.Background(), "question", 2)
+	if err != nil {
+		t.Fatalf("expected retriever to skip failed knowledge base, got %v", err)
+	}
+
+	want := []string{"bad-emb", "good-emb"}
+	if !reflect.DeepEqual(emb.modelIDs, want) {
+		t.Fatalf("embedding models mismatch: got %v, want %v", emb.modelIDs, want)
+	}
+}
+
+func TestMetadataWithKnowledgeBaseAddsSource(t *testing.T) {
+	kb := knowledgeModel.KnowledgeBase{
+		Name:           "go 语言知识库",
+		CollectionName: "goknowladge",
+	}
+	kb.ID = "kb-1"
+
+	meta := metadataWithKnowledgeBase(map[string]string{"doc_name": "会员Agent说明.md"}, kb)
+
+	if meta["kb_id"] != "kb-1" {
+		t.Fatalf("expected kb_id, got %+v", meta)
+	}
+	if meta["kb_name"] != "go 语言知识库" {
+		t.Fatalf("expected kb_name, got %+v", meta)
+	}
+	if meta["collection_name"] != "goknowladge" {
+		t.Fatalf("expected collection_name, got %+v", meta)
+	}
+	if meta["doc_name"] != "会员Agent说明.md" {
+		t.Fatalf("expected existing doc metadata to be preserved, got %+v", meta)
 	}
 }

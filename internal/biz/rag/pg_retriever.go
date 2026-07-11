@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -64,12 +65,17 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 		Score    float64 `gorm:"column:score"`
 	}
 	var allChunks []RetrievedChunk
+	var embeddingErrors []error
+	embeddingSucceeded := false
 
 	for _, kb := range kbs {
 		vec, err := r.emb.EmbedWithModel(ctx, question, kb.EmbeddingModel)
 		if err != nil {
-			return nil, fmt.Errorf("embed question with model %s failed: %w", kb.EmbeddingModel, err)
+			slog.Warn("pg retriever: embed question failed", "kb", kb.Name, "model", kb.EmbeddingModel, "err", err)
+			embeddingErrors = append(embeddingErrors, fmt.Errorf("%s(%s): %w", kb.Name, kb.EmbeddingModel, err))
+			continue
 		}
+		embeddingSucceeded = true
 		vecStr := vecToString(vec)
 		var rows []row
 		err = r.vectorDB.WithContext(ctx).Raw(
@@ -84,14 +90,31 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 			slog.Warn("pg retriever: vector search failed", "kb", kb.Name, "err", err)
 			continue
 		}
+		if len(rows) == 0 {
+			slog.Warn("pg retriever: no chunks found in knowledge base", "kb", kb.Name, "collection", kb.CollectionName)
+			continue
+		}
 		for _, row := range rows {
 			allChunks = append(allChunks, RetrievedChunk{
 				ID:       row.ID,
 				Text:     row.Content,
 				Score:    row.Score,
-				Metadata: parseVectorMetadata(row.Metadata),
+				Metadata: metadataWithKnowledgeBase(parseVectorMetadata(row.Metadata), kb),
 			})
 		}
 	}
+	if !embeddingSucceeded && len(embeddingErrors) > 0 {
+		return nil, fmt.Errorf("embed question failed for all knowledge bases: %w", errors.Join(embeddingErrors...))
+	}
 	return allChunks, nil
+}
+
+func metadataWithKnowledgeBase(meta map[string]string, kb knowledgeModel.KnowledgeBase) map[string]string {
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	meta["kb_id"] = kb.ID
+	meta["kb_name"] = kb.Name
+	meta["collection_name"] = kb.CollectionName
+	return meta
 }

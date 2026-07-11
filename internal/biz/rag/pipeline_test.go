@@ -67,6 +67,7 @@ func citationRetriever() Retriever {
 		Text:  "助手支持错误排查能力。",
 		Score: 0.9,
 		Metadata: map[string]string{
+			"kb_name":    "go 语言知识库",
 			"doc_name":   "会员Agent说明.md",
 			"page_start": "1",
 			"line_start": "12",
@@ -162,9 +163,9 @@ func TestPipeline_StreamChat_AppendsCitationsAndLinks(t *testing.T) {
 	body := w.Body.String()
 	answer := "当前助手支持错误排查能力。"
 	evidence := "依据："
-	source := "《会员Agent说明.md》第1页，第12-16行"
+	source := "知识库：go 语言知识库；文档：《会员Agent说明.md》第1页，第12-16行"
 	link := "[会员Agent说明.md](https://example.com/member-agent.md)"
-	for _, want := range []string{answer, evidence, source, "相关链接：", link} {
+	for _, want := range []string{answer, evidence, source, "链接：", link} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected response to contain %q, got: %s", want, body)
 		}

@@ -3,7 +3,6 @@ package rag
 import (
 	"context"
 	"log/slog"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -245,21 +244,15 @@ func formatCitations(chunks []RetrievedChunk) string {
 		return ""
 	}
 	var evidence []string
-	links := make(map[string]string)
+	seen := make(map[string]bool)
 	for _, chunk := range chunks {
-		source := formatCitationSource(chunk.Metadata)
-		if source != "" {
-			evidence = append(evidence, source)
-		}
-		if url := chunk.Metadata["source_url"]; isHTTPURL(url) {
-			name := chunk.Metadata["doc_name"]
-			if name == "" {
-				name = url
-			}
-			links[url] = name
+		line := formatCitationLine(chunk.Metadata)
+		if line != "" && !seen[line] {
+			evidence = append(evidence, line)
+			seen[line] = true
 		}
 	}
-	if len(evidence) == 0 && len(links) == 0 {
+	if len(evidence) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -270,22 +263,24 @@ func formatCitations(chunks []RetrievedChunk) string {
 		b.WriteString(item)
 		b.WriteString("\n")
 	}
-	if len(links) > 0 {
-		b.WriteString("\n相关链接：\n")
-		urls := make([]string, 0, len(links))
-		for url := range links {
-			urls = append(urls, url)
-		}
-		sort.Strings(urls)
-		for _, url := range urls {
-			b.WriteString("- [")
-			b.WriteString(links[url])
-			b.WriteString("](")
-			b.WriteString(url)
-			b.WriteString(")\n")
-		}
-	}
 	return b.String()
+}
+
+func formatCitationLine(meta map[string]string) string {
+	source := formatCitationSource(meta)
+	url := meta["source_url"]
+	if !isHTTPURL(url) {
+		return source
+	}
+	name := meta["doc_name"]
+	if name == "" {
+		name = url
+	}
+	link := "链接：[" + name + "](" + url + ")"
+	if source == "" {
+		return link
+	}
+	return source + "；" + link
 }
 
 func formatCitationSource(meta map[string]string) string {
@@ -303,6 +298,12 @@ func formatCitationSource(meta map[string]string) string {
 	lineStart := meta["line_start"]
 	lineEnd := meta["line_end"]
 	var b strings.Builder
+	if kbName := firstNonEmpty(meta["kb_name"], meta["collection_name"]); kbName != "" {
+		b.WriteString("知识库：")
+		b.WriteString(kbName)
+		b.WriteString("；")
+	}
+	b.WriteString("文档：")
 	b.WriteString("《")
 	b.WriteString(name)
 	b.WriteString("》")
@@ -324,6 +325,15 @@ func formatCitationSource(meta map[string]string) string {
 		b.WriteString("行")
 	}
 	return b.String()
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func isHTTPURL(s string) bool {
