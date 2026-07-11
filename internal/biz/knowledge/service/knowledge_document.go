@@ -68,14 +68,15 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		return nil, fmt.Errorf("知识库不存在")
 	}
 	doc := &model.KnowledgeDocument{
-		KbID:       kbID,
-		DocName:    req.DocName,
-		FileURL:    req.FileURL,
-		FileType:   req.FileType,
-		FileSize:   req.FileSize,
-		SourceType: req.SourceType,
-		Status:     "pending",
-		CreatedBy:  userID,
+		KbID:           kbID,
+		DocName:        req.DocName,
+		FileURL:        req.FileURL,
+		FileType:       req.FileType,
+		FileSize:       req.FileSize,
+		SourceType:     req.SourceType,
+		Status:         "pending",
+		CreatedBy:      userID,
+		SourceLocation: req.SourceLocation,
 	}
 	doc.CreateTime = time.Now()
 	doc.UpdateTime = time.Now()
@@ -210,12 +211,14 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 		return extractDuration, chunkDuration, 0, nil, fmt.Errorf("知识库不存在")
 	}
 	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
-	for _, c := range chunks {
+	lineRanges := lineRangesForChunks(text, chunks)
+	for i, c := range chunks {
 		vec, embErr := s.emb.EmbedWithModel(ctx, c.Content, kb.EmbeddingModel)
 		if embErr != nil {
 			slog.Warn("chunk task: embed failed", "chunkId", c.ID, "err", embErr)
 			continue
 		}
+		lineRange := lineRanges[i]
 		vecChunks = append(vecChunks, rag.VectorChunk{
 			ChunkID:       c.ID,
 			DocID:         doc.ID,
@@ -223,6 +226,17 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 			Embedding:     vec,
 			EmbeddingText: c.Content,
 			Index:         c.ChunkIndex,
+			Metadata: map[string]string{
+				"doc_id":      doc.ID,
+				"doc_name":    doc.DocName,
+				"source_type": doc.SourceType,
+				"source_url":  documentSourceURL(doc),
+				"page_start":  "1",
+				"page_end":    "1",
+				"line_start":  fmt.Sprintf("%d", lineRange.start),
+				"line_end":    fmt.Sprintf("%d", lineRange.end),
+				"chunk_index": fmt.Sprintf("%d", c.ChunkIndex),
+			},
 		})
 	}
 	if len(vecChunks) == 0 {
@@ -278,6 +292,44 @@ func splitToChunks(text string, size, overlap int) []string {
 		}
 	}
 	return chunks
+}
+
+type lineRange struct {
+	start int
+	end   int
+}
+
+func lineRangesForChunks(text string, chunks []*model.KnowledgeChunk) []lineRange {
+	ranges := make([]lineRange, 0, len(chunks))
+	searchFrom := 0
+	for _, chunk := range chunks {
+		idx := strings.Index(text[searchFrom:], chunk.Content)
+		if idx >= 0 {
+			idx += searchFrom
+		} else {
+			idx = strings.Index(text, chunk.Content)
+		}
+		if idx < 0 {
+			idx = 0
+		}
+		startLine := strings.Count(text[:idx], "\n") + 1
+		endLine := startLine + strings.Count(chunk.Content, "\n")
+		ranges = append(ranges, lineRange{start: startLine, end: endLine})
+		if idx+1 > searchFrom {
+			searchFrom = idx + 1
+		}
+	}
+	return ranges
+}
+
+func documentSourceURL(doc *model.KnowledgeDocument) string {
+	if strings.HasPrefix(doc.SourceLocation, "http://") || strings.HasPrefix(doc.SourceLocation, "https://") {
+		return doc.SourceLocation
+	}
+	if strings.HasPrefix(doc.FileURL, "http://") || strings.HasPrefix(doc.FileURL, "https://") {
+		return doc.FileURL
+	}
+	return ""
 }
 
 // persistChunksAndVectors 原子性写入分块和向量。

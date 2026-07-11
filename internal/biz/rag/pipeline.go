@@ -3,6 +3,8 @@ package rag
 import (
 	"context"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,7 +88,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	req := p.prompt.Build(PromptContext{
 		Question:  q,
 		History:   history,
-		KbContext: kbCtx,
+		KbContext: withChunkSources(chunks, kbCtx),
 	})
 	req.Thinking = thinkingVal
 
@@ -99,6 +101,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		conversationID: conversationID,
 		memory:         p.memory,
 		sender:         sender,
+		citations:      formatCitations(chunks),
 	}
 	if ctx.Err() != nil {
 		slog.Info("rag pipeline: cancelled before llm call", "err", ctx.Err())
@@ -160,6 +163,7 @@ type pipelineCallback struct {
 	buf            []byte
 	answer         strings.Builder
 	answerPrefix   string
+	citations      string
 }
 
 func (c *pipelineCallback) OnContent(content string) {
@@ -177,10 +181,14 @@ func (c *pipelineCallback) OnComplete() {
 	slog.Info("rag pipeline: llm stream complete")
 	if c.memory != nil {
 		if answer := c.answerPrefix + c.answer.String(); answer != "" {
+			answer += c.citations
 			if err := c.memory.SaveMessage(c.ctx, c.conversationID, chat.NewAssistantMessage(answer)); err != nil {
 				slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
 			}
 		}
+	}
+	if c.citations != "" {
+		_ = c.sender.SendMessage(MsgTypeResponse, c.citations)
 	}
 	c.sender.SendFinish("", "")
 	c.sender.SendDone()
@@ -208,4 +216,116 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func withChunkSources(chunks []RetrievedChunk, fallback string) string {
+	if len(chunks) == 0 {
+		return fallback
+	}
+	var b strings.Builder
+	for i, chunk := range chunks {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("[片段")
+		b.WriteString(strconv.Itoa(i + 1))
+		if source := formatCitationSource(chunk.Metadata); source != "" {
+			b.WriteString("，来源：")
+			b.WriteString(source)
+		}
+		b.WriteString("]\n")
+		b.WriteString(chunk.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func formatCitations(chunks []RetrievedChunk) string {
+	if len(chunks) == 0 {
+		return ""
+	}
+	var evidence []string
+	links := make(map[string]string)
+	for _, chunk := range chunks {
+		source := formatCitationSource(chunk.Metadata)
+		if source != "" {
+			evidence = append(evidence, source)
+		}
+		if url := chunk.Metadata["source_url"]; isHTTPURL(url) {
+			name := chunk.Metadata["doc_name"]
+			if name == "" {
+				name = url
+			}
+			links[url] = name
+		}
+	}
+	if len(evidence) == 0 && len(links) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n依据：\n")
+	for i, item := range evidence {
+		b.WriteString(strconv.Itoa(i + 1))
+		b.WriteString(". ")
+		b.WriteString(item)
+		b.WriteString("\n")
+	}
+	if len(links) > 0 {
+		b.WriteString("\n相关链接：\n")
+		urls := make([]string, 0, len(links))
+		for url := range links {
+			urls = append(urls, url)
+		}
+		sort.Strings(urls)
+		for _, url := range urls {
+			b.WriteString("- [")
+			b.WriteString(links[url])
+			b.WriteString("](")
+			b.WriteString(url)
+			b.WriteString(")\n")
+		}
+	}
+	return b.String()
+}
+
+func formatCitationSource(meta map[string]string) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	name := meta["doc_name"]
+	if name == "" {
+		name = meta["doc_id"]
+	}
+	if name == "" {
+		return ""
+	}
+	page := meta["page_start"]
+	lineStart := meta["line_start"]
+	lineEnd := meta["line_end"]
+	var b strings.Builder
+	b.WriteString("《")
+	b.WriteString(name)
+	b.WriteString("》")
+	if page != "" {
+		b.WriteString("第")
+		b.WriteString(page)
+		b.WriteString("页")
+	}
+	if lineStart != "" {
+		if page != "" {
+			b.WriteString("，")
+		}
+		b.WriteString("第")
+		b.WriteString(lineStart)
+		if lineEnd != "" && lineEnd != lineStart {
+			b.WriteString("-")
+			b.WriteString(lineEnd)
+		}
+		b.WriteString("行")
+	}
+	return b.String()
+}
+
+func isHTTPURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }

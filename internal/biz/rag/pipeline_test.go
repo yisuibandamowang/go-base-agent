@@ -61,6 +61,21 @@ func testRetriever() Retriever {
 	return staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
 }
 
+func citationRetriever() Retriever {
+	return staticRetriever{chunks: []RetrievedChunk{{
+		ID:    "chunk-1",
+		Text:  "助手支持错误排查能力。",
+		Score: 0.9,
+		Metadata: map[string]string{
+			"doc_name":   "会员Agent说明.md",
+			"page_start": "1",
+			"line_start": "12",
+			"line_end":   "16",
+			"source_url": "https://example.com/member-agent.md",
+		},
+	}}}
+}
+
 func TestPipeline_StreamChat_Basic(t *testing.T) {
 	done := make(chan struct{})
 	llm := &fakeLLMService{
@@ -122,6 +137,40 @@ func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
 	}
 	if mem.saved[1].Role != chat.RoleAssistant || mem.saved[1].Content != "hello world" {
 		t.Fatalf("unexpected assistant message: %+v", mem.saved[1])
+	}
+}
+
+func TestPipeline_StreamChat_AppendsCitationsAndLinks(t *testing.T) {
+	done := make(chan struct{})
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("当前助手支持错误排查能力。")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, citationRetriever(), &NoopMemoryService{})
+	go p.StreamChat(context.Background(), "助手支持什么能力", "conv-1", "task-1", false, s)
+
+	<-done
+
+	body := w.Body.String()
+	answer := "当前助手支持错误排查能力。"
+	evidence := "依据："
+	source := "《会员Agent说明.md》第1页，第12-16行"
+	link := "[会员Agent说明.md](https://example.com/member-agent.md)"
+	for _, want := range []string{answer, evidence, source, "相关链接：", link} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected response to contain %q, got: %s", want, body)
+		}
+	}
+	if strings.Index(body, answer) > strings.Index(body, evidence) {
+		t.Fatalf("expected citations after answer, got: %s", body)
 	}
 }
 

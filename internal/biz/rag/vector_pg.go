@@ -2,7 +2,9 @@ package rag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"gorm.io/gorm"
@@ -40,7 +42,7 @@ func (s *PgVectorStore) IndexDocumentChunks(ctx context.Context, collectionName,
 			ID:             c.ChunkID,
 			CollectionName: collectionName,
 			Content:        c.Content,
-			Metadata:       fmt.Sprintf(`{"doc_id":"%s","index":%d}`, docID, c.Index),
+			Metadata:       buildVectorMetadata(docID, c),
 			Embedding:      vecToString(c.Embedding),
 		})
 	}
@@ -100,9 +102,48 @@ func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec [
 			ChunkID:   r.ID,
 			Content:   r.Content,
 			Embedding: stringToVec(r.Embedding),
+			Metadata:  parseVectorMetadata(r.Metadata),
 		})
 	}
 	return chunks, nil
+}
+
+func buildVectorMetadata(docID string, chunk VectorChunk) string {
+	meta := make(map[string]interface{}, len(chunk.Metadata)+2)
+	meta["doc_id"] = docID
+	meta["index"] = chunk.Index
+	for k, v := range chunk.Metadata {
+		meta[k] = v
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Sprintf(`{"doc_id":"%s","index":%d}`, docID, chunk.Index)
+	}
+	return string(data)
+}
+
+func parseVectorMetadata(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
+		return nil
+	}
+	result := make(map[string]string, len(meta))
+	for k, v := range meta {
+		switch val := v.(type) {
+		case string:
+			result[k] = val
+		case float64:
+			result[k] = strconv.FormatInt(int64(val), 10)
+		case bool:
+			result[k] = strconv.FormatBool(val)
+		default:
+			result[k] = fmt.Sprint(val)
+		}
+	}
+	return result
 }
 
 func vecToString(vec []float32) string {

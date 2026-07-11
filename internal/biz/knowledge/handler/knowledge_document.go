@@ -64,6 +64,7 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 
 	// Source location for URL type
 	if vals, ok := form.Value["sourceLocation"]; ok && len(vals) > 0 {
+		req.SourceLocation = vals[0]
 		req.FileURL = vals[0]
 		if req.DocName == "" {
 			req.DocName = vals[0]

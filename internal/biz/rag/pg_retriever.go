@@ -58,9 +58,10 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 	}
 
 	type row struct {
-		ID      string  `gorm:"column:id"`
-		Content string  `gorm:"column:content"`
-		Score   float64 `gorm:"column:score"`
+		ID       string  `gorm:"column:id"`
+		Content  string  `gorm:"column:content"`
+		Metadata string  `gorm:"column:metadata"`
+		Score    float64 `gorm:"column:score"`
 	}
 	var allChunks []RetrievedChunk
 
@@ -72,7 +73,7 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 		vecStr := vecToString(vec)
 		var rows []row
 		err = r.vectorDB.WithContext(ctx).Raw(
-			`SELECT id, content, 1 - (embedding <=> ?) AS score
+			`SELECT id, content, metadata, 1 - (embedding <=> ?) AS score
 			 FROM t_knowledge_vector
 			 WHERE collection_name = ?
 			 ORDER BY embedding <=> ?
@@ -85,9 +86,10 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 		}
 		for _, row := range rows {
 			allChunks = append(allChunks, RetrievedChunk{
-				ID:    row.ID,
-				Text:  row.Content,
-				Score: row.Score,
+				ID:       row.ID,
+				Text:     row.Content,
+				Score:    row.Score,
+				Metadata: parseVectorMetadata(row.Metadata),
 			})
 		}
 	}

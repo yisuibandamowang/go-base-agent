@@ -2,13 +2,14 @@ package dto
 
 // CreateDocumentReq 创建文档请求。
 type CreateDocumentReq struct {
-	DocName       string `json:"docName" binding:"required"`
-	FileURL       string `json:"fileUrl" binding:"required"`
-	FileType      string `json:"fileType" binding:"required"`
-	FileSize      int64  `json:"fileSize"`
-	SourceType    string `json:"sourceType"`
-	ChunkStrategy string `json:"chunkStrategy"`
-	ChunkConfig   string `json:"chunkConfig"`
+	DocName        string `json:"docName" binding:"required"`
+	FileURL        string `json:"fileUrl" binding:"required"`
+	FileType       string `json:"fileType" binding:"required"`
+	FileSize       int64  `json:"fileSize"`
+	SourceType     string `json:"sourceType"`
+	SourceLocation string `json:"sourceLocation"`
+	ChunkStrategy  string `json:"chunkStrategy"`
+	ChunkConfig    string `json:"chunkConfig"`
 }
 
 // UpdateDocumentReq 更新文档请求。

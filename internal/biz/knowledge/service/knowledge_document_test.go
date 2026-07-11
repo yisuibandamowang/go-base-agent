@@ -13,6 +13,36 @@ import (
 	"gorm.io/gorm"
 )
 
+type fakeFileReader struct {
+	data []byte
+}
+
+func (f fakeFileReader) Read(string) ([]byte, error) {
+	return f.data, nil
+}
+
+type fakeEmbeddingService struct{}
+
+func (f fakeEmbeddingService) Embed(context.Context, string) ([]float32, error) {
+	return []float32{0.1, 0.2}, nil
+}
+
+func (f fakeEmbeddingService) EmbedWithModel(context.Context, string, string) ([]float32, error) {
+	return []float32{0.1, 0.2}, nil
+}
+
+func (f fakeEmbeddingService) EmbedBatch(context.Context, []string) ([][]float32, error) {
+	return nil, nil
+}
+
+func (f fakeEmbeddingService) EmbedBatchWithModel(context.Context, []string, string) ([][]float32, error) {
+	return nil, nil
+}
+
+func (f fakeEmbeddingService) Dimension() int {
+	return 2
+}
+
 type fakeKnowledgeBaseFinder struct {
 	kb *knowledgeModel.KnowledgeBase
 }
@@ -120,5 +150,43 @@ func TestDocumentService_PersistChunksAndVectorsUsesPersistedChunkIDs(t *testing
 			t.Fatalf("expected unique vector chunk IDs, got duplicate %q", c.ChunkID)
 		}
 		seen[c.ChunkID] = true
+	}
+}
+
+func TestDocumentService_RunChunkProcessBuildsSourceMetadata(t *testing.T) {
+	svc := &DocumentService{
+		kbRepo: fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{
+			EmbeddingModel: "emb-1",
+		}},
+		emb:       fakeEmbeddingService{},
+		fileStore: fakeFileReader{data: []byte("第一行\n第二行\n第三行")},
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent说明.md",
+		FileURL:    "https://example.com/member-agent.md",
+		SourceType: "url",
+	}
+	doc.ID = "doc-1"
+
+	_, _, _, chunks, err := svc.runChunkProcess(context.Background(), doc)
+	if err != nil {
+		t.Fatalf("run chunk process: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	meta := chunks[0].Metadata
+	if meta["doc_id"] != "doc-1" {
+		t.Fatalf("expected doc_id metadata, got %q", meta["doc_id"])
+	}
+	if meta["doc_name"] != "会员Agent说明.md" {
+		t.Fatalf("expected doc_name metadata, got %q", meta["doc_name"])
+	}
+	if meta["source_url"] != "https://example.com/member-agent.md" {
+		t.Fatalf("expected source_url metadata, got %q", meta["source_url"])
+	}
+	if meta["page_start"] != "1" || meta["line_start"] != "1" || meta["line_end"] != "3" {
+		t.Fatalf("expected page/line metadata, got %+v", meta)
 	}
 }

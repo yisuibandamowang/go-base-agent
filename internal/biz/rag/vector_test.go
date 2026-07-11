@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,30 @@ func TestNoopVectorStoreAdmin(t *testing.T) {
 	err = s.DropVectorSpace(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildVectorMetadataIncludesChunkMetadata(t *testing.T) {
+	meta := buildVectorMetadata("doc-1", VectorChunk{
+		Index: 3,
+		Metadata: map[string]string{
+			"doc_name":   "会员Agent说明.md",
+			"source_url": "https://example.com/member-agent.md",
+			"line_start": "10",
+			"line_end":   "16",
+		},
+	})
+
+	for _, want := range []string{
+		`"doc_id":"doc-1"`,
+		`"index":3`,
+		`"doc_name":"会员Agent说明.md"`,
+		`"source_url":"https://example.com/member-agent.md"`,
+		`"line_start":"10"`,
+		`"line_end":"16"`,
+	} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("expected metadata to contain %s, got %s", want, meta)
+		}
 	}
 }

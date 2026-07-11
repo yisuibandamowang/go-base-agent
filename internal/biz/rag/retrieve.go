@@ -4,9 +4,10 @@ import "context"
 
 // RetrievedChunk represents a retrieved document chunk.
 type RetrievedChunk struct {
-	ID    string
-	Text  string
-	Score float64
+	ID       string
+	Text     string
+	Score    float64
+	Metadata map[string]string
 }
 
 // Retriever retrieves relevant chunks for a question.
