@@ -289,9 +289,6 @@ func formatCitationSource(meta map[string]string) string {
 	}
 	name := meta["doc_name"]
 	if name == "" {
-		name = meta["doc_id"]
-	}
-	if name == "" {
 		return ""
 	}
 	page := meta["page_start"]

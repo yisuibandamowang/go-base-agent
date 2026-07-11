@@ -175,6 +175,17 @@ func TestPipeline_StreamChat_AppendsCitationsAndLinks(t *testing.T) {
 	}
 }
 
+func TestFormatCitationSourceDoesNotExposeDocumentIDAsName(t *testing.T) {
+	source := formatCitationSource(map[string]string{
+		"kb_name": "go 语言知识库",
+		"doc_id":  "2075677715192614912",
+	})
+
+	if source != "" {
+		t.Fatalf("expected no citation source without document name, got %q", source)
+	}
+}
+
 func TestPipeline_StreamChat_NoRetrievedChunksPrefixesReasonThenGuidesWithLLM(t *testing.T) {
 	llm := &fakeLLMService{
 		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {

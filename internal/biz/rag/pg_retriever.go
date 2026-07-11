@@ -59,10 +59,13 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 	}
 
 	type row struct {
-		ID       string  `gorm:"column:id"`
-		Content  string  `gorm:"column:content"`
-		Metadata string  `gorm:"column:metadata"`
-		Score    float64 `gorm:"column:score"`
+		ID             string  `gorm:"column:id"`
+		Content        string  `gorm:"column:content"`
+		Metadata       string  `gorm:"column:metadata"`
+		DocName        string  `gorm:"column:doc_name"`
+		SourceLocation string  `gorm:"column:source_location"`
+		FileURL        string  `gorm:"column:file_url"`
+		Score          float64 `gorm:"column:score"`
 	}
 	var allChunks []RetrievedChunk
 	var embeddingErrors []error
@@ -79,10 +82,14 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 		vecStr := vecToString(vec)
 		var rows []row
 		err = r.vectorDB.WithContext(ctx).Raw(
-			`SELECT id, content, metadata, 1 - (embedding <=> ?) AS score
-			 FROM t_knowledge_vector
-			 WHERE collection_name = ?
-			 ORDER BY embedding <=> ?
+			`SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url,
+			        1 - (v.embedding <=> ?) AS score
+			 FROM t_knowledge_vector v
+			 LEFT JOIN t_knowledge_document d
+			   ON d.id = v.metadata::jsonb->>'doc_id'
+			  AND d.deleted = 0
+			 WHERE v.collection_name = ?
+			 ORDER BY v.embedding <=> ?
 			 LIMIT ?`,
 			vecStr, kb.CollectionName, vecStr, topK,
 		).Scan(&rows).Error
@@ -99,7 +106,7 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 				ID:       row.ID,
 				Text:     row.Content,
 				Score:    row.Score,
-				Metadata: metadataWithKnowledgeBase(parseVectorMetadata(row.Metadata), kb),
+				Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), kb, row.DocName, row.SourceLocation, row.FileURL),
 			})
 		}
 	}
@@ -110,11 +117,25 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 }
 
 func metadataWithKnowledgeBase(meta map[string]string, kb knowledgeModel.KnowledgeBase) map[string]string {
+	return metadataWithSources(meta, kb, "", "", "")
+}
+
+func metadataWithSources(meta map[string]string, kb knowledgeModel.KnowledgeBase, docName, sourceLocation, fileURL string) map[string]string {
 	if meta == nil {
 		meta = make(map[string]string)
 	}
 	meta["kb_id"] = kb.ID
 	meta["kb_name"] = kb.Name
 	meta["collection_name"] = kb.CollectionName
+	if docName != "" {
+		meta["doc_name"] = docName
+	}
+	if meta["source_url"] == "" {
+		if isHTTPURL(sourceLocation) {
+			meta["source_url"] = sourceLocation
+		} else if isHTTPURL(fileURL) {
+			meta["source_url"] = fileURL
+		}
+	}
 	return meta
 }

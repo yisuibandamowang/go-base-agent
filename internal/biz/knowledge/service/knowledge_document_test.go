@@ -153,6 +153,58 @@ func TestDocumentService_PersistChunksAndVectorsUsesPersistedChunkIDs(t *testing
 	}
 }
 
+func TestDocumentService_PersistChunksAndVectorsCompletesDocumentMetadata(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		db: gdb,
+		kbRepo: fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{
+			CollectionName: "collection_a",
+		}},
+		vecStore: vecStore,
+	}
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:           "kb-1",
+		DocName:        "会员智能问答Agent当前支持能力.md",
+		SourceType:     "url",
+		SourceLocation: "https://example.com/member-agent.md",
+		CreatedBy:      "user-1",
+	}
+	doc.ID = "doc-1"
+
+	_, err = svc.persistChunksAndVectors(context.Background(), doc, []rag.VectorChunk{
+		{Content: "content", Embedding: []float32{0.1, 0.2}, Index: 0},
+	})
+	if err != nil {
+		t.Fatalf("persist chunks and vectors: %v", err)
+	}
+
+	if len(vecStore.chunks) != 1 {
+		t.Fatalf("expected 1 vector chunk, got %d", len(vecStore.chunks))
+	}
+	meta := vecStore.chunks[0].Metadata
+	if meta["doc_id"] != "doc-1" {
+		t.Fatalf("expected doc_id metadata, got %+v", meta)
+	}
+	if meta["doc_name"] != "会员智能问答Agent当前支持能力.md" {
+		t.Fatalf("expected doc_name metadata, got %+v", meta)
+	}
+	if meta["source_type"] != "url" {
+		t.Fatalf("expected source_type metadata, got %+v", meta)
+	}
+	if meta["source_url"] != "https://example.com/member-agent.md" {
+		t.Fatalf("expected source_url metadata, got %+v", meta)
+	}
+}
+
 func TestDocumentService_RunChunkProcessBuildsSourceMetadata(t *testing.T) {
 	svc := &DocumentService{
 		kbRepo: fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{

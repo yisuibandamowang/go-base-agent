@@ -386,6 +386,7 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 			return 0, fmt.Errorf("persist chunks: generated chunk id is empty at index %d", i)
 		}
 		vecChunks[i].ChunkID = chunks[i].ID
+		completeVectorChunkMetadata(doc, &vecChunks[i])
 	}
 
 	// 向量写入（事务外，避免长事务）
@@ -396,6 +397,19 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 	}
 
 	return len(chunks), nil
+}
+
+func completeVectorChunkMetadata(doc *model.KnowledgeDocument, chunk *rag.VectorChunk) {
+	if chunk.Metadata == nil {
+		chunk.Metadata = make(map[string]string)
+	}
+	chunk.Metadata["doc_id"] = doc.ID
+	chunk.Metadata["doc_name"] = doc.DocName
+	chunk.Metadata["source_type"] = doc.SourceType
+	if sourceURL := documentSourceURL(doc); sourceURL != "" {
+		chunk.Metadata["source_url"] = sourceURL
+	}
+	chunk.Metadata["chunk_index"] = fmt.Sprintf("%d", chunk.Index)
 }
 
 func (s *DocumentService) markChunkFailed(ctx context.Context, docID string) {

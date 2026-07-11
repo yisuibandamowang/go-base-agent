@@ -135,3 +135,26 @@ func TestMetadataWithKnowledgeBaseAddsSource(t *testing.T) {
 		t.Fatalf("expected existing doc metadata to be preserved, got %+v", meta)
 	}
 }
+
+func TestMetadataWithSourcesUsesDocumentNameFromDatabase(t *testing.T) {
+	kb := knowledgeModel.KnowledgeBase{
+		Name:           "go 语言知识库",
+		CollectionName: "goknowladge",
+	}
+	kb.ID = "kb-1"
+
+	meta := metadataWithSources(
+		map[string]string{"doc_id": "2075677715192614912"},
+		kb,
+		"会员智能问答Agent当前支持能力.md",
+		"https://example.com/member-agent.md",
+		"",
+	)
+
+	if meta["doc_name"] != "会员智能问答Agent当前支持能力.md" {
+		t.Fatalf("expected document name from database, got %+v", meta)
+	}
+	if meta["source_url"] != "https://example.com/member-agent.md" {
+		t.Fatalf("expected source url from database, got %+v", meta)
+	}
+}
