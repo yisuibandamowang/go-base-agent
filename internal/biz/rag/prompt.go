@@ -52,7 +52,7 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 
 	content := ctx.Question
 	if ctx.KbContext != "" {
-		content = "参考以下知识库内容回答问题：\n\n" + ctx.KbContext + "\n\n用户问题：" + content
+		content = "只能依据以下知识库内容回答用户问题；如果知识库内容不足以回答，请直接说明知识库中没有相关信息，不要使用模型自身知识补充。\n\n知识库内容：\n" + ctx.KbContext + "\n\n用户问题：" + content
 	}
 
 	messages = append(messages, chat.NewUserMessage(content))

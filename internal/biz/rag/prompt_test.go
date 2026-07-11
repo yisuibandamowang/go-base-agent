@@ -41,6 +41,9 @@ func TestDefaultPromptBuilder_WithKbContext(t *testing.T) {
 	if !strings.Contains(content, "RAG是检索增强生成技术") {
 		t.Fatal("kb context should be in user message")
 	}
+	if !strings.Contains(content, "只能依据以下知识库内容回答") {
+		t.Fatal("prompt should constrain the model to knowledge base content")
+	}
 	if !strings.Contains(content, "什么是RAG") {
 		t.Fatal("question should be in user message")
 	}

@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -47,6 +48,19 @@ func (m *recordingMemoryService) SaveMessage(ctx context.Context, conversationID
 	return nil
 }
 
+type staticRetriever struct {
+	chunks []RetrievedChunk
+	err    error
+}
+
+func (r staticRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	return r.chunks, r.err
+}
+
+func testRetriever() Retriever {
+	return staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
+}
+
 func TestPipeline_StreamChat_Basic(t *testing.T) {
 	done := make(chan struct{})
 	llm := &fakeLLMService{
@@ -62,7 +76,7 @@ func TestPipeline_StreamChat_Basic(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
 	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
 
 	<-done
@@ -97,7 +111,7 @@ func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
 	}
 
 	s, _ := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, mem)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
 	p.StreamChat(context.Background(), "question", "conv-1", "task-1", false, s)
 
 	if len(mem.saved) != 2 {
@@ -108,6 +122,63 @@ func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
 	}
 	if mem.saved[1].Role != chat.RoleAssistant || mem.saved[1].Content != "hello world" {
 		t.Fatalf("unexpected assistant message: %+v", mem.saved[1])
+	}
+}
+
+func TestPipeline_StreamChat_NoRetrievedChunksPrefixesReasonThenGuidesWithLLM(t *testing.T) {
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("你可以补充更具体的产品名称或文档关键词。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
+
+	body := w.Body.String()
+	reason := "检索失败原因：知识库中未检索到相关内容"
+	guidance := "你可以补充更具体的产品名称或文档关键词。"
+	if !strings.Contains(body, reason) {
+		t.Fatalf("expected retrieval reason, got: %s", body)
+	}
+	if !strings.Contains(body, guidance) {
+		t.Fatalf("expected model guidance, got: %s", body)
+	}
+	if strings.Index(body, reason) > strings.Index(body, guidance) {
+		t.Fatalf("expected retrieval reason before model guidance, got: %s", body)
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Fatal("missing done event")
+	}
+}
+
+func TestPipeline_StreamChat_RetrieveErrorPrefixesSpecificReasonThenGuidesWithLLM(t *testing.T) {
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("请检查知识库连接或稍后重试。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, staticRetriever{err: errors.New("database timeout")}, &NoopMemoryService{})
+	p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
+
+	body := w.Body.String()
+	reason := "检索失败原因：知识库检索执行失败：database timeout"
+	guidance := "请检查知识库连接或稍后重试。"
+	if !strings.Contains(body, reason) {
+		t.Fatalf("expected specific retrieval error, got: %s", body)
+	}
+	if !strings.Contains(body, guidance) {
+		t.Fatalf("expected model guidance, got: %s", body)
+	}
+	if strings.Index(body, reason) > strings.Index(body, guidance) {
+		t.Fatalf("expected retrieval reason before model guidance, got: %s", body)
 	}
 }
 
@@ -122,7 +193,7 @@ func TestPipeline_StreamChat_DeepThinking(t *testing.T) {
 	}
 
 	s, _ := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
 	p.StreamChat(context.Background(), "test", "conv-1", "task-1", true, s)
 
 	if capturedReq.Thinking == nil || !*capturedReq.Thinking {
@@ -146,7 +217,7 @@ func TestPipeline_StreamChat_Messages(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
 	go p.StreamChat(context.Background(), "hello world", "conv-1", "task-1", false, s)
 
 	<-done
@@ -176,7 +247,7 @@ func TestPipeline_StreamChat_ThinkingCallback(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
 	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", true, s)
 
 	<-done
@@ -206,7 +277,7 @@ func TestPipeline_StreamChat_Error(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
 	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
 
 	<-done

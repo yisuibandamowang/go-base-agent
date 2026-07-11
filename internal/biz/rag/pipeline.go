@@ -64,6 +64,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	var kbCtx string
 	if err != nil {
 		slog.Warn("rag: retrieve failed", "err", err)
+		p.streamRetrievalFallback(ctx, conversationID, question, sender, "检索失败原因：知识库检索执行失败："+err.Error())
+		return
 	} else if len(chunks) > 0 {
 		slog.Info("rag: chunks retrieved", "count", len(chunks))
 		for _, c := range chunks {
@@ -71,6 +73,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	} else {
 		slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
+		p.streamRetrievalFallback(ctx, conversationID, question, sender, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
+		return
 	}
 
 	var thinkingVal *bool
@@ -113,6 +117,35 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	handle.Wait()
 }
 
+func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, reason string) {
+	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
+	}
+	prefix := reason + "\n\n"
+	_ = sender.SendMessage(MsgTypeResponse, prefix)
+
+	req := chat.Request{
+		Messages: []chat.Message{
+			chat.NewSystemMessage("你是一个RAG问答助手。当前知识库检索没有可用结果，请不要回答用户原问题的事实内容，只做提问引导。"),
+			chat.NewUserMessage("用户原问题：" + question + "\n" + reason + "\n请基于以上原因，引导用户补充关键词、确认知识库范围、检查文档是否已入库，或换一种问法。"),
+		},
+	}
+	cb := &pipelineCallback{
+		ctx:            ctx,
+		conversationID: conversationID,
+		memory:         p.memory,
+		sender:         sender,
+		answerPrefix:   prefix,
+	}
+	handle, err := p.llm.StreamChat(ctx, req, cb)
+	if err != nil {
+		slog.Error("rag pipeline: retrieval fallback stream failed", "err", err)
+		cb.OnError(err)
+		return
+	}
+	handle.Wait()
+}
+
 // StopTask implements Service.StopTask.
 func (p *Pipeline) StopTask(taskID string) {
 	slog.Info("rag pipeline: stop task", "taskId", taskID)
@@ -126,6 +159,7 @@ type pipelineCallback struct {
 	sender         *SSESender
 	buf            []byte
 	answer         strings.Builder
+	answerPrefix   string
 }
 
 func (c *pipelineCallback) OnContent(content string) {
@@ -142,7 +176,7 @@ func (c *pipelineCallback) OnThinking(content string) {
 func (c *pipelineCallback) OnComplete() {
 	slog.Info("rag pipeline: llm stream complete")
 	if c.memory != nil {
-		if answer := c.answer.String(); answer != "" {
+		if answer := c.answerPrefix + c.answer.String(); answer != "" {
 			if err := c.memory.SaveMessage(c.ctx, c.conversationID, chat.NewAssistantMessage(answer)); err != nil {
 				slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
 			}
