@@ -90,6 +90,17 @@ func (h *AdminHandler) ListSampleQuestions(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(items, total, page, size)))
 }
 
+// ListRAGSampleQuestions GET /api/ragent/rag/sample-questions
+func (h *AdminHandler) ListRAGSampleQuestions(c *gin.Context) {
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	items, _, err := h.svc.ListSampleQuestions(c.Request.Context(), 1, size)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(items))
+}
+
 // CreateSampleQuestion POST /api/ragent/admin/sample-questions
 func (h *AdminHandler) CreateSampleQuestion(c *gin.Context) {
 	var req dto.CreateSampleQuestionReq

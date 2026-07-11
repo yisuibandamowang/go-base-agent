@@ -1,13 +1,29 @@
 package rag
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	appctx "go-base-agent/internal/framework/context"
+
 	"github.com/gin-gonic/gin"
 )
+
+type contextCaptureService struct {
+	user *appctx.LoginUser
+}
+
+func (s *contextCaptureService) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+	s.user = appctx.User(ctx)
+	sender.SendFinish("", "")
+	sender.SendDone()
+	sender.Close()
+}
+
+func (s *contextCaptureService) StopTask(taskID string) {}
 
 func TestController_Chat_MissingQuestion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -83,6 +99,24 @@ func TestController_Chat_AutoConversationID(t *testing.T) {
 	// conversationId should be generated (snowflake, not empty)
 	if !strings.Contains(body, `"conversationId":"`) {
 		t.Fatal("missing conversationId")
+	}
+}
+
+func TestController_Chat_PreservesLoginUserContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &contextCaptureService{}
+	ctl := NewController(svc)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=test&conversationId=conv-1", nil)
+	req = req.WithContext(appctx.WithUser(req.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c.Request = req
+
+	ctl.Chat(c)
+
+	if svc.user == nil || svc.user.UserID != "user-1" {
+		t.Fatalf("expected login user context to be preserved, got %+v", svc.user)
 	}
 }
 

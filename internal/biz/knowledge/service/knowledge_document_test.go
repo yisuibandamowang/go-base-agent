@@ -9,6 +9,7 @@ import (
 	"go-base-agent/internal/biz/rag"
 
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -30,6 +31,19 @@ func (s failingVectorStore) DeleteDocumentVectors(context.Context, string, strin
 
 func (s failingVectorStore) IndexDocumentChunks(context.Context, string, string, []rag.VectorChunk) error {
 	return s.err
+}
+
+type capturingVectorStore struct {
+	chunks []rag.VectorChunk
+}
+
+func (s *capturingVectorStore) DeleteDocumentVectors(context.Context, string, string) error {
+	return nil
+}
+
+func (s *capturingVectorStore) IndexDocumentChunks(_ context.Context, _ string, _ string, chunks []rag.VectorChunk) error {
+	s.chunks = append([]rag.VectorChunk(nil), chunks...)
+	return nil
 }
 
 func TestDocumentService_PersistChunksAndVectorsReturnsVectorError(t *testing.T) {
@@ -59,5 +73,52 @@ func TestDocumentService_PersistChunksAndVectorsReturnsVectorError(t *testing.T)
 
 	if !errors.Is(err, vectorErr) {
 		t.Fatalf("expected vector error, got %v", err)
+	}
+}
+
+func TestDocumentService_PersistChunksAndVectorsUsesPersistedChunkIDs(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		db: gdb,
+		kbRepo: fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{
+			CollectionName: "collection_a",
+		}},
+		vecStore: vecStore,
+	}
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:      "kb-1",
+		CreatedBy: "user-1",
+	}
+	doc.ID = "doc-1"
+
+	_, err = svc.persistChunksAndVectors(context.Background(), doc, []rag.VectorChunk{
+		{Content: "content 1", Embedding: []float32{0.1, 0.2}, Index: 0},
+		{Content: "content 2", Embedding: []float32{0.3, 0.4}, Index: 1},
+	})
+	if err != nil {
+		t.Fatalf("persist chunks and vectors: %v", err)
+	}
+
+	if len(vecStore.chunks) != 2 {
+		t.Fatalf("expected 2 vector chunks, got %d", len(vecStore.chunks))
+	}
+	seen := make(map[string]bool)
+	for _, c := range vecStore.chunks {
+		if c.ChunkID == "" {
+			t.Fatal("expected vector chunk ID to be populated from persisted chunk ID")
+		}
+		if seen[c.ChunkID] {
+			t.Fatalf("expected unique vector chunk IDs, got duplicate %q", c.ChunkID)
+		}
+		seen[c.ChunkID] = true
 	}
 }

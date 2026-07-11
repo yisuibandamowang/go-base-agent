@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/snowflake"
 	"go-base-agent/internal/framework/sse"
 
@@ -55,9 +56,9 @@ func (ctl *Controller) Chat(c *gin.Context) {
 		return
 	}
 
-	// Use background context — LLM pipeline completes independently.
-	// Client disconnects are handled gracefully by SSE transport layer.
-	ctx := context.Background()
+	// Use a detached context so the pipeline can finish after SSE transport cleanup,
+	// while preserving request-scoped identity for conversation memory.
+	ctx := detachedRequestContext(c.Request.Context())
 	ctl.svc.StreamChat(ctx, question, conversationID, taskID, deepThinking, sender)
 }
 
@@ -70,4 +71,15 @@ func (ctl *Controller) Stop(c *gin.Context) {
 	}
 	ctl.svc.StopTask(taskID)
 	c.JSON(http.StatusOK, gin.H{"code": "0", "message": "success"})
+}
+
+func detachedRequestContext(reqCtx context.Context) context.Context {
+	ctx := context.Background()
+	if traceID := appctx.TraceID(reqCtx); traceID != "" {
+		ctx = appctx.WithTraceID(ctx, traceID)
+	}
+	if user := appctx.User(reqCtx); user != nil {
+		ctx = appctx.WithUser(ctx, user)
+	}
+	return ctx
 }

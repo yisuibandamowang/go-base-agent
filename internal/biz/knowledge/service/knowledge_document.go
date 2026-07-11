@@ -329,6 +329,13 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 		return 0, fmt.Errorf("persist chunks: %w", err)
 	}
 
+	for i := range vecChunks {
+		if chunks[i].ID == "" {
+			return 0, fmt.Errorf("persist chunks: generated chunk id is empty at index %d", i)
+		}
+		vecChunks[i].ChunkID = chunks[i].ID
+	}
+
 	// 向量写入（事务外，避免长事务）
 	_ = s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID)
 	if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, vecChunks); err != nil {

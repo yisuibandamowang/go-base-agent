@@ -8,6 +8,7 @@ import (
 	"go-base-agent/internal/biz/conversation/model"
 	"go-base-agent/internal/biz/conversation/repo"
 	"go-base-agent/internal/biz/rag"
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/infra/chat"
 
@@ -121,7 +122,25 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 	err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Where("conversation_id = ?", conversationID).First(&conv).Error
 	if err != nil {
-		return "", fmt.Errorf("find conversation to append: %w", err)
+		if err != gorm.ErrRecordNotFound {
+			return "", fmt.Errorf("find conversation to append: %w", err)
+		}
+		user := appctx.User(ctx)
+		if user == nil || user.UserID == "" {
+			return "", fmt.Errorf("create conversation: missing login user")
+		}
+		now := time.Now()
+		conv = model.Conversation{
+			ConversationID: conversationID,
+			UserID:         user.UserID,
+			Title:          conversationTitle(msg.Content),
+			LastTime:       now,
+		}
+		conv.CreateTime = now
+		conv.UpdateTime = now
+		if err := s.convRepo.Create(ctx, &conv); err != nil {
+			return "", fmt.Errorf("create conversation: %w", err)
+		}
 	}
 	m := &model.Message{
 		ConversationID:   conversationID,
@@ -137,6 +156,17 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 	}
 	_ = s.convRepo.TouchLastTime(ctx, conversationID)
 	return m.ID, nil
+}
+
+func conversationTitle(content string) string {
+	runes := []rune(content)
+	if len(runes) == 0 {
+		return "新会话"
+	}
+	if len(runes) > 60 {
+		runes = runes[:60]
+	}
+	return string(runes)
 }
 
 // LoadConversation 加载会话信息。

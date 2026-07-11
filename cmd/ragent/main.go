@@ -221,8 +221,8 @@ func main() {
 		api.GET("/rag/traces/runs/:id/nodes", traceNodesStub)
 
 		// Sample questions — /rag/*, /sample-questions, /admin/sample-questions
-		api.GET("/rag/sample-questions", adminH.ListSampleQuestions)
-		api.GET("/sample-questions", adminH.ListSampleQuestions)
+		api.GET("/rag/sample-questions", adminH.ListRAGSampleQuestions)
+		api.GET("/sample-questions", adminH.ListRAGSampleQuestions)
 		api.POST("/sample-questions", adminH.CreateSampleQuestion)
 		api.PUT("/sample-questions/:id", adminH.UpdateSampleQuestion)
 		api.DELETE("/sample-questions/:id", adminH.DeleteSampleQuestion)

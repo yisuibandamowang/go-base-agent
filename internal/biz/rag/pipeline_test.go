@@ -34,6 +34,19 @@ type fakeHandle struct{}
 func (f *fakeHandle) Cancel() {}
 func (f *fakeHandle) Wait()   {}
 
+type recordingMemoryService struct {
+	saved []chat.Message
+}
+
+func (m *recordingMemoryService) LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error) {
+	return nil, nil
+}
+
+func (m *recordingMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
+	m.saved = append(m.saved, msg)
+	return nil
+}
+
 func TestPipeline_StreamChat_Basic(t *testing.T) {
 	done := make(chan struct{})
 	llm := &fakeLLMService{
@@ -69,6 +82,32 @@ func TestPipeline_StreamChat_Basic(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: done") {
 		t.Fatal("missing done event")
+	}
+}
+
+func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
+	mem := &recordingMemoryService{}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("hello")
+			cb.OnContent(" world")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, mem)
+	p.StreamChat(context.Background(), "question", "conv-1", "task-1", false, s)
+
+	if len(mem.saved) != 2 {
+		t.Fatalf("expected user and assistant messages to be saved, got %d", len(mem.saved))
+	}
+	if mem.saved[0].Role != chat.RoleUser || mem.saved[0].Content != "question" {
+		t.Fatalf("unexpected user message: %+v", mem.saved[0])
+	}
+	if mem.saved[1].Role != chat.RoleAssistant || mem.saved[1].Content != "hello world" {
+		t.Fatalf("unexpected assistant message: %+v", mem.saved[1])
 	}
 }
 

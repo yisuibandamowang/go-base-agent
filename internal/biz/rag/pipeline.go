@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/infra/chat"
@@ -85,7 +86,16 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	})
 	req.Thinking = thinkingVal
 
-	cb := &pipelineCallback{sender: sender}
+	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
+	}
+
+	cb := &pipelineCallback{
+		ctx:            ctx,
+		conversationID: conversationID,
+		memory:         p.memory,
+		sender:         sender,
+	}
 	if ctx.Err() != nil {
 		slog.Info("rag pipeline: cancelled before llm call", "err", ctx.Err())
 		sender.SendFinish("", "")
@@ -110,12 +120,17 @@ func (p *Pipeline) StopTask(taskID string) {
 
 // pipelineCallback converts LLM StreamCallback events to SSE events.
 type pipelineCallback struct {
-	sender *SSESender
-	buf    []byte
+	ctx            context.Context
+	conversationID string
+	memory         MemoryService
+	sender         *SSESender
+	buf            []byte
+	answer         strings.Builder
 }
 
 func (c *pipelineCallback) OnContent(content string) {
 	slog.Info("rag pipeline: llm content chunk", "len", len(content))
+	c.answer.WriteString(content)
 	c.sender.SendMessage(MsgTypeResponse, content)
 }
 
@@ -126,6 +141,13 @@ func (c *pipelineCallback) OnThinking(content string) {
 
 func (c *pipelineCallback) OnComplete() {
 	slog.Info("rag pipeline: llm stream complete")
+	if c.memory != nil {
+		if answer := c.answer.String(); answer != "" {
+			if err := c.memory.SaveMessage(c.ctx, c.conversationID, chat.NewAssistantMessage(answer)); err != nil {
+				slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
+			}
+		}
+	}
 	c.sender.SendFinish("", "")
 	c.sender.SendDone()
 	c.sender.Close()
