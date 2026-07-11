@@ -45,7 +45,11 @@ func (h *ConversationHandler) List(c *gin.Context) {
 			CreateTime:     conv.CreateTime,
 		})
 	}
-	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(records, total, page, size)))
+	if wantsPaged(c) {
+		c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(records, total, page, size)))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(records))
 }
 
 // Get GET /api/ragent/conversations/:conversationId
@@ -170,7 +174,7 @@ func (h *ConversationHandler) SubmitFeedback(c *gin.Context) {
 }
 
 func paginationParams(c *gin.Context) (int, int) {
-	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+	page, err := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	if err != nil || page < 1 {
 		page = 1
 	}
@@ -179,4 +183,12 @@ func paginationParams(c *gin.Context) (int, int) {
 		size = 10
 	}
 	return page, size
+}
+
+func wantsPaged(c *gin.Context) bool {
+	v := c.Query("paged")
+	if v == "" {
+		v = c.Query("pageMode")
+	}
+	return v == "true" || v == "1" || v == "page"
 }

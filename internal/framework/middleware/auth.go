@@ -69,8 +69,17 @@ func RequireAuth() gin.HandlerFunc {
 
 func extractToken(c *gin.Context, tokenName string) string {
 	token := c.GetHeader(tokenName)
+	if token == "" && tokenName != "" {
+		token = c.Query(tokenName)
+	}
 	if token == "" {
 		token = c.Query("token")
+	}
+	if token == "" {
+		token = c.Query("access_token")
+	}
+	if token == "" {
+		token = c.Query("satoken")
 	}
 	if token == "" {
 		return ""
