@@ -152,6 +152,16 @@ func (r *TermMappingRepo) Create(ctx context.Context, m *model.QueryTermMapping)
 	return r.db.WithContext(ctx).Create(m).Error
 }
 
+// FindByID 根据 ID 查询映射。
+func (r *TermMappingRepo) FindByID(ctx context.Context, id string) (*model.QueryTermMapping, error) {
+	var m model.QueryTermMapping
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Where("id = ?", id).First(&m).Error
+	if err != nil {
+		return nil, fmt.Errorf("find term mapping by id: %w", err)
+	}
+	return &m, nil
+}
+
 // Update 更新映射。
 func (r *TermMappingRepo) Update(ctx context.Context, m *model.QueryTermMapping) error {
 	return r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).

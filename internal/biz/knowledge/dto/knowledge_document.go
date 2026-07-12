@@ -67,6 +67,11 @@ type UpdateChunkReq struct {
 	Content string `json:"content" binding:"required"`
 }
 
+// CreateChunkReq 手工创建分块请求。
+type CreateChunkReq struct {
+	Content string `json:"content" binding:"required"`
+}
+
 // BatchEnableChunksReq 批量启用/禁用分块请求。
 type BatchEnableChunksReq struct {
 	IDs     []string `json:"ids" binding:"required"`

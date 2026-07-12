@@ -127,6 +127,16 @@ func (h *IntentHandler) CreateTermMapping(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
+// GetTermMapping GET /api/ragent/mappings/:id
+func (h *IntentHandler) GetTermMapping(c *gin.Context) {
+	resp, err := h.svc.GetTermMapping(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
 // UpdateTermMapping PUT /api/ragent/intent-tree/term-mappings/:id
 func (h *IntentHandler) UpdateTermMapping(c *gin.Context) {
 	id := c.Param("id")

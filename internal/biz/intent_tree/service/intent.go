@@ -125,6 +125,15 @@ func (s *IntentService) CreateTermMapping(ctx context.Context, req dto.CreateTer
 	return toTermResp(m), nil
 }
 
+// GetTermMapping 查询关键词映射详情。
+func (s *IntentService) GetTermMapping(ctx context.Context, id string) (*dto.TermMappingResp, error) {
+	m, err := s.termRepo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return toTermResp(m), nil
+}
+
 // UpdateTermMapping 更新关键词映射。
 func (s *IntentService) UpdateTermMapping(ctx context.Context, id string, req dto.UpdateTermMappingReq, userID string) (*dto.TermMappingResp, error) {
 	var m model.QueryTermMapping

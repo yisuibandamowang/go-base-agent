@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -521,6 +522,52 @@ func (s *DocumentService) ListChunks(ctx context.Context, docID string, page, si
 		records = append(records, *s.chunkToResp(&c))
 	}
 	return records, total, nil
+}
+
+// CreateChunk 手工创建文档分块。
+func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto.CreateChunkReq, userID string) (*dto.ChunkResp, error) {
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return nil, fmt.Errorf("document not found: %w", err)
+	}
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		return nil, fmt.Errorf("分块内容不能为空")
+	}
+	var nextIndex int
+	if err := s.db.WithContext(ctx).Model(&model.KnowledgeChunk{}).
+		Where("doc_id = ? AND deleted = 0", docID).
+		Select("COALESCE(MAX(chunk_index), -1) + 1").
+		Scan(&nextIndex).Error; err != nil {
+		return nil, fmt.Errorf("查询分块序号失败: %w", err)
+	}
+	hash := sha256.Sum256([]byte(content))
+	chunk := &model.KnowledgeChunk{
+		KbID:        doc.KbID,
+		DocID:       doc.ID,
+		ChunkIndex:  nextIndex,
+		Content:     content,
+		ContentHash: fmt.Sprintf("%x", hash[:]),
+		CharCount:   len([]rune(content)),
+		TokenCount:  len(strings.Fields(content)),
+		Enabled:     1,
+		CreatedBy:   userID,
+		UpdatedBy:   userID,
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(chunk).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.KnowledgeDocument{}).Where("id = ?", doc.ID).
+			Updates(map[string]interface{}{
+				"chunk_count": gorm.Expr("chunk_count + 1"),
+				"status":      "success",
+				"update_time": time.Now(),
+			}).Error
+	}); err != nil {
+		return nil, fmt.Errorf("create chunk: %w", err)
+	}
+	return s.chunkToResp(chunk), nil
 }
 
 // UpdateChunk 更新分块内容。

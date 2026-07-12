@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"go-base-agent/internal/biz/rag"
 
 	"github.com/gin-gonic/gin"
 )
@@ -48,4 +51,44 @@ func TestStatusProbeRoutes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRagEvalHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.GET("/api/ragent/rag/eval", ragEval(&fakeEvalRetriever{}))
+
+	t.Run("missing question returns client error", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval", nil)
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"code":"A000001"`) {
+			t.Fatalf("expected client error for missing question, got %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("returns retrieved chunks", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
+		r.ServeHTTP(w, req)
+		body := w.Body.String()
+		if w.Code != http.StatusOK || !strings.Contains(body, `"retrievedChunkIds":["chunk-1"]`) || !strings.Contains(body, `"hasKb":true`) {
+			t.Fatalf("expected eval retrieval response, got %d %s", w.Code, body)
+		}
+	})
+}
+
+type fakeEvalRetriever struct{}
+
+func (f *fakeEvalRetriever) Retrieve(ctx context.Context, question string, topK int) ([]rag.RetrievedChunk, error) {
+	return []rag.RetrievedChunk{{
+		ID:    "chunk-1",
+		Text:  "hello context",
+		Score: 0.91,
+		Metadata: map[string]string{
+			"doc_id":  "doc-1",
+			"kb_name": "kb",
+		},
+	}}, nil
 }

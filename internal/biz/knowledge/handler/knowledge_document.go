@@ -284,11 +284,20 @@ func (h *DocumentHandler) ChunkDoc(c *gin.Context) {
 	}))
 }
 
-// CreateChunkStub POST /knowledge-base/docs/:docId/chunks (前端兼容路径)
-func (h *DocumentHandler) CreateChunkStub(c *gin.Context) {
-	c.JSON(http.StatusOK, convention.Success(map[string]string{
-		"message": "create chunk stub",
-	}))
+// CreateChunk POST /knowledge-base/docs/:docId/chunks
+func (h *DocumentHandler) CreateChunk(c *gin.Context) {
+	docID := c.Param("docId")
+	var req dto.CreateChunkReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
+		return
+	}
+	resp, err := h.svc.CreateChunk(c.Request.Context(), docID, req, userID(c))
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
 // Preview GET /knowledge-base/docs/:docId/preview

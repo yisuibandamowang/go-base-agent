@@ -76,6 +76,17 @@ func (h *AdminHandler) TraceDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
+// TraceNodes GET /api/ragent/rag/traces/runs/:id/nodes
+func (h *AdminHandler) TraceNodes(c *gin.Context) {
+	traceID := c.Param("id")
+	resp, err := h.svc.ListTraceNodes(c.Request.Context(), traceID)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
 // --- 示例问题 ---
 
 // ListSampleQuestions GET /api/ragent/admin/sample-questions
@@ -99,6 +110,16 @@ func (h *AdminHandler) ListRAGSampleQuestions(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, convention.Success(items))
+}
+
+// GetSampleQuestion GET /api/ragent/sample-questions/:id
+func (h *AdminHandler) GetSampleQuestion(c *gin.Context) {
+	resp, err := h.svc.GetSampleQuestion(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
 // CreateSampleQuestion POST /api/ragent/admin/sample-questions

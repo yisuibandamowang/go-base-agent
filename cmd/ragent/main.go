@@ -16,6 +16,9 @@ import (
 	conversationHandler "go-base-agent/internal/biz/conversation/handler"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
+	ingestionHandler "go-base-agent/internal/biz/ingestion/handler"
+	ingestionRepo "go-base-agent/internal/biz/ingestion/repo"
+	ingestionService "go-base-agent/internal/biz/ingestion/service"
 	intentHandler "go-base-agent/internal/biz/intent_tree/handler"
 	intentRepo "go-base-agent/internal/biz/intent_tree/repo"
 	intentService "go-base-agent/internal/biz/intent_tree/service"
@@ -108,6 +111,11 @@ func main() {
 	adminSvc := adminService.NewAdminService(adminRepoObj, sampleQRepo, gormDB)
 	adminH := adminHandler.NewAdminHandler(adminSvc)
 
+	ingestionPipelineSvc := ingestionService.NewPipelineService(ingestionRepo.NewPipelineRepo(gormDB), gormDB)
+	ingestionTaskSvc := ingestionService.NewTaskService(ingestionRepo.NewTaskRepo(gormDB), ingestionPipelineSvc, gormDB)
+	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
+	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
+
 	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
 	llmRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
@@ -198,6 +206,7 @@ func main() {
 
 		// Term mappings — 同时注册 /mappings/* 和 /intent-tree/term-mappings/*
 		api.GET("/mappings", intentTreeHandler.ListTermMappings)
+		api.GET("/mappings/:id", intentTreeHandler.GetTermMapping)
 		api.POST("/mappings", intentTreeHandler.CreateTermMapping)
 		api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMapping)
 		api.DELETE("/mappings/:id", intentTreeHandler.DeleteTermMapping)
@@ -218,11 +227,12 @@ func main() {
 
 		api.GET("/rag/traces/runs", adminH.ListTraceRuns)
 		api.GET("/rag/traces/runs/:id", adminH.TraceDetail)
-		api.GET("/rag/traces/runs/:id/nodes", traceNodesStub)
+		api.GET("/rag/traces/runs/:id/nodes", adminH.TraceNodes)
 
 		// Sample questions — /rag/*, /sample-questions, /admin/sample-questions
 		api.GET("/rag/sample-questions", adminH.ListRAGSampleQuestions)
 		api.GET("/sample-questions", adminH.ListRAGSampleQuestions)
+		api.GET("/sample-questions/:id", adminH.GetSampleQuestion)
 		api.POST("/sample-questions", adminH.CreateSampleQuestion)
 		api.PUT("/sample-questions/:id", adminH.UpdateSampleQuestion)
 		api.DELETE("/sample-questions/:id", adminH.DeleteSampleQuestion)
@@ -239,6 +249,7 @@ func main() {
 
 		// RAG settings stub
 		api.GET("/rag/settings", ragSettings(cfg))
+		api.GET("/rag/eval", ragEval(pgRetriever))
 
 		// Knowledge base
 		kb := api.Group("/knowledge-base")
@@ -250,7 +261,7 @@ func main() {
 			kb.GET("/docs/search", docHandler.SearchDocs)
 			kb.GET("/docs/:docId/chunk-logs", docHandler.ChunkLogs)
 			kb.GET("/docs/:docId/chunks", docHandler.ListChunks)
-			kb.POST("/docs/:docId/chunks", docHandler.CreateChunkStub)
+			kb.POST("/docs/:docId/chunks", docHandler.CreateChunk)
 			kb.PUT("/docs/:docId/chunks/:chunkId", docHandler.UpdateChunk)
 			kb.DELETE("/docs/:docId/chunks/:chunkId", docHandler.DeleteChunk)
 			kb.PATCH("/docs/:docId/chunks/:chunkId/enable", docHandler.ToggleChunk)
@@ -270,9 +281,17 @@ func main() {
 			kb.DELETE("/:id", kbHandler.Delete)
 		}
 
-		// Ingestion stubs
-		api.GET("/ingestion/pipelines", stub("pipelines"))
-		api.GET("/ingestion/tasks", stub("tasks"))
+		// Ingestion
+		api.POST("/ingestion/pipelines", ingestionPipelineH.Create)
+		api.PUT("/ingestion/pipelines/:id", ingestionPipelineH.Update)
+		api.GET("/ingestion/pipelines/:id", ingestionPipelineH.Get)
+		api.GET("/ingestion/pipelines", ingestionPipelineH.List)
+		api.DELETE("/ingestion/pipelines/:id", ingestionPipelineH.Delete)
+		api.POST("/ingestion/tasks", ingestionTaskH.Create)
+		api.POST("/ingestion/tasks/upload", ingestionTaskH.Upload)
+		api.GET("/ingestion/tasks/:id", ingestionTaskH.Get)
+		api.GET("/ingestion/tasks/:id/nodes", ingestionTaskH.Nodes)
+		api.GET("/ingestion/tasks", ingestionTaskH.List)
 	}
 
 	ragGroup := r.Group("/rag/v3")
@@ -420,13 +439,6 @@ func embeddingDimension(aiCfg config.AIConfig) int {
 	return 1536
 }
 
-// stub returns a handler that responds with "not implemented" for stubbed endpoints.
-func stub(name string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, convention.Success(map[string]string{"message": name + " not yet implemented"}))
-	}
-}
-
 func ragSettings(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		embModels := make([]map[string]interface{}, 0)
@@ -469,6 +481,48 @@ func ragSettings(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func traceNodesStub(c *gin.Context) {
-	c.JSON(http.StatusOK, convention.Success[any]([]any{}))
+func ragEval(retriever rag.Retriever) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		question := c.Query("question")
+		if question == "" {
+			c.JSON(http.StatusOK, convention.Failure("A000001", "question不能为空"))
+			return
+		}
+		chunks, err := retriever.Retrieve(c.Request.Context(), question, 10)
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+			return
+		}
+		chunkIDs := make([]string, 0, len(chunks))
+		contexts := make([]string, 0, len(chunks))
+		contextDocIDs := make([]string, 0, len(chunks))
+		docSeen := make(map[string]struct{})
+		docIDs := make([]string, 0, len(chunks))
+		for _, chunk := range chunks {
+			chunkIDs = append(chunkIDs, chunk.ID)
+			contexts = append(contexts, chunk.Text)
+			docID := ""
+			if chunk.Metadata != nil {
+				docID = chunk.Metadata["doc_id"]
+			}
+			contextDocIDs = append(contextDocIDs, docID)
+			if docID != "" {
+				if _, ok := docSeen[docID]; !ok {
+					docSeen[docID] = struct{}{}
+					docIDs = append(docIDs, docID)
+				}
+			}
+		}
+		c.JSON(http.StatusOK, convention.Success(map[string]interface{}{
+			"retrievedDocIds":        docIDs,
+			"retrievedChunkIds":      chunkIDs,
+			"retrievedContexts":      contexts,
+			"retrievedContextDocIds": contextDocIDs,
+			"hasKb":                  len(chunks) > 0,
+			"hasMcp":                 false,
+			"mcpContext":             nil,
+			"subIntents":             []any{},
+			"intentLeafIds":          []any{},
+		}))
+	}
 }

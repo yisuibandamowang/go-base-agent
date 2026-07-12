@@ -76,6 +76,25 @@ func (s *AdminService) ListTraceRuns(ctx context.Context, page, size int) ([]adm
 	return resp, total, nil
 }
 
+// ListTraceNodes 查询指定链路的节点记录。
+func (s *AdminService) ListTraceNodes(ctx context.Context, traceID string) ([]adminDto.TraceNodeResp, error) {
+	nodes, err := s.adminRepo.GetTraceNodes(ctx, traceID)
+	if err != nil {
+		return nil, err
+	}
+	nodeResp := make([]adminDto.TraceNodeResp, 0, len(nodes))
+	for _, n := range nodes {
+		nodeResp = append(nodeResp, adminDto.TraceNodeResp{
+			ID: n.ID, TraceID: n.TraceID, NodeID: n.NodeID,
+			ParentNodeID: n.ParentNodeID, Depth: n.Depth,
+			NodeType: n.NodeType, NodeName: n.NodeName, Status: n.Status,
+			ErrorMessage: n.ErrorMessage, StartTime: n.StartTime,
+			EndTime: n.EndTime, DurationMs: n.DurationMs,
+		})
+	}
+	return nodeResp, nil
+}
+
 // GetTraceDetail 获取链路详情。
 func (s *AdminService) GetTraceDetail(ctx context.Context, traceID string) (*adminDto.TraceDetailResp, error) {
 	run, err := s.adminRepo.GetTraceRun(ctx, traceID)
@@ -134,6 +153,15 @@ func (s *AdminService) ListSampleQuestions(ctx context.Context, page, size int) 
 		resp = append(resp, *toSampleQResp(&sq))
 	}
 	return resp, total, nil
+}
+
+// GetSampleQuestion 查询示例问题详情。
+func (s *AdminService) GetSampleQuestion(ctx context.Context, id string) (*adminDto.SampleQuestionResp, error) {
+	sq, err := s.sampleQRepo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return toSampleQResp(sq), nil
 }
 
 // UpdateSampleQuestion 更新示例问题。
