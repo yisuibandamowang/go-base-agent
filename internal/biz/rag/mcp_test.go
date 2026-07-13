@@ -2,16 +2,31 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 type testMcpExecutor struct {
-	tool ToolDefinition
+	tool   ToolDefinition
+	params map[string]interface{}
+	result map[string]interface{}
 }
 
 func (e *testMcpExecutor) GetToolDefinition() ToolDefinition { return e.tool }
 func (e *testMcpExecutor) Execute(ctx context.Context, params map[string]interface{}) (map[string]interface{}, error) {
+	e.params = params
+	if e.result != nil {
+		return e.result, nil
+	}
 	return map[string]interface{}{"result": "ok"}, nil
+}
+
+type testMcpExtractor struct {
+	params map[string]interface{}
+}
+
+func (e *testMcpExtractor) ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error) {
+	return e.params, nil
 }
 
 func TestMcpToolRegistry_Register(t *testing.T) {
@@ -76,5 +91,30 @@ func TestMcpToolExecutor(t *testing.T) {
 	}
 	if result["result"] != "ok" {
 		t.Fatal("unexpected result")
+	}
+}
+
+func TestDefaultMcpContextProvider_BuildContextExecutesRegisteredTools(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	exec := &testMcpExecutor{
+		tool:   ToolDefinition{Name: "member_profile", Description: "查询会员画像"},
+		result: map[string]interface{}{"level": "gold", "points": 120},
+	}
+	registry.Register(exec)
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{
+		params: map[string]interface{}{"userId": "u-1"},
+	})
+
+	contextText, err := provider.BuildContext(context.Background(), "查询会员等级")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exec.params["userId"] != "u-1" {
+		t.Fatalf("expected extractor params to be passed to executor, got %+v", exec.params)
+	}
+	for _, want := range []string{"工具：member_profile", "level=gold", "points=120"} {
+		if !strings.Contains(contextText, want) {
+			t.Fatalf("expected MCP context to contain %q, got %q", want, contextText)
+		}
 	}
 }

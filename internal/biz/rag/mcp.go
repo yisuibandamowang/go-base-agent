@@ -2,6 +2,9 @@ package rag
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -105,6 +108,80 @@ type McpParameterExtractor interface {
 // McpContextProvider builds MCP execution context for chat prompts.
 type McpContextProvider interface {
 	BuildContext(ctx context.Context, question string) (string, error)
+}
+
+// DefaultMcpContextProvider executes registered MCP tools and formats their results.
+type DefaultMcpContextProvider struct {
+	registry  McpToolRegistry
+	extractor McpParameterExtractor
+}
+
+// NewDefaultMcpContextProvider creates a provider backed by a tool registry.
+func NewDefaultMcpContextProvider(registry McpToolRegistry, extractor McpParameterExtractor) *DefaultMcpContextProvider {
+	return &DefaultMcpContextProvider{registry: registry, extractor: extractor}
+}
+
+// BuildContext executes registered MCP tools and returns prompt-ready context text.
+func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question string) (string, error) {
+	if p == nil || p.registry == nil || p.registry.Size() == 0 {
+		return "", nil
+	}
+
+	var b strings.Builder
+	for i, executor := range p.registry.ListAllExecutors() {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
+		tool := executor.GetToolDefinition()
+		params := map[string]interface{}{}
+		var err error
+		if p.extractor != nil {
+			params, err = p.extractor.ExtractParameters(ctx, question, tool)
+			if params == nil {
+				params = map[string]interface{}{}
+			}
+		}
+
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("工具：")
+		b.WriteString(tool.Name)
+		b.WriteString("\n")
+		if err != nil {
+			b.WriteString("错误：")
+			b.WriteString(err.Error())
+			continue
+		}
+
+		result, err := executor.Execute(ctx, params)
+		if err != nil {
+			b.WriteString("错误：")
+			b.WriteString(err.Error())
+			continue
+		}
+		b.WriteString("结果：")
+		b.WriteString(formatMcpResult(result))
+	}
+	return b.String(), nil
+}
+
+func formatMcpResult(result map[string]interface{}) string {
+	if len(result) == 0 {
+		return "无"
+	}
+	keys := make([]string, 0, len(result))
+	for key := range result {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+fmt.Sprint(result[key]))
+	}
+	return strings.Join(parts, "；")
 }
 
 // McpContext holds the result of MCP tool execution for prompt formatting.
