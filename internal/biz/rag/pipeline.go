@@ -67,14 +67,18 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 
 	result, err := p.rewrite.Rewrite(ctx, question, history)
 	q := question
+	var subQuestions []string
 	if err != nil {
 		slog.Warn("rag: rewrite failed", "err", err)
-	} else if result != nil && result.RewrittenQuestion != "" {
-		slog.Info("rag: query rewritten", "from", question, "to", result.RewrittenQuestion)
-		q = result.RewrittenQuestion
+	} else if result != nil {
+		subQuestions = result.SubQuestions
+		if result.RewrittenQuestion != "" {
+			slog.Info("rag: query rewritten", "from", question, "to", result.RewrittenQuestion)
+			q = result.RewrittenQuestion
+		}
 	}
 
-	chunks, err := p.retrieve.Retrieve(ctx, q, 10)
+	chunks, err := p.retrieveChunks(ctx, q, subQuestions, 10)
 	var kbCtx string
 	if err != nil {
 		slog.Warn("rag: retrieve failed", "err", err)
@@ -148,6 +152,50 @@ func (p *Pipeline) buildMcpContext(ctx context.Context, question string) string 
 		return ""
 	}
 	return mcpCtx
+}
+
+func (p *Pipeline) retrieveChunks(ctx context.Context, question string, subQuestions []string, topK int) ([]RetrievedChunk, error) {
+	queries := retrievalQueries(question, subQuestions)
+	allChunks := make([]RetrievedChunk, 0)
+	for _, query := range queries {
+		chunks, err := p.retrieve.Retrieve(ctx, query, topK)
+		if err != nil {
+			return nil, err
+		}
+		allChunks = append(allChunks, chunks...)
+	}
+	return deduplicateChunks(allChunks), nil
+}
+
+func retrievalQueries(question string, subQuestions []string) []string {
+	seen := make(map[string]bool)
+	queries := make([]string, 0, len(subQuestions)+1)
+	for _, query := range append([]string{question}, subQuestions...) {
+		query = strings.TrimSpace(query)
+		if query == "" || seen[query] {
+			continue
+		}
+		seen[query] = true
+		queries = append(queries, query)
+	}
+	return queries
+}
+
+func deduplicateChunks(chunks []RetrievedChunk) []RetrievedChunk {
+	seen := make(map[string]bool)
+	deduped := make([]RetrievedChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		key := chunk.ID
+		if key == "" {
+			key = chunk.Text
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, chunk)
+	}
+	return deduped
 }
 
 func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, task *streamTask, reason string) {

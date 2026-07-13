@@ -81,22 +81,25 @@ func (r staticRetriever) Retrieve(ctx context.Context, question string, topK int
 
 type recordingRetriever struct {
 	question string
+	queries  []string
 	chunks   []RetrievedChunk
 }
 
 func (r *recordingRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
 	r.question = question
+	r.queries = append(r.queries, question)
 	return r.chunks, nil
 }
 
 type recordingRewriter struct {
-	history []chat.Message
-	result  string
+	history      []chat.Message
+	result       string
+	subQuestions []string
 }
 
 func (r *recordingRewriter) Rewrite(ctx context.Context, question string, history []chat.Message) (*RewriteResult, error) {
 	r.history = append([]chat.Message(nil), history...)
-	return &RewriteResult{RewrittenQuestion: r.result}, nil
+	return &RewriteResult{RewrittenQuestion: r.result, SubQuestions: r.subQuestions}, nil
 }
 
 func testRetriever() Retriever {
@@ -216,6 +219,38 @@ func TestPipeline_StreamChat_RewritesWithConversationHistory(t *testing.T) {
 	}
 	if retriever.question != "会员Agent 错误排查能力" {
 		t.Fatalf("expected retriever to use rewritten question, got %q", retriever.question)
+	}
+}
+
+func TestPipeline_StreamChat_RetrievesSubQuestionsAndDeduplicatesChunks(t *testing.T) {
+	rewriter := &recordingRewriter{
+		result:       "会员Agent能力",
+		subQuestions: []string{"会员Agent错误排查", "会员Agent权益查询"},
+	}
+	retriever := &recordingRetriever{chunks: []RetrievedChunk{
+		{ID: "chunk-1", Text: "错误排查能力说明", Score: 0.9},
+		{ID: "chunk-1", Text: "错误排查能力说明", Score: 0.8},
+	}}
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), rewriter, retriever, &NoopMemoryService{})
+	p.StreamChat(context.Background(), "会员Agent支持什么？", "conv-1", "task-1", false, s)
+
+	wantQueries := []string{"会员Agent能力", "会员Agent错误排查", "会员Agent权益查询"}
+	if strings.Join(retriever.queries, "|") != strings.Join(wantQueries, "|") {
+		t.Fatalf("expected retrieve queries %v, got %v", wantQueries, retriever.queries)
+	}
+	content := capturedReq.Messages[len(capturedReq.Messages)-1].Content
+	if count := strings.Count(content, "错误排查能力说明"); count != 1 {
+		t.Fatalf("expected duplicate chunks to appear once in prompt, got %d occurrences in: %s", count, content)
 	}
 }
 
