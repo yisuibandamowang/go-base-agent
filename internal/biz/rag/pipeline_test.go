@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go-base-agent/internal/infra/chat"
 )
@@ -34,6 +36,25 @@ type fakeHandle struct{}
 
 func (f *fakeHandle) Cancel() {}
 func (f *fakeHandle) Wait()   {}
+
+type blockingHandle struct {
+	once      sync.Once
+	cancelled chan struct{}
+}
+
+func newBlockingHandle() *blockingHandle {
+	return &blockingHandle{cancelled: make(chan struct{})}
+}
+
+func (h *blockingHandle) Cancel() {
+	h.once.Do(func() {
+		close(h.cancelled)
+	})
+}
+
+func (h *blockingHandle) Wait() {
+	<-h.cancelled
+}
 
 type recordingMemoryService struct {
 	saved []chat.Message
@@ -75,6 +96,15 @@ func citationRetriever() Retriever {
 			"source_url": "https://example.com/member-agent.md",
 		},
 	}}}
+}
+
+type staticMcpContextProvider struct {
+	context string
+	err     error
+}
+
+func (p staticMcpContextProvider) BuildContext(ctx context.Context, question string) (string, error) {
+	return p.context, p.err
 }
 
 func TestPipeline_StreamChat_Basic(t *testing.T) {
@@ -243,6 +273,60 @@ func TestPipeline_StreamChat_RetrieveErrorPrefixesSpecificReasonThenGuidesWithLL
 	}
 }
 
+func TestPipeline_StopTaskCancelsStreamAndClosesSender(t *testing.T) {
+	handleCh := make(chan *blockingHandle, 1)
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("partial")
+			handle := newBlockingHandle()
+			handleCh <- handle
+			return handle, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
+	done := make(chan struct{})
+	go func() {
+		p.StreamChat(context.Background(), "test", "conv-1", "task-stop", false, s)
+		close(done)
+	}()
+
+	var handle *blockingHandle
+	select {
+	case handle = <-handleCh:
+	case <-time.After(time.Second):
+		t.Fatal("expected stream handle to be created")
+	}
+
+	p.StopTask("task-stop")
+
+	select {
+	case <-handle.cancelled:
+	case <-time.After(time.Second):
+		handle.Cancel()
+		t.Fatal("expected StopTask to cancel stream handle")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		handle.Cancel()
+		t.Fatal("expected StreamChat to return after StopTask")
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event: cancel") {
+		t.Fatalf("missing cancel event, body: %s", body)
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Fatalf("missing done event, body: %s", body)
+	}
+	if !s.IsClosed() {
+		t.Fatal("expected sender to be closed after StopTask")
+	}
+}
+
 func TestPipeline_StreamChat_DeepThinking(t *testing.T) {
 	var capturedReq chat.Request
 	llm := &fakeLLMService{
@@ -290,6 +374,33 @@ func TestPipeline_StreamChat_Messages(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "event: message") {
 		t.Fatal("missing message event")
+	}
+}
+
+func TestPipeline_StreamChat_IncludesMcpContext(t *testing.T) {
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
+	p.SetMcpContextProvider(staticMcpContextProvider{context: "工具：member_profile\n结果：用户为金卡会员。"})
+	p.StreamChat(context.Background(), "当前会员等级是什么", "conv-1", "task-1", false, s)
+
+	if len(capturedReq.Messages) < 2 {
+		t.Fatalf("expected prompt messages, got %d", len(capturedReq.Messages))
+	}
+	content := capturedReq.Messages[len(capturedReq.Messages)-1].Content
+	if !strings.Contains(content, "MCP工具结果") {
+		t.Fatalf("expected prompt to include MCP context section, got: %s", content)
+	}
+	if !strings.Contains(content, "用户为金卡会员") {
+		t.Fatalf("expected prompt to include MCP tool result, got: %s", content)
 	}
 }
 

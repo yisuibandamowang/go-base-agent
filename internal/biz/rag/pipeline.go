@@ -18,11 +18,18 @@ type Pipeline struct {
 	rewrite  QueryRewriter
 	retrieve Retriever
 	memory   MemoryService
+	mcp      McpContextProvider
+	tasks    *streamTaskManager
 }
 
 // NewPipeline creates a new RAG pipeline.
 func NewPipeline(llm chat.LLMService, prompt PromptBuilder, rewrite QueryRewriter, retrieve Retriever, memory MemoryService) *Pipeline {
-	return &Pipeline{llm: llm, prompt: prompt, rewrite: rewrite, retrieve: retrieve, memory: memory}
+	return &Pipeline{llm: llm, prompt: prompt, rewrite: rewrite, retrieve: retrieve, memory: memory, tasks: newStreamTaskManager()}
+}
+
+// SetMcpContextProvider sets an optional MCP context provider for chat prompts.
+func (p *Pipeline) SetMcpContextProvider(provider McpContextProvider) {
+	p.mcp = provider
 }
 
 // StreamChat implements Service.StreamChat.
@@ -30,6 +37,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	// Timeout context: the entire pipeline should complete within 120s
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
+	task := p.tasks.register(taskID, sender, cancel)
+	defer p.tasks.unregister(taskID)
 
 	// Start heartbeat to keep SSE connection alive during LLM processing
 	heartbeatDone := make(chan struct{})
@@ -65,7 +74,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	var kbCtx string
 	if err != nil {
 		slog.Warn("rag: retrieve failed", "err", err)
-		p.streamRetrievalFallback(ctx, conversationID, question, sender, "检索失败原因：知识库检索执行失败："+err.Error())
+		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库检索执行失败："+err.Error())
 		return
 	} else if len(chunks) > 0 {
 		slog.Info("rag: chunks retrieved", "count", len(chunks))
@@ -74,7 +83,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	} else {
 		slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
-		p.streamRetrievalFallback(ctx, conversationID, question, sender, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
+		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
 		return
 	}
 
@@ -85,9 +94,10 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	req := p.prompt.Build(PromptContext{
-		Question:  q,
-		History:   history,
-		KbContext: withChunkSources(chunks, kbCtx),
+		Question:   q,
+		History:    history,
+		KbContext:  withChunkSources(chunks, kbCtx),
+		McpContext: p.buildMcpContext(ctx, q),
 	})
 	req.Thinking = thinkingVal
 
@@ -101,8 +111,12 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		memory:         p.memory,
 		sender:         sender,
 		citations:      formatCitations(chunks),
+		task:           task,
 	}
 	if ctx.Err() != nil {
+		if task.isCancelled() {
+			return
+		}
 		slog.Info("rag pipeline: cancelled before llm call", "err", ctx.Err())
 		sender.SendFinish("", "")
 		sender.SendDone()
@@ -115,13 +129,29 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		cb.OnError(err)
 		return
 	}
+	task.bindHandle(handle)
 	slog.Info("rag pipeline: llm stream started")
 	handle.Wait()
 }
 
-func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, reason string) {
+func (p *Pipeline) buildMcpContext(ctx context.Context, question string) string {
+	if p.mcp == nil {
+		return ""
+	}
+	mcpCtx, err := p.mcp.BuildContext(ctx, question)
+	if err != nil {
+		slog.Warn("rag: build mcp context failed", "err", err)
+		return ""
+	}
+	return mcpCtx
+}
+
+func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, task *streamTask, reason string) {
 	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
+	}
+	if task != nil && task.isCancelled() {
+		return
 	}
 	prefix := reason + "\n\n"
 	_ = sender.SendMessage(MsgTypeResponse, prefix)
@@ -138,6 +168,7 @@ func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, 
 		memory:         p.memory,
 		sender:         sender,
 		answerPrefix:   prefix,
+		task:           task,
 	}
 	handle, err := p.llm.StreamChat(ctx, req, cb)
 	if err != nil {
@@ -145,12 +176,16 @@ func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, 
 		cb.OnError(err)
 		return
 	}
+	if task != nil {
+		task.bindHandle(handle)
+	}
 	handle.Wait()
 }
 
 // StopTask implements Service.StopTask.
 func (p *Pipeline) StopTask(taskID string) {
 	slog.Info("rag pipeline: stop task", "taskId", taskID)
+	p.tasks.cancel(taskID)
 }
 
 // pipelineCallback converts LLM StreamCallback events to SSE events.
@@ -163,20 +198,30 @@ type pipelineCallback struct {
 	answer         strings.Builder
 	answerPrefix   string
 	citations      string
+	task           *streamTask
 }
 
 func (c *pipelineCallback) OnContent(content string) {
+	if c.task != nil && c.task.isCancelled() {
+		return
+	}
 	slog.Info("rag pipeline: llm content chunk", "len", len(content))
 	c.answer.WriteString(content)
 	c.sender.SendMessage(MsgTypeResponse, content)
 }
 
 func (c *pipelineCallback) OnThinking(content string) {
+	if c.task != nil && c.task.isCancelled() {
+		return
+	}
 	slog.Info("rag pipeline: llm thinking chunk", "len", len(content))
 	c.sender.SendMessage(MsgTypeThink, content)
 }
 
 func (c *pipelineCallback) OnComplete() {
+	if c.task != nil && c.task.isCancelled() {
+		return
+	}
 	slog.Info("rag pipeline: llm stream complete")
 	if c.memory != nil {
 		if answer := c.answerPrefix + c.answer.String(); answer != "" {
@@ -195,6 +240,9 @@ func (c *pipelineCallback) OnComplete() {
 }
 
 func (c *pipelineCallback) OnError(err error) {
+	if c.task != nil && c.task.isCancelled() {
+		return
+	}
 	slog.Error("rag pipeline: llm error", "err", err)
 	// Ignore send errors — client may have already disconnected
 	_ = c.sender.SendFinish("", "")

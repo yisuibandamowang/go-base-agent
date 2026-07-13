@@ -102,6 +102,11 @@ type McpParameterExtractor interface {
 	ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error)
 }
 
+// McpContextProvider builds MCP execution context for chat prompts.
+type McpContextProvider interface {
+	BuildContext(ctx context.Context, question string) (string, error)
+}
+
 // McpContext holds the result of MCP tool execution for prompt formatting.
 type McpContext struct {
 	ToolResults []McpToolResult

@@ -49,6 +49,26 @@ func TestDefaultPromptBuilder_WithKbContext(t *testing.T) {
 	}
 }
 
+func TestDefaultPromptBuilder_WithMcpContext(t *testing.T) {
+	b := NewDefaultPromptBuilder()
+	req := b.Build(PromptContext{
+		Question:   "查询订单状态",
+		KbContext:  "订单助手支持订单状态查询。",
+		McpContext: "工具：order_status\n结果：订单 123 当前状态为已发货。",
+	})
+
+	content := req.Messages[1].Content
+	if !strings.Contains(content, "MCP工具结果") {
+		t.Fatal("prompt should include MCP context section")
+	}
+	if !strings.Contains(content, "订单 123 当前状态为已发货") {
+		t.Fatal("mcp context should be in user message")
+	}
+	if !strings.Contains(content, "查询订单状态") {
+		t.Fatal("question should be in user message")
+	}
+}
+
 func TestDefaultPromptBuilder_WithHistory(t *testing.T) {
 	b := NewDefaultPromptBuilder()
 	req := b.Build(PromptContext{
