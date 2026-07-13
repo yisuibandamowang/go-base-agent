@@ -59,7 +59,13 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}()
 	defer close(heartbeatDone)
 
-	result, err := p.rewrite.Rewrite(ctx, question, nil)
+	history, err := p.memory.LoadHistory(ctx, conversationID)
+	if err != nil {
+		slog.Warn("rag memory: load history failed", "conversationId", conversationID, "err", err)
+		history = nil
+	}
+
+	result, err := p.rewrite.Rewrite(ctx, question, history)
 	q := question
 	if err != nil {
 		slog.Warn("rag: rewrite failed", "err", err)
@@ -67,8 +73,6 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		slog.Info("rag: query rewritten", "from", question, "to", result.RewrittenQuestion)
 		q = result.RewrittenQuestion
 	}
-
-	history, _ := p.memory.LoadHistory(ctx, conversationID)
 
 	chunks, err := p.retrieve.Retrieve(ctx, q, 10)
 	var kbCtx string

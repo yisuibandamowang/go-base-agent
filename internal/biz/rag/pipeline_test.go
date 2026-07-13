@@ -57,11 +57,12 @@ func (h *blockingHandle) Wait() {
 }
 
 type recordingMemoryService struct {
-	saved []chat.Message
+	history []chat.Message
+	saved   []chat.Message
 }
 
 func (m *recordingMemoryService) LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error) {
-	return nil, nil
+	return m.history, nil
 }
 
 func (m *recordingMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
@@ -76,6 +77,26 @@ type staticRetriever struct {
 
 func (r staticRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
 	return r.chunks, r.err
+}
+
+type recordingRetriever struct {
+	question string
+	chunks   []RetrievedChunk
+}
+
+func (r *recordingRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	r.question = question
+	return r.chunks, nil
+}
+
+type recordingRewriter struct {
+	history []chat.Message
+	result  string
+}
+
+func (r *recordingRewriter) Rewrite(ctx context.Context, question string, history []chat.Message) (*RewriteResult, error) {
+	r.history = append([]chat.Message(nil), history...)
+	return &RewriteResult{RewrittenQuestion: r.result}, nil
 }
 
 func testRetriever() Retriever {
@@ -168,6 +189,33 @@ func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
 	}
 	if mem.saved[1].Role != chat.RoleAssistant || mem.saved[1].Content != "hello world" {
 		t.Fatalf("unexpected assistant message: %+v", mem.saved[1])
+	}
+}
+
+func TestPipeline_StreamChat_RewritesWithConversationHistory(t *testing.T) {
+	history := []chat.Message{
+		chat.NewUserMessage("会员Agent支持哪些能力？"),
+		chat.NewAssistantMessage("会员Agent支持错误排查和权益查询。"),
+	}
+	mem := &recordingMemoryService{history: history}
+	rewriter := &recordingRewriter{result: "会员Agent 错误排查能力"}
+	retriever := &recordingRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "错误排查能力说明", Score: 0.9}}}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), rewriter, retriever, mem)
+	p.StreamChat(context.Background(), "这个怎么用？", "conv-1", "task-1", false, s)
+
+	if len(rewriter.history) != len(history) {
+		t.Fatalf("expected rewriter to receive %d history messages, got %d", len(history), len(rewriter.history))
+	}
+	if retriever.question != "会员Agent 错误排查能力" {
+		t.Fatalf("expected retriever to use rewritten question, got %q", retriever.question)
 	}
 }
 
