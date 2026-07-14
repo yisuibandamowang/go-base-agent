@@ -21,6 +21,11 @@ func NewBizChangeLogRepo(database *gorm.DB) *BizChangeLogRepo {
 	return &BizChangeLogRepo{db: database}
 }
 
+// Create 新增审计日志。
+func (r *BizChangeLogRepo) Create(ctx context.Context, item *model.BizChangeLog) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
 // BizChangeLogQuery 变更日志查询条件。
 type BizChangeLogQuery struct {
 	BizType       string

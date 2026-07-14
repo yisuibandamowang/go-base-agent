@@ -118,6 +118,7 @@ func main() {
 	adminRepoObj := adminRepo.NewAdminRepo(gormDB)
 	sampleQRepo := adminRepo.NewSampleQuestionRepo(gormDB)
 	adminSvc := adminService.NewAdminService(adminRepoObj, sampleQRepo, gormDB)
+	adminSvc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB)))
 	adminH := adminHandler.NewAdminHandler(adminSvc)
 
 	auditSvc := auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB))

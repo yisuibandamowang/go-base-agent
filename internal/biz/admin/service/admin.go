@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	adminDto "go-base-agent/internal/biz/admin/dto"
 	adminModel "go-base-agent/internal/biz/admin/model"
 	adminRepo "go-base-agent/internal/biz/admin/repo"
+	auditService "go-base-agent/internal/biz/audit/service"
 	userModel "go-base-agent/internal/biz/user/model"
 	"go-base-agent/internal/framework/db"
 
@@ -16,9 +18,10 @@ import (
 
 // AdminService 管理后台业务服务。
 type AdminService struct {
-	adminRepo   *adminRepo.AdminRepo
-	sampleQRepo *adminRepo.SampleQuestionRepo
-	db          *gorm.DB
+	adminRepo     *adminRepo.AdminRepo
+	sampleQRepo   *adminRepo.SampleQuestionRepo
+	db            *gorm.DB
+	auditRecorder *auditService.BizChangeLogService
 }
 
 // NewAdminService 创建 AdminService。
@@ -32,6 +35,11 @@ func NewAdminService(
 		sampleQRepo: sampleQRepo,
 		db:          database,
 	}
+}
+
+// SetAuditRecorder 设置审计日志记录器。
+func (s *AdminService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.auditRecorder = recorder
 }
 
 // GetDashboard 获取仪表盘统计。
@@ -234,10 +242,18 @@ func (s *AdminService) CreateUser(ctx context.Context, req adminDto.CreateUserRe
 	if err := s.db.WithContext(ctx).Create(u).Error; err != nil {
 		return nil, fmt.Errorf("创建用户失败: %w", err)
 	}
-	return &adminDto.UserResp{
+	resp := &adminDto.UserResp{
 		ID: u.ID, Username: u.Username, Role: u.Role,
 		Avatar: u.Avatar, CreateTime: u.CreateTime, UpdateTime: u.UpdateTime,
-	}, nil
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeUser,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建用户：" + resp.Username,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // UpdateUser 管理员更新用户。
@@ -246,9 +262,11 @@ func (s *AdminService) UpdateUser(ctx context.Context, id string, req adminDto.U
 	if err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Where("id = ?", id).First(&u).Error; err != nil {
 		return nil, fmt.Errorf("用户不存在: %w", err)
 	}
+	before := toUserResp(&u)
 	updates := map[string]interface{}{}
 	if req.Username != nil {
 		updates["username"] = *req.Username
+		u.Username = *req.Username
 	}
 	if req.Password != nil {
 		hashed, _ := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -256,9 +274,11 @@ func (s *AdminService) UpdateUser(ctx context.Context, id string, req adminDto.U
 	}
 	if req.Role != nil {
 		updates["role"] = *req.Role
+		u.Role = *req.Role
 	}
 	if req.Avatar != nil {
 		updates["avatar"] = *req.Avatar
+		u.Avatar = *req.Avatar
 	}
 	if len(updates) > 0 {
 		updates["update_time"] = gorm.Expr("CURRENT_TIMESTAMP")
@@ -266,17 +286,39 @@ func (s *AdminService) UpdateUser(ctx context.Context, id string, req adminDto.U
 			return nil, fmt.Errorf("更新用户失败: %w", err)
 		}
 	}
-	return &adminDto.UserResp{
+	resp := &adminDto.UserResp{
 		ID: u.ID, Username: u.Username, Role: u.Role,
 		Avatar: u.Avatar, CreateTime: u.CreateTime, UpdateTime: u.UpdateTime,
-	}, nil
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeUser,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新用户：" + resp.Username,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // DeleteUser 软删除用户。
 func (s *AdminService) DeleteUser(ctx context.Context, id string) error {
 	var u userModel.User
-	u.ID = id
-	return db.SoftDelete(s.db.WithContext(ctx), &u)
+	if err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Where("id = ?", id).First(&u).Error; err != nil {
+		return fmt.Errorf("用户不存在: %w", err)
+	}
+	before := toUserResp(&u)
+	if err := db.SoftDelete(s.db.WithContext(ctx), &u); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeUser,
+		BizID:          u.ID,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除用户：" + u.Username,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // --- helpers ---
@@ -289,6 +331,29 @@ func toSampleQResp(sq *adminModel.SampleQuestion) *adminDto.SampleQuestionResp {
 		Question:    sq.Question,
 		CreateTime:  sq.CreateTime,
 		UpdateTime:  sq.UpdateTime,
+	}
+}
+
+func toUserResp(u *userModel.User) *adminDto.UserResp {
+	if u == nil {
+		return nil
+	}
+	return &adminDto.UserResp{
+		ID:         u.ID,
+		Username:   u.Username,
+		Role:       u.Role,
+		Avatar:     u.Avatar,
+		CreateTime: u.CreateTime,
+		UpdateTime: u.UpdateTime,
+	}
+}
+
+func (s *AdminService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
 	}
 }
 
