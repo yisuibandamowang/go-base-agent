@@ -13,11 +13,13 @@ import (
 )
 
 type contextCaptureService struct {
-	user *appctx.LoginUser
+	user   *appctx.LoginUser
+	tenant *appctx.TenantContext
 }
 
 func (s *contextCaptureService) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
 	s.user = appctx.User(ctx)
+	s.tenant = appctx.Tenant(ctx)
 	sender.SendFinish("", "")
 	sender.SendDone()
 	sender.Close()
@@ -117,6 +119,24 @@ func TestController_Chat_PreservesLoginUserContext(t *testing.T) {
 
 	if svc.user == nil || svc.user.UserID != "user-1" {
 		t.Fatalf("expected login user context to be preserved, got %+v", svc.user)
+	}
+}
+
+func TestController_Chat_PreservesTenantContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &contextCaptureService{}
+	ctl := NewController(svc)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=test&conversationId=conv-1", nil)
+	req = req.WithContext(appctx.WithTenant(req.Context(), &appctx.TenantContext{TenantID: "tenant-1", Domain: "membership"}))
+	c.Request = req
+
+	ctl.Chat(c)
+
+	if svc.tenant == nil || svc.tenant.TenantID != "tenant-1" {
+		t.Fatalf("expected tenant context to be preserved, got %+v", svc.tenant)
 	}
 }
 

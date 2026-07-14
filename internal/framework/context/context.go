@@ -9,6 +9,7 @@ type ctxKey int
 const (
 	keyTraceID ctxKey = iota
 	keyUser
+	keyTenant
 )
 
 func WithTraceID(ctx stdctx.Context, traceID string) stdctx.Context {

@@ -145,6 +145,7 @@ func main() {
 		middleware.TraceID(),
 		middleware.RequestLog(),
 		middleware.DB(gormDB),
+		middleware.Tenant(),
 		middleware.Auth(authSvc),
 	)
 

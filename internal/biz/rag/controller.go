@@ -81,5 +81,8 @@ func detachedRequestContext(reqCtx context.Context) context.Context {
 	if user := appctx.User(reqCtx); user != nil {
 		ctx = appctx.WithUser(ctx, user)
 	}
+	if tenant := appctx.Tenant(reqCtx); tenant != nil {
+		ctx = appctx.WithTenant(ctx, tenant)
+	}
 	return ctx
 }
