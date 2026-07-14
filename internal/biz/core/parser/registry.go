@@ -28,7 +28,7 @@ func (r *Registry) Register(p rag.DocumentParser) {
 }
 
 // Parse 根据 MIME 类型自动选择解析器解析文档。
-// 如果找不到匹配的解析器，使用 fallback。
+// 如果找不到匹配的解析器，使用 fallback；未配置 fallback 时返回不支持格式错误。
 func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -37,6 +37,9 @@ func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string) (*ra
 		if p.Supports(mimeType) {
 			return p.Parse(ctx, data, mimeType)
 		}
+	}
+	if r.fallback == nil {
+		return nil, ErrUnsupportedFormat
 	}
 	return r.fallback.Parse(ctx, data, mimeType)
 }
@@ -49,6 +52,9 @@ func (r *Registry) Supports(mimeType string) bool {
 		if p.Supports(mimeType) {
 			return true
 		}
+	}
+	if r.fallback == nil {
+		return false
 	}
 	return r.fallback.Supports(mimeType)
 }
@@ -66,7 +72,14 @@ func (r *Registry) List() []rag.ParserType {
 
 // DefaultRegistry 创建包含所有默认解析器的注册表。
 func DefaultRegistry() *Registry {
-	return NewRegistry(&rag.NoopParser{})
+	reg := NewRegistry(nil)
+	reg.Register(&MarkdownParser{})
+	reg.Register(&CSVParser{})
+	reg.Register(&XLSXParser{})
+	reg.Register(&PDFParser{})
+	reg.Register(&DOCXParser{})
+	reg.Register(&PlainTextParser{})
+	return reg
 }
 
 // ErrUnsupportedFormat 不支持的文档格式错误。

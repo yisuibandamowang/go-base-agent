@@ -3,11 +3,15 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"go-base-agent/internal/biz/core/parser"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/model"
@@ -266,8 +270,12 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 		return 0, 0, 0, nil, fmt.Errorf("文件内容为空")
 	}
 
-	// 2. 简单文本提取（Go 实现：直接转 string，过滤 null 字节）
-	text := sanitizeText(string(fileBytes))
+	// 2. 文档解析：按 MIME/文件类型选择解析器，保留结构化 blocks
+	parsed, err := parser.DefaultRegistry().Parse(ctx, fileBytes, detectDocumentMIME(doc))
+	if err != nil {
+		return 0, 0, 0, nil, fmt.Errorf("文件解析失败: %w", err)
+	}
+	text := sanitizeText(rag.RenderBlocks(parsed.Blocks))
 	if text == "" {
 		return 0, 0, 0, nil, fmt.Errorf("文件无有效文本内容")
 	}
@@ -275,7 +283,7 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 
 	// 3. 分块处理
 	chunkStart := time.Now()
-	chunks := s.chunkText(ctx, doc, text)
+	chunks := s.chunkDocument(ctx, doc, parsed.Blocks, text)
 	chunkDuration := time.Since(chunkStart).Milliseconds()
 
 	// 4. 向量化
@@ -322,12 +330,24 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 }
 
 // chunkText splits text into chunks using simple paragraph-based splitting.
-func (s *DocumentService) chunkText(ctx context.Context, doc *model.KnowledgeDocument, text string) []*model.KnowledgeChunk {
-	size := 500
-	overlap := 50
-	chunks := splitToChunks(text, size, overlap)
-	result := make([]*model.KnowledgeChunk, 0, len(chunks))
-	for i, content := range chunks {
+func (s *DocumentService) chunkDocument(ctx context.Context, doc *model.KnowledgeDocument, blocks []rag.Block, fallbackText string) []*model.KnowledgeChunk {
+	opts := chunkingOptionsForDocument(doc)
+	var chunkTexts []string
+	if len(blocks) > 0 {
+		chunker := &rag.StructureAwareChunker{}
+		vecChunks := chunker.ChunkBlocks(blocks, opts)
+		chunkTexts = make([]string, 0, len(vecChunks))
+		for _, chunk := range vecChunks {
+			if strings.TrimSpace(chunk.Content) != "" {
+				chunkTexts = append(chunkTexts, chunk.Content)
+			}
+		}
+	}
+	if len(chunkTexts) == 0 {
+		chunkTexts = splitToChunks(fallbackText, opts.ChunkSize, opts.OverlapSize)
+	}
+	result := make([]*model.KnowledgeChunk, 0, len(chunkTexts))
+	for i, content := range chunkTexts {
 		c := &model.KnowledgeChunk{
 			KbID:       doc.KbID,
 			DocID:      doc.ID,
@@ -343,6 +363,84 @@ func (s *DocumentService) chunkText(ctx context.Context, doc *model.KnowledgeDoc
 	}
 	_ = ctx
 	return result
+}
+
+func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOptions {
+	opts := rag.DefaultChunkingOptions()
+	if strings.TrimSpace(doc.ChunkConfig) == "" {
+		return opts
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(doc.ChunkConfig), &raw); err != nil {
+		return opts
+	}
+	if v := intFromChunkConfig(raw, "chunkSize", "size", "targetChars"); v > 0 {
+		opts.ChunkSize = v
+	}
+	if v := intFromChunkConfig(raw, "overlapSize", "overlap"); v >= 0 {
+		opts.OverlapSize = v
+	}
+	return opts
+}
+
+func intFromChunkConfig(raw map[string]any, keys ...string) int {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			switch v := value.(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			case string:
+				if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	return -1
+}
+
+func detectDocumentMIME(doc *model.KnowledgeDocument) string {
+	fileType := strings.ToLower(strings.TrimSpace(doc.FileType))
+	switch fileType {
+	case "pdf":
+		return "application/pdf"
+	case "docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case "csv":
+		return "text/csv"
+	case "md", "markdown":
+		return "text/markdown"
+	case "html", "htm":
+		return "text/html"
+	case "txt", "text":
+		return "text/plain"
+	case "json":
+		return "application/json"
+	default:
+		ext := strings.ToLower(filepath.Ext(doc.DocName))
+		switch ext {
+		case ".pdf":
+			return "application/pdf"
+		case ".docx":
+			return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		case ".xlsx":
+			return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+		case ".csv":
+			return "text/csv"
+		case ".md", ".markdown":
+			return "text/markdown"
+		case ".html", ".htm":
+			return "text/html"
+		case ".json":
+			return "application/json"
+		default:
+			return "text/plain"
+		}
+	}
 }
 
 func splitToChunks(text string, size, overlap int) []string {

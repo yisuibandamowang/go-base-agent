@@ -111,6 +111,15 @@ func RenderBlocks(blocks []Block) string {
 				}
 			}
 		case BlockTable:
+			if len(b.Headers) > 0 {
+				for j, cell := range b.Headers {
+					if j > 0 {
+						result += " | "
+					}
+					result += cell
+				}
+				result += "\n"
+			}
 			for _, row := range b.Rows {
 				for j, cell := range row {
 					if j > 0 {

@@ -116,3 +116,93 @@ func (n *NoopChunker) Chunk(text string, opts ChunkingOptions) []VectorChunk {
 		Index:         0,
 	}}
 }
+
+// StructureAwareChunker chunks parsed document blocks without splitting atomic blocks.
+type StructureAwareChunker struct{}
+
+func (s *StructureAwareChunker) Mode() ChunkingMode { return ChunkModeStructureAware }
+
+func (s *StructureAwareChunker) Chunk(text string, opts ChunkingOptions) []VectorChunk {
+	blocks := []Block{{Type: BlockParagraph, Content: text}}
+	return s.ChunkBlocks(blocks, opts)
+}
+
+// ChunkBlocks chunks structured document blocks while preserving tables, code blocks and images.
+func (s *StructureAwareChunker) ChunkBlocks(blocks []Block, opts ChunkingOptions) []VectorChunk {
+	if len(blocks) == 0 {
+		return nil
+	}
+	if opts.ChunkSize == -1 {
+		content := strings.TrimSpace(RenderBlocks(blocks))
+		if content == "" {
+			return nil
+		}
+		return []VectorChunk{{
+			ChunkID:       "chunk-0",
+			Content:       content,
+			EmbeddingText: content,
+			Index:         0,
+			Metadata:      map[string]string{"block_type": "document"},
+		}}
+	}
+	if opts.ChunkSize <= 0 {
+		opts = DefaultChunkingOptions()
+	}
+
+	var chunks []VectorChunk
+	var current []string
+	currentLen := 0
+
+	flush := func() {
+		content := strings.TrimSpace(strings.Join(current, "\n\n"))
+		if content == "" {
+			current = nil
+			currentLen = 0
+			return
+		}
+		chunks = append(chunks, VectorChunk{
+			ChunkID:       fmt.Sprintf("chunk-%d", len(chunks)),
+			Content:       content,
+			EmbeddingText: content,
+			Index:         len(chunks),
+			Metadata:      map[string]string{"block_type": "mixed"},
+		})
+		current = nil
+		currentLen = 0
+	}
+
+	for _, block := range blocks {
+		content := strings.TrimSpace(RenderBlocks([]Block{block}))
+		if content == "" {
+			continue
+		}
+		if isAtomicBlock(block.Type) {
+			flush()
+			chunks = append(chunks, VectorChunk{
+				ChunkID:       fmt.Sprintf("chunk-%d", len(chunks)),
+				Content:       content,
+				EmbeddingText: content,
+				Index:         len(chunks),
+				Metadata:      map[string]string{"block_type": string(block.Type)},
+			})
+			continue
+		}
+		contentLen := len([]rune(content))
+		if currentLen > 0 && currentLen+contentLen > opts.ChunkSize {
+			flush()
+		}
+		current = append(current, content)
+		currentLen += contentLen
+	}
+	flush()
+	return chunks
+}
+
+func isAtomicBlock(typ BlockType) bool {
+	switch typ {
+	case BlockTable, BlockCode, BlockImage:
+		return true
+	default:
+		return false
+	}
+}

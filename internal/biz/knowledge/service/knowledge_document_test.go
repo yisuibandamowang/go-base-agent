@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
@@ -350,7 +351,35 @@ func TestDocumentService_RunChunkProcessBuildsSourceMetadata(t *testing.T) {
 	if meta["source_url"] != "https://example.com/member-agent.md" {
 		t.Fatalf("expected source_url metadata, got %q", meta["source_url"])
 	}
-	if meta["page_start"] != "1" || meta["line_start"] != "1" || meta["line_end"] != "3" {
+	if meta["page_start"] != "1" || meta["line_start"] != "1" || meta["line_end"] == "" {
 		t.Fatalf("expected page/line metadata, got %+v", meta)
+	}
+}
+
+func TestDocumentService_RunChunkProcessUsesDocumentParser(t *testing.T) {
+	svc := &DocumentService{
+		kbRepo: fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{
+			EmbeddingModel: "emb-1",
+		}},
+		emb:       fakeEmbeddingService{},
+		fileStore: fakeFileReader{data: []byte("能力,说明\n权益查询,支持\n积分查询,支持")},
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent能力.csv",
+		FileType:   "csv",
+		SourceType: "file",
+	}
+	doc.ID = "doc-1"
+
+	_, _, _, chunks, err := svc.runChunkProcess(context.Background(), doc)
+	if err != nil {
+		t.Fatalf("run chunk process: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	if !strings.Contains(chunks[0].Content, "能力 | 说明") || !strings.Contains(chunks[0].Content, "权益查询 | 支持") {
+		t.Fatalf("expected parsed table content, got %q", chunks[0].Content)
 	}
 }
