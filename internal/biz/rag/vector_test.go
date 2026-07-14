@@ -86,3 +86,22 @@ func TestBuildVectorMetadataIncludesChunkMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestStringToVecParsesPgVectorLiteral(t *testing.T) {
+	got := stringToVec("[0.100000, -2.5,3]")
+	want := []float32{0.1, -2.5, 3}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d values, got %d: %+v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("index %d: expected %v, got %v", i, want[i], got[i])
+		}
+	}
+}
+
+func TestStringToVecInvalidLiteral(t *testing.T) {
+	if got := stringToVec("[0.1,not-a-number]"); got != nil {
+		t.Fatalf("expected nil for invalid vector literal, got %+v", got)
+	}
+}

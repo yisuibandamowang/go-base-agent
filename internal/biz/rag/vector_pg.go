@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type pgVectorRow struct {
@@ -51,12 +53,17 @@ func (s *PgVectorStore) IndexDocumentChunks(ctx context.Context, collectionName,
 
 // UpdateChunk 更新单个分块向量。
 func (s *PgVectorStore) UpdateChunk(ctx context.Context, collectionName, docID string, chunk VectorChunk) error {
-	return s.db.WithContext(ctx).Model(&pgVectorRow{}).
-		Where("id = ?", chunk.ChunkID).
-		Updates(map[string]interface{}{
-			"content":   chunk.Content,
-			"embedding": vecToString(chunk.Embedding),
-		}).Error
+	row := pgVectorRow{
+		ID:             chunk.ChunkID,
+		CollectionName: collectionName,
+		Content:        chunk.Content,
+		Metadata:       buildVectorMetadata(docID, chunk),
+		Embedding:      vecToString(chunk.Embedding),
+	}
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"collection_name", "content", "metadata", "embedding"}),
+	}).Create(&row).Error
 }
 
 // DeleteDocumentVectors 删除文档的所有向量。
@@ -162,7 +169,20 @@ func vecToString(vec []float32) string {
 }
 
 func stringToVec(s string) []float32 {
-	var result []float32
-	_ = result
-	return nil
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]float32, 0, len(parts))
+	for _, part := range parts {
+		value, err := strconv.ParseFloat(strings.TrimSpace(part), 32)
+		if err != nil {
+			return nil
+		}
+		result = append(result, float32(value))
+	}
+	return result
 }
