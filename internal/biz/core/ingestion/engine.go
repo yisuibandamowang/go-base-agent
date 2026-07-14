@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"go-base-agent/internal/biz/core/chunk"
 	"go-base-agent/internal/biz/core/parser"
 	"go-base-agent/internal/biz/rag"
 )
@@ -41,10 +40,11 @@ func (e *DefaultEngine) Run(ctx context.Context, taskID, collectionName, docID s
 	if err != nil {
 		return nil, fmt.Errorf("parse failed: %w", err)
 	}
-	text := rag.RenderBlocks(parsed.Blocks)
-
-	strategy := chunk.StrategyFactory("PARAGRAPH")
-	chunks := strategy.Chunk(text, e.chunkOptions)
+	chunker := &rag.StructureAwareChunker{}
+	chunks := chunker.ChunkBlocks(parsed.Blocks, e.chunkOptions)
+	if len(chunks) == 0 {
+		chunks = chunker.Chunk(rag.RenderBlocks(parsed.Blocks), e.chunkOptions)
+	}
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks produced")
 	}
