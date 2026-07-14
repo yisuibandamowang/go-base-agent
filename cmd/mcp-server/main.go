@@ -122,6 +122,8 @@ func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
 		switch provider.Protocol {
 		case "openai-compatible":
 			clients = append(clients, chat.NewOpenAICompatibleChatClient(name, nil))
+		case "anthropic":
+			clients = append(clients, chat.NewAnthropicChatClient(name, nil))
 		case "noop":
 		default:
 			slog.Warn("unknown protocol, skipping", "provider", name, "protocol", provider.Protocol)
@@ -144,7 +146,18 @@ func buildEmbeddingClients(aiCfg config.AIConfig) []embedding.Client {
 }
 
 func buildRerankClients(aiCfg config.AIConfig) []rerank.Client {
-	return []rerank.Client{&rerank.NoopClient{}}
+	clients := make([]rerank.Client, 0, len(aiCfg.Providers)+1)
+	for name, provider := range aiCfg.Providers {
+		switch provider.Protocol {
+		case "openai-compatible":
+			clients = append(clients, rerank.NewHTTPClient(name, nil))
+		case "noop":
+		default:
+			slog.Warn("unknown rerank protocol, skipping", "provider", name, "protocol", provider.Protocol)
+		}
+	}
+	clients = append(clients, &rerank.NoopClient{})
+	return clients
 }
 
 func embeddingDimension(aiCfg config.AIConfig) int {

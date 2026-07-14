@@ -5,7 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
+	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/biz/rag"
 
 	"gorm.io/driver/postgres"
@@ -76,6 +78,19 @@ func (s *capturingVectorStore) IndexDocumentChunks(_ context.Context, _ string, 
 	return nil
 }
 
+type fakeIngestionTaskStarter struct {
+	req    ingestionDto.CreateTaskReq
+	userID string
+	resp   *ingestionDto.IngestionResultResp
+	err    error
+}
+
+func (f *fakeIngestionTaskStarter) Create(ctx context.Context, req ingestionDto.CreateTaskReq, userID string) (*ingestionDto.IngestionResultResp, error) {
+	f.req = req
+	f.userID = userID
+	return f.resp, f.err
+}
+
 func TestDocumentService_PersistChunksAndVectorsReturnsVectorError(t *testing.T) {
 	gdb, err := gorm.Open(postgres.New(postgres.Config{
 		DSN:                  "host=127.0.0.1 user=postgres dbname=ragent sslmode=disable",
@@ -103,6 +118,103 @@ func TestDocumentService_PersistChunksAndVectorsReturnsVectorError(t *testing.T)
 
 	if !errors.Is(err, vectorErr) {
 		t.Fatalf("expected vector error, got %v", err)
+	}
+}
+
+func TestDocumentService_RunPipelineProcessCreatesIngestionTask(t *testing.T) {
+	starter := &fakeIngestionTaskStarter{resp: &ingestionDto.IngestionResultResp{
+		TaskID:     "task-1",
+		PipelineID: "pipe-1",
+		Status:     "completed",
+		ChunkCount: 3,
+		Message:    "OK",
+	}}
+	svc := &DocumentService{}
+	svc.SetIngestionTaskStarter(starter)
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:           "kb-1",
+		DocName:        "会员Agent说明.md",
+		SourceType:     "url",
+		SourceLocation: "https://example.com/member-agent.md",
+		PipelineID:     "pipe-1",
+		CreatedBy:      "user-1",
+	}
+	doc.ID = "doc-1"
+
+	result, err := svc.runPipelineProcess(context.Background(), doc)
+	if err != nil {
+		t.Fatalf("run pipeline process: %v", err)
+	}
+	if result.TaskID != "task-1" || result.ChunkCount != 3 {
+		t.Fatalf("unexpected ingestion result: %+v", result)
+	}
+	if starter.userID != "user-1" {
+		t.Fatalf("expected user-1, got %q", starter.userID)
+	}
+	if starter.req.PipelineID != "pipe-1" {
+		t.Fatalf("expected pipeline id pipe-1, got %q", starter.req.PipelineID)
+	}
+	if starter.req.Source.Type != "url" || starter.req.Source.Location != "https://example.com/member-agent.md" || starter.req.Source.FileName != "会员Agent说明.md" {
+		t.Fatalf("unexpected source request: %+v", starter.req.Source)
+	}
+	if starter.req.Metadata["docId"] != "doc-1" || starter.req.Metadata["kbId"] != "kb-1" {
+		t.Fatalf("unexpected metadata: %+v", starter.req.Metadata)
+	}
+}
+
+func TestDocumentService_ExecuteIngestionTaskPersistsChunksAndVectors(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent说明.md",
+		FileType:   "md",
+		Status:     "running",
+		CreatedBy:  "user-1",
+		SourceType: "file",
+	}
+	doc.ID = "doc-1"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		docRepo:  knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:       gdb,
+		kbRepo:   fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{EmbeddingModel: "emb-1", CollectionName: "collection_a"}},
+		emb:      fakeEmbeddingService{},
+		vecStore: vecStore,
+		fileStore: fakeFileReader{data: []byte(`会员 Agent 支持权益查询。
+会员 Agent 支持积分查询。`)},
+	}
+
+	count, err := svc.ExecuteIngestionTask(context.Background(), ingestionDto.CreateTaskReq{
+		PipelineID: "pipe-1",
+		Metadata:   map[string]any{"docId": "doc-1"},
+	})
+	if err != nil {
+		t.Fatalf("execute ingestion task: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 chunk, got %d", count)
+	}
+	if len(vecStore.chunks) != 1 || vecStore.chunks[0].Metadata["doc_name"] != "会员Agent说明.md" {
+		t.Fatalf("unexpected vector chunks: %+v", vecStore.chunks)
+	}
+	var updated knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&updated, "id = ?", "doc-1").Error; err != nil {
+		t.Fatalf("find updated doc: %v", err)
+	}
+	if updated.Status != "success" || updated.ChunkCount != 1 {
+		t.Fatalf("expected completed doc, got status=%s chunks=%d", updated.Status, updated.ChunkCount)
 	}
 }
 

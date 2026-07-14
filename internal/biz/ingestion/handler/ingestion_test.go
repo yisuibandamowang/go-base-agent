@@ -2,11 +2,13 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	serviceDto "go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/ingestion/model"
 	"go-base-agent/internal/biz/ingestion/repo"
 	"go-base-agent/internal/biz/ingestion/service"
@@ -33,6 +35,7 @@ func TestIngestionHandlers_PipelineAndTaskFlow(t *testing.T) {
 
 	pipelineSvc := service.NewPipelineService(repo.NewPipelineRepo(gdb), gdb)
 	taskSvc := service.NewTaskService(repo.NewTaskRepo(gdb), pipelineSvc, gdb)
+	taskSvc.SetExecutor(fakeTaskExecutor{chunkCount: 2})
 	pipelineHandler := NewPipelineHandler(pipelineSvc)
 	taskHandler := NewTaskHandler(taskSvc)
 
@@ -97,6 +100,14 @@ func TestIngestionHandlers_PipelineAndTaskFlow(t *testing.T) {
 	if !bytes.Contains(resp.Body.Bytes(), []byte(`"nodeId":"fetch"`)) || !bytes.Contains(resp.Body.Bytes(), []byte(`"status":"success"`)) {
 		t.Fatalf("expected task node records, got %s", resp.Body.String())
 	}
+}
+
+type fakeTaskExecutor struct {
+	chunkCount int
+}
+
+func (f fakeTaskExecutor) ExecuteIngestionTask(context.Context, serviceDto.CreateTaskReq) (int, error) {
+	return f.chunkCount, nil
 }
 
 func performJSON(r http.Handler, method, path, body string) *httptest.ResponseRecorder {

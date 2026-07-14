@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
@@ -26,6 +27,7 @@ type DocumentService struct {
 	emb       embedding.Service
 	vecStore  vectorStore
 	fileStore FileReader
+	ingestion ingestionTaskStarter
 }
 
 type knowledgeBaseFinder interface {
@@ -40,6 +42,10 @@ type vectorStore interface {
 // FileReader reads file content for chunk processing.
 type FileReader interface {
 	Read(docID string) ([]byte, error)
+}
+
+type ingestionTaskStarter interface {
+	Create(ctx context.Context, req ingestionDto.CreateTaskReq, userID string) (*ingestionDto.IngestionResultResp, error)
 }
 
 // NewDocumentService 创建 DocumentService。
@@ -61,6 +67,11 @@ func NewDocumentService(
 		vecStore:  vecStore,
 		fileStore: fileStore,
 	}
+}
+
+// SetIngestionTaskStarter sets the optional ingestion task service for pipeline-mode documents.
+func (s *DocumentService) SetIngestionTaskStarter(starter ingestionTaskStarter) {
+	s.ingestion = starter
 }
 
 // CreateDocument 创建文档记录，状态为 pending。
@@ -152,8 +163,17 @@ func (s *DocumentService) executeChunk(docID string) {
 
 	// 2. 执行分块处理
 	if doc.ProcessMode == "pipeline" {
-		// Pipeline 模式暂未完整实现，回退到 chunk 模式
-		slog.Warn("chunk task: pipeline mode not implemented, fallback to chunk", "docId", docID)
+		result, err := s.runPipelineProcess(ctx, doc)
+		if err != nil {
+			slog.Error("chunk task: pipeline process failed", "docId", docID, "err", err)
+			s.markChunkFailed(ctx, docID)
+			s.updateChunkLog(chunkLog.ID, "failed", 0, 0, 0, 0, 0, time.Since(startTime).Milliseconds(), err.Error())
+			return
+		}
+		s.markPipelineCompleted(ctx, docID, result.ChunkCount)
+		s.updateChunkLog(chunkLog.ID, "success", result.ChunkCount, 0, 0, 0, 0, time.Since(startTime).Milliseconds(), result.Message)
+		slog.Info("chunk task: pipeline completed", "docId", docID, "taskId", result.TaskID, "chunks", result.ChunkCount)
+		return
 	}
 	extractDuration, chunkDuration, embedDuration, chunkResults, err = s.runChunkProcess(ctx, doc)
 	if err != nil {
@@ -177,6 +197,59 @@ func (s *DocumentService) executeChunk(docID string) {
 	// 4. 更新分块日志为成功
 	s.updateChunkLog(chunkLog.ID, "success", savedCount, extractDuration, chunkDuration, embedDuration, persistDuration, time.Since(startTime).Milliseconds(), "")
 	slog.Info("chunk task: completed", "docId", docID, "chunks", savedCount)
+}
+
+func (s *DocumentService) runPipelineProcess(ctx context.Context, doc *model.KnowledgeDocument) (*ingestionDto.IngestionResultResp, error) {
+	if s.ingestion == nil {
+		return nil, fmt.Errorf("pipeline ingestion service not configured")
+	}
+	if strings.TrimSpace(doc.PipelineID) == "" {
+		return nil, fmt.Errorf("pipeline id is empty")
+	}
+	result, err := s.ingestion.Create(ctx, ingestionDto.CreateTaskReq{
+		PipelineID: doc.PipelineID,
+		Source: ingestionDto.DocumentSourceReq{
+			Type:     firstNonEmpty(doc.SourceType, doc.FileType, "file"),
+			Location: firstNonEmpty(documentSourceURL(doc), doc.SourceLocation, doc.FileURL),
+			FileName: doc.DocName,
+		},
+		Metadata: map[string]any{
+			"docId": doc.ID,
+			"kbId":  doc.KbID,
+		},
+	}, doc.CreatedBy)
+	if err != nil {
+		return nil, fmt.Errorf("create ingestion task: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("create ingestion task: empty result")
+	}
+	status := strings.ToLower(strings.TrimSpace(result.Status))
+	if status != "" && status != "completed" && status != "success" {
+		return nil, fmt.Errorf("ingestion task %s status %s", result.TaskID, result.Status)
+	}
+	return result, nil
+}
+
+// ExecuteIngestionTask 执行 pipeline 任务对应的实际文档入库动作。
+func (s *DocumentService) ExecuteIngestionTask(ctx context.Context, req ingestionDto.CreateTaskReq) (int, error) {
+	docID, _ := req.Metadata["docId"].(string)
+	if strings.TrimSpace(docID) == "" {
+		return 0, fmt.Errorf("ingestion metadata docId is empty")
+	}
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return 0, fmt.Errorf("document not found: %w", err)
+	}
+	_, _, _, chunks, err := s.runChunkProcess(ctx, doc)
+	if err != nil {
+		return 0, err
+	}
+	savedCount, err := s.persistChunksAndVectors(ctx, doc, chunks)
+	if err != nil {
+		return 0, err
+	}
+	return savedCount, nil
 }
 
 // runChunkProcess 执行分块处理：Extract → Chunk → Embed
@@ -333,6 +406,15 @@ func documentSourceURL(doc *model.KnowledgeDocument) string {
 	return ""
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // persistChunksAndVectors 原子性写入分块和向量。
 func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *model.KnowledgeDocument, vecChunks []rag.VectorChunk) (int, error) {
 	kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
@@ -416,6 +498,11 @@ func completeVectorChunkMetadata(doc *model.KnowledgeDocument, chunk *rag.Vector
 func (s *DocumentService) markChunkFailed(ctx context.Context, docID string) {
 	s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", docID).
 		Updates(map[string]interface{}{"status": "failed", "update_time": time.Now()})
+}
+
+func (s *DocumentService) markPipelineCompleted(ctx context.Context, docID string, chunkCount int) {
+	s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", docID).
+		Updates(map[string]interface{}{"status": "success", "chunk_count": chunkCount, "update_time": time.Now()})
 }
 
 func (s *DocumentService) updateChunkLog(logID, status string, chunkCount int, extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration int64, errorMsg string) {

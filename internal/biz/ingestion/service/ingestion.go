@@ -118,11 +118,22 @@ type TaskService struct {
 	repo        *repo.TaskRepo
 	pipelineSvc *PipelineService
 	db          *gorm.DB
+	executor    TaskExecutor
 }
 
 // NewTaskService 创建 TaskService。
 func NewTaskService(taskRepo *repo.TaskRepo, pipelineSvc *PipelineService, database *gorm.DB) *TaskService {
 	return &TaskService{repo: taskRepo, pipelineSvc: pipelineSvc, db: database}
+}
+
+// TaskExecutor 执行实际的数据摄取和索引动作。
+type TaskExecutor interface {
+	ExecuteIngestionTask(ctx context.Context, req dto.CreateTaskReq) (int, error)
+}
+
+// SetExecutor 设置摄取任务的实际执行器。
+func (s *TaskService) SetExecutor(executor TaskExecutor) {
+	s.executor = executor
 }
 
 // Create 创建并执行摄取任务。
@@ -149,35 +160,41 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 	if err := s.repo.Create(ctx, task); err != nil {
 		return nil, fmt.Errorf("创建摄取任务失败: %w", err)
 	}
+
+	if s.executor == nil {
+		err := fmt.Errorf("摄取任务执行器未配置")
+		if updateErr := s.markTaskFailed(ctx, task, nodes, err.Error()); updateErr != nil {
+			return nil, updateErr
+		}
+		return nil, err
+	}
+
+	execStart := time.Now()
+	chunkCount, err := s.executor.ExecuteIngestionTask(ctx, req)
+	durationMs := time.Since(execStart).Milliseconds()
+	if err != nil {
+		msg := fmt.Sprintf("执行摄取任务失败: %v", err)
+		if updateErr := s.markTaskFailed(ctx, task, nodes, msg); updateErr != nil {
+			return nil, updateErr
+		}
+		return nil, fmt.Errorf("执行摄取任务失败: %w", err)
+	}
+
 	logs := make([]map[string]any, 0, len(nodes))
 	for idx, node := range nodes {
-		taskNode := &model.IngestionTaskNode{
-			TaskID:     task.ID,
-			PipelineID: task.PipelineID,
-			NodeID:     node.NodeID,
-			NodeType:   node.NodeType,
-			NodeOrder:  idx + 1,
-			Status:     "success",
-			DurationMs: 0,
-			Message:    "OK",
-			OutputJSON: "{}",
-		}
+		taskNode := newTaskNode(task, node, idx+1, "success", durationMs, "OK", "", map[string]any{
+			"chunkCount": chunkCount,
+		})
 		if err := s.repo.CreateNode(ctx, taskNode); err != nil {
 			return nil, fmt.Errorf("创建摄取任务节点失败: %w", err)
 		}
-		logs = append(logs, map[string]any{
-			"nodeId":     node.NodeID,
-			"nodeType":   node.NodeType,
-			"success":    true,
-			"message":    "OK",
-			"durationMs": int64(0),
-		})
+		logs = append(logs, taskNodeLog(node, true, "OK", durationMs))
 	}
 	completed := time.Now()
 	task.Status = "completed"
 	task.CompletedAt = &completed
 	task.LogsJSON = writeJSON(logs)
-	task.ChunkCount = 0
+	task.ChunkCount = chunkCount
 	if err := s.repo.Update(ctx, task); err != nil {
 		return nil, fmt.Errorf("更新摄取任务失败: %w", err)
 	}
@@ -188,6 +205,63 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 		ChunkCount: task.ChunkCount,
 		Message:    "OK",
 	}, nil
+}
+
+func (s *TaskService) markTaskFailed(ctx context.Context, task *model.IngestionTask, nodes []model.IngestionPipelineNode, message string) error {
+	logs := make([]map[string]any, 0, len(nodes))
+	for idx, node := range nodes {
+		status := "skipped"
+		nodeMessage := "SKIPPED"
+		errorMessage := ""
+		if idx == 0 {
+			status = "failed"
+			nodeMessage = "FAILED"
+			errorMessage = message
+		}
+		taskNode := newTaskNode(task, node, idx+1, status, 0, nodeMessage, errorMessage, nil)
+		if err := s.repo.CreateNode(ctx, taskNode); err != nil {
+			return fmt.Errorf("创建摄取任务节点失败: %w", err)
+		}
+		logMessage := nodeMessage
+		if errorMessage != "" {
+			logMessage = errorMessage
+		}
+		logs = append(logs, taskNodeLog(node, status == "success", logMessage, 0))
+	}
+	completed := time.Now()
+	task.Status = "failed"
+	task.CompletedAt = &completed
+	task.ErrorMessage = message
+	task.LogsJSON = writeJSON(logs)
+	if err := s.repo.Update(ctx, task); err != nil {
+		return fmt.Errorf("更新摄取任务失败: %w", err)
+	}
+	return nil
+}
+
+func newTaskNode(task *model.IngestionTask, node model.IngestionPipelineNode, order int, status string, durationMs int64, message, errorMessage string, output map[string]any) *model.IngestionTaskNode {
+	return &model.IngestionTaskNode{
+		TaskID:       task.ID,
+		PipelineID:   task.PipelineID,
+		NodeID:       node.NodeID,
+		NodeType:     node.NodeType,
+		NodeOrder:    order,
+		Status:       status,
+		DurationMs:   durationMs,
+		Message:      message,
+		ErrorMessage: errorMessage,
+		OutputJSON:   writeJSON(output),
+	}
+}
+
+func taskNodeLog(node model.IngestionPipelineNode, success bool, message string, durationMs int64) map[string]any {
+	return map[string]any{
+		"nodeId":     node.NodeID,
+		"nodeType":   node.NodeType,
+		"success":    success,
+		"message":    message,
+		"durationMs": durationMs,
+	}
 }
 
 // Upload 上传文件并执行摄取任务。

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/framework/middleware"
+	"go-base-agent/internal/framework/mq"
 	"go-base-agent/internal/framework/ratelimit"
 	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
@@ -76,7 +78,11 @@ func main() {
 	)
 	defer queueLimiter.Shutdown()
 
-	llmService, embService := setupAI(cfg, logger)
+	llmService, embService, rerankService := setupAI(cfg, logger)
+	mqProducer, mqConsumer, shutdownMQ := setupMQ(cfg.RocketMQ)
+	defer shutdownMQ()
+	_ = mqProducer
+	_ = mqConsumer
 
 	userRepo := userRepoPkg.NewUserRepo(gormDB)
 	authSvc := userService.NewAuthService(userRepo, cfg.Auth)
@@ -113,10 +119,13 @@ func main() {
 
 	ingestionPipelineSvc := ingestionService.NewPipelineService(ingestionRepo.NewPipelineRepo(gormDB), gormDB)
 	ingestionTaskSvc := ingestionService.NewTaskService(ingestionRepo.NewTaskRepo(gormDB), ingestionPipelineSvc, gormDB)
+	docSvc.SetIngestionTaskStarter(ingestionTaskSvc)
+	ingestionTaskSvc.SetExecutor(docSvc)
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
 	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
 
 	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
+	retriever := rag.NewRerankRetriever(pgRetriever, rerankService)
 	llmRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
 		cfg.RAG.QueryRewrite.MaxHistoryChars,
@@ -125,7 +134,7 @@ func main() {
 	ragCtl := rag.NewController(rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
 		llmRewriter,
-		pgRetriever,
+		retriever,
 		memSvc,
 	))
 
@@ -247,7 +256,7 @@ func main() {
 		api.PUT("/admin/users/:id", adminH.UpdateUser)
 		api.DELETE("/admin/users/:id", adminH.DeleteUser)
 
-		// RAG settings stub
+		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
 		api.GET("/rag/eval", ragEval(pgRetriever))
 
@@ -341,6 +350,69 @@ func main() {
 	slog.Info("server exited")
 }
 
+func setupMQ(cfg config.RocketMQConfig) (mq.Producer, mq.Consumer, func()) {
+	nameServers := splitCSV(cfg.NameServer)
+	if len(nameServers) == 0 {
+		producer := mq.NewNoopProducer()
+		consumer := mq.NewNoopConsumer()
+		return producer, consumer, func() {}
+	}
+
+	producer, err := mq.NewRocketProducer(mq.RocketProducerConfig{
+		NameServers:        nameServers,
+		Group:              cfg.Producer.Group,
+		SendMessageTimeout: cfg.Producer.SendMessageTimeout,
+	})
+	if err != nil {
+		slog.Warn("rocketmq producer unavailable, fallback to noop", "err", err)
+		noopProducer := mq.NewNoopProducer()
+		noopConsumer := mq.NewNoopConsumer()
+		return noopProducer, noopConsumer, func() {}
+	}
+
+	consumerGroup := cfg.Producer.Group
+	if consumerGroup == "" {
+		consumerGroup = "ragent-consumer"
+	} else {
+		consumerGroup += "-consumer"
+	}
+	var consumer mq.Consumer
+	rocketConsumer, err := mq.NewRocketConsumer(mq.RocketConsumerConfig{
+		NameServers: nameServers,
+		Group:       consumerGroup,
+	})
+	if err != nil {
+		slog.Warn("rocketmq consumer unavailable, fallback consumer to noop", "err", err)
+		consumer = mq.NewNoopConsumer()
+	} else {
+		consumer = rocketConsumer
+	}
+
+	shutdown := func() {
+		if p, ok := any(producer).(interface{ Shutdown() error }); ok {
+			if err := p.Shutdown(); err != nil {
+				slog.Warn("rocketmq producer shutdown failed", "err", err)
+			}
+		}
+		if err := consumer.Shutdown(); err != nil {
+			slog.Warn("mq consumer shutdown failed", "err", err)
+		}
+	}
+	return producer, consumer, shutdown
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func registerStatusRoutes(r *gin.Engine) {
 	healthHandler := func(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Success("ok"))
@@ -361,7 +433,7 @@ func registerStatusRoutes(r *gin.Engine) {
 	})
 }
 
-func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service) {
+func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service, rerank.Service) {
 	aiCfg := cfg.AI
 
 	health := model.NewHealthStore(aiCfg.Selection)
@@ -392,8 +464,7 @@ func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embeddin
 		"rerank_providers", len(rerankClients),
 	)
 
-	_ = rerankService
-	return llmService, embService
+	return llmService, embService, rerankService
 }
 
 func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
@@ -403,8 +474,7 @@ func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
 		case "openai-compatible":
 			clients = append(clients, chat.NewOpenAICompatibleChatClient(name, nil))
 		case "anthropic":
-			logger := slog.Default()
-			logger.Warn("anthropic protocol not yet implemented, skipping", "provider", name)
+			clients = append(clients, chat.NewAnthropicChatClient(name, nil))
 		case "noop":
 		default:
 			slog.Warn("unknown protocol, skipping", "provider", name, "protocol", provider.Protocol)
@@ -427,7 +497,18 @@ func buildEmbeddingClients(aiCfg config.AIConfig) []embedding.Client {
 }
 
 func buildRerankClients(aiCfg config.AIConfig) []rerank.Client {
-	return []rerank.Client{&rerank.NoopClient{}}
+	clients := make([]rerank.Client, 0, len(aiCfg.Providers)+1)
+	for name, provider := range aiCfg.Providers {
+		switch provider.Protocol {
+		case "openai-compatible":
+			clients = append(clients, rerank.NewHTTPClient(name, nil))
+		case "noop":
+		default:
+			slog.Warn("unknown rerank protocol, skipping", "provider", name, "protocol", provider.Protocol)
+		}
+	}
+	clients = append(clients, &rerank.NoopClient{})
+	return clients
 }
 
 func embeddingDimension(aiCfg config.AIConfig) int {
