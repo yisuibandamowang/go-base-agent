@@ -14,6 +14,9 @@ import (
 	adminHandler "go-base-agent/internal/biz/admin/handler"
 	adminRepo "go-base-agent/internal/biz/admin/repo"
 	adminService "go-base-agent/internal/biz/admin/service"
+	auditHandler "go-base-agent/internal/biz/audit/handler"
+	auditRepo "go-base-agent/internal/biz/audit/repo"
+	auditService "go-base-agent/internal/biz/audit/service"
 	conversationHandler "go-base-agent/internal/biz/conversation/handler"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
@@ -116,6 +119,9 @@ func main() {
 	sampleQRepo := adminRepo.NewSampleQuestionRepo(gormDB)
 	adminSvc := adminService.NewAdminService(adminRepoObj, sampleQRepo, gormDB)
 	adminH := adminHandler.NewAdminHandler(adminSvc)
+
+	auditSvc := auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB))
+	auditH := auditHandler.NewAuditHandler(auditSvc)
 
 	ingestionPipelineSvc := ingestionService.NewPipelineService(ingestionRepo.NewPipelineRepo(gormDB), gormDB)
 	ingestionTaskSvc := ingestionService.NewTaskService(ingestionRepo.NewTaskRepo(gormDB), ingestionPipelineSvc, gormDB)
@@ -256,6 +262,10 @@ func main() {
 		api.POST("/admin/users", adminH.CreateUser)
 		api.PUT("/admin/users/:id", adminH.UpdateUser)
 		api.DELETE("/admin/users/:id", adminH.DeleteUser)
+
+		// Audit change logs — 对齐 Java /biz-change-logs
+		api.GET("/biz-change-logs", auditH.List)
+		api.GET("/biz-change-logs/:id", auditH.Get)
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
