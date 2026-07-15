@@ -147,7 +147,15 @@ func (s *AdminService) CreateSampleQuestion(ctx context.Context, req adminDto.Cr
 	if err := s.sampleQRepo.Create(ctx, sq); err != nil {
 		return nil, fmt.Errorf("创建示例问题失败: %w", err)
 	}
-	return toSampleQResp(sq), nil
+	resp := toSampleQResp(sq)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeSampleQuestion,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建示例问题：" + resp.Question,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // ListSampleQuestions 查询示例问题。
@@ -178,6 +186,7 @@ func (s *AdminService) UpdateSampleQuestion(ctx context.Context, id string, req 
 	if err != nil {
 		return nil, err
 	}
+	before := toSampleQResp(sq)
 	if req.Title != nil {
 		sq.Title = *req.Title
 	}
@@ -190,12 +199,36 @@ func (s *AdminService) UpdateSampleQuestion(ctx context.Context, id string, req 
 	if err := s.sampleQRepo.Update(ctx, sq); err != nil {
 		return nil, fmt.Errorf("更新示例问题失败: %w", err)
 	}
-	return toSampleQResp(sq), nil
+	resp := toSampleQResp(sq)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeSampleQuestion,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新示例问题：" + resp.Question,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // DeleteSampleQuestion 删除示例问题。
 func (s *AdminService) DeleteSampleQuestion(ctx context.Context, id string) error {
-	return s.sampleQRepo.SoftDelete(ctx, id)
+	sq, err := s.sampleQRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	before := toSampleQResp(sq)
+	if err := s.sampleQRepo.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeSampleQuestion,
+		BizID:          id,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除示例问题：" + before.Question,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // --- 用户管理 ---
