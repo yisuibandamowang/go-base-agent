@@ -187,8 +187,9 @@ func (h *IntentHandler) BatchEnable(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
 		return
 	}
-	for _, id := range req.IDs {
-		_ = h.svc.ToggleNode(c.Request.Context(), id, 1)
+	if err := h.svc.BatchToggleNodes(c.Request.Context(), req.IDs, 1); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
 	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
@@ -202,8 +203,9 @@ func (h *IntentHandler) BatchDisable(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
 		return
 	}
-	for _, id := range req.IDs {
-		_ = h.svc.ToggleNode(c.Request.Context(), id, 0)
+	if err := h.svc.BatchToggleNodes(c.Request.Context(), req.IDs, 0); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
 	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
@@ -217,8 +219,9 @@ func (h *IntentHandler) BatchDelete(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
 		return
 	}
-	for _, id := range req.IDs {
-		_ = h.svc.DeleteNode(c.Request.Context(), id)
+	if err := h.svc.BatchDeleteNodes(c.Request.Context(), req.IDs); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
 	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }

@@ -142,6 +142,26 @@ func (s *IntentService) ToggleNode(ctx context.Context, id string, enabled int16
 	return nil
 }
 
+// BatchToggleNodes 批量切换意图节点启用状态。
+func (s *IntentService) BatchToggleNodes(ctx context.Context, ids []string, enabled int16) error {
+	for _, id := range ids {
+		if err := s.ToggleNode(ctx, id, enabled); err != nil {
+			return fmt.Errorf("批量切换意图节点状态失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// BatchDeleteNodes 批量删除意图节点。
+func (s *IntentService) BatchDeleteNodes(ctx context.Context, ids []string) error {
+	for _, id := range ids {
+		if err := s.DeleteNode(ctx, id); err != nil {
+			return fmt.Errorf("批量删除意图节点失败: %w", err)
+		}
+	}
+	return nil
+}
+
 // GetTree 获取意图树（以树形结构返回）。
 func (s *IntentService) GetTree(ctx context.Context) ([]*dto.IntentNodeResp, error) {
 	nodes, err := s.intentRepo.ListAll(ctx)
