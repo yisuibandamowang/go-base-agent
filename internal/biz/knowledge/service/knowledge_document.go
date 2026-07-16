@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/core/parser"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/knowledge/dto"
@@ -24,14 +25,15 @@ import (
 
 // DocumentService 文档管理业务逻辑层。
 type DocumentService struct {
-	docRepo   *repo.KnowledgeDocumentRepo
-	chunkRepo *repo.KnowledgeChunkRepo
-	kbRepo    knowledgeBaseFinder
-	db        *gorm.DB
-	emb       embedding.Service
-	vecStore  vectorStore
-	fileStore FileReader
-	ingestion ingestionTaskStarter
+	docRepo       *repo.KnowledgeDocumentRepo
+	chunkRepo     *repo.KnowledgeChunkRepo
+	kbRepo        knowledgeBaseFinder
+	db            *gorm.DB
+	emb           embedding.Service
+	vecStore      vectorStore
+	fileStore     FileReader
+	ingestion     ingestionTaskStarter
+	auditRecorder *auditService.BizChangeLogService
 }
 
 type knowledgeBaseFinder interface {
@@ -78,6 +80,11 @@ func (s *DocumentService) SetIngestionTaskStarter(starter ingestionTaskStarter) 
 	s.ingestion = starter
 }
 
+// SetAuditRecorder 设置审计日志记录器。
+func (s *DocumentService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.auditRecorder = recorder
+}
+
 // CreateDocument 创建文档记录，状态为 pending。
 func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req dto.CreateDocumentReq, userID string) (*dto.DocumentResp, error) {
 	if _, err := s.kbRepo.FindByID(ctx, kbID); err != nil {
@@ -106,7 +113,15 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 	if err := s.docRepo.Create(ctx, doc); err != nil {
 		return nil, fmt.Errorf("failed to create document: %w", err)
 	}
-	return s.docToResp(doc), nil
+	resp := s.docToResp(doc)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeKnowledgeDocument,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建文档：" + resp.DocName,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // StartChunk 开始文档分块处理：状态校验 → 更新为 running → 异步执行分块任务。
@@ -652,6 +667,7 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	if err != nil {
 		return nil, fmt.Errorf("document not found: %w", err)
 	}
+	before := s.docToResp(doc)
 	doc.DocName = req.DocName
 	doc.UpdatedBy = userID
 	if req.ChunkStrategy != "" {
@@ -661,12 +677,36 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	if err := s.docRepo.Update(ctx, doc); err != nil {
 		return nil, fmt.Errorf("update document: %w", err)
 	}
-	return s.docToResp(doc), nil
+	resp := s.docToResp(doc)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeDocument,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新文档：" + resp.DocName,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // DeleteDocument 软删除文档。
 func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
-	return s.docRepo.SoftDelete(ctx, id)
+	doc, err := s.docRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	before := s.docToResp(doc)
+	if err := s.docRepo.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeDocument,
+		BizID:          id,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除文档：" + before.DocName,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // ToggleDocument 切换文档启用状态。
@@ -837,6 +877,15 @@ func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentR
 		UpdatedBy:       doc.UpdatedBy,
 		CreateTime:      doc.CreateTime.Format(time.RFC3339),
 		UpdateTime:      doc.UpdateTime.Format(time.RFC3339),
+	}
+}
+
+func (s *DocumentService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
 	}
 }
 

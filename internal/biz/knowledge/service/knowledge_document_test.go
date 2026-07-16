@@ -6,10 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	auditModel "go-base-agent/internal/biz/audit/model"
+	auditRepo "go-base-agent/internal/biz/audit/repo"
+	auditService "go-base-agent/internal/biz/audit/service"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
+	knowledgeDto "go-base-agent/internal/biz/knowledge/dto"
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/biz/rag"
+	appctx "go-base-agent/internal/framework/context"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -216,6 +221,89 @@ func TestDocumentService_ExecuteIngestionTaskPersistsChunksAndVectors(t *testing
 	}
 	if updated.Status != "success" || updated.ChunkCount != 1 {
 		t.Fatalf("expected completed doc, got status=%s chunks=%d", updated.Status, updated.ChunkCount)
+	}
+}
+
+func TestDocumentService_RecordsAuditLogs(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &auditModel.BizChangeLog{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	kb := &knowledgeModel.KnowledgeBase{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection_a",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+		fileStore: fakeFileReader{},
+	}
+	svc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gdb)))
+
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	created, err := svc.CreateDocument(ctx, kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:        "会员Agent说明.md",
+		FileURL:        "https://example.com/member-agent.md",
+		FileType:       "md",
+		SourceType:     "url",
+		SourceLocation: "https://example.com/member-agent.md",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	updatedName := "会员Agent能力说明.md"
+	updated, err := svc.UpdateDocument(ctx, created.ID, knowledgeDto.UpdateDocumentReq{
+		DocName:       updatedName,
+		ChunkStrategy: "paragraph",
+		ChunkConfig:   `{"maxChars":1000}`,
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("update document: %v", err)
+	}
+
+	if err := svc.DeleteDocument(ctx, updated.ID); err != nil {
+		t.Fatalf("delete document: %v", err)
+	}
+
+	var logs []auditModel.BizChangeLog
+	if err := gdb.Where("biz_type = ? AND biz_id = ?", auditService.BizTypeKnowledgeDocument, created.ID).
+		Order("create_time ASC").
+		Find(&logs).Error; err != nil {
+		t.Fatalf("load audit logs: %v", err)
+	}
+	if len(logs) != 3 {
+		t.Fatalf("expected 3 audit logs, got %d: %+v", len(logs), logs)
+	}
+	if logs[0].OperationType != auditService.OperationCreate || !strings.Contains(logs[0].AfterSnapshot, "会员Agent说明.md") {
+		t.Fatalf("unexpected create audit log: %+v", logs[0])
+	}
+	if logs[1].OperationType != auditService.OperationUpdate ||
+		!strings.Contains(logs[1].BeforeSnapshot, "会员Agent说明.md") ||
+		!strings.Contains(logs[1].AfterSnapshot, updatedName) {
+		t.Fatalf("unexpected update audit log: %+v", logs[1])
+	}
+	if logs[2].OperationType != auditService.OperationDelete || !strings.Contains(logs[2].BeforeSnapshot, updatedName) {
+		t.Fatalf("unexpected delete audit log: %+v", logs[2])
 	}
 }
 

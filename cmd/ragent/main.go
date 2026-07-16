@@ -101,6 +101,7 @@ func main() {
 	chunkRepo := knowledgeRepo.NewKnowledgeChunkRepo(gormDB)
 	fileStore := knowledgeHandler.NewFileStore()
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, rag.NewPgVectorStore(gormDB), fileStore)
+	docSvc.SetAuditRecorder(auditSvc)
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 
 	convRepo := conversationRepo.NewConversationRepo(gormDB)
