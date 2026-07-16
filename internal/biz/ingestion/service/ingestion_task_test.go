@@ -3,11 +3,16 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	auditModel "go-base-agent/internal/biz/audit/model"
+	auditRepo "go-base-agent/internal/biz/audit/repo"
+	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/ingestion/model"
 	"go-base-agent/internal/biz/ingestion/repo"
+	appctx "go-base-agent/internal/framework/context"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -84,6 +89,61 @@ func TestTaskService_CreateMarksTaskFailedWhenExecutorFails(t *testing.T) {
 	}
 	if len(nodes) == 0 || nodes[0].Status != "failed" {
 		t.Fatalf("expected failed task node, got %+v", nodes)
+	}
+}
+
+func TestTaskService_CreateRecordsAuditLogs(t *testing.T) {
+	gdb, pipelineID := setupTaskServiceTestDB(t)
+	if err := gdb.AutoMigrate(&auditModel.BizChangeLog{}); err != nil {
+		t.Fatalf("migrate audit table: %v", err)
+	}
+	taskSvc := NewTaskService(repo.NewTaskRepo(gdb), NewPipelineService(repo.NewPipelineRepo(gdb), gdb), gdb)
+	taskSvc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gdb)))
+	taskSvc.SetExecutor(&fakeTaskExecutor{chunkCount: 2})
+
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+	successResp, err := taskSvc.Create(ctx, dto.CreateTaskReq{
+		PipelineID: pipelineID,
+		Source: dto.DocumentSourceReq{
+			Type:     "file",
+			Location: "doc-1",
+			FileName: "会员Agent说明.md",
+		},
+		Metadata: map[string]any{"docId": "doc-1"},
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create successful task: %v", err)
+	}
+
+	taskSvc.SetExecutor(&fakeTaskExecutor{err: errors.New("embed failed")})
+	_, failedErr := taskSvc.Create(ctx, dto.CreateTaskReq{
+		PipelineID: pipelineID,
+		Source:     dto.DocumentSourceReq{Type: "file", Location: "doc-2", FileName: "失败文档.md"},
+	}, "admin-1")
+	if failedErr == nil {
+		t.Fatal("expected failed task error")
+	}
+
+	var logs []auditModel.BizChangeLog
+	if err := gdb.Where("biz_type = ?", auditService.BizTypeIngestionTask).Order("create_time ASC").Find(&logs).Error; err != nil {
+		t.Fatalf("load audit logs: %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 audit logs, got %d: %+v", len(logs), logs)
+	}
+	if logs[0].BizId != successResp.TaskID || logs[0].OperationType != auditService.OperationRun ||
+		!logs[0].Success || !strings.Contains(logs[0].AfterSnapshot, `"status":"completed"`) ||
+		!strings.Contains(logs[0].AfterSnapshot, `"chunkCount":2`) {
+		t.Fatalf("unexpected success audit log: %+v", logs[0])
+	}
+	if logs[1].OperationType != auditService.OperationRun || logs[1].Success ||
+		!strings.Contains(logs[1].ErrorMessage, "embed failed") ||
+		!strings.Contains(logs[1].AfterSnapshot, `"status":"failed"`) {
+		t.Fatalf("unexpected failed audit log: %+v", logs[1])
 	}
 }
 

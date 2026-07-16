@@ -128,6 +128,7 @@ func main() {
 
 	ingestionPipelineSvc := ingestionService.NewPipelineService(ingestionRepo.NewPipelineRepo(gormDB), gormDB)
 	ingestionTaskSvc := ingestionService.NewTaskService(ingestionRepo.NewTaskRepo(gormDB), ingestionPipelineSvc, gormDB)
+	ingestionTaskSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetIngestionTaskStarter(ingestionTaskSvc)
 	ingestionTaskSvc.SetExecutor(docSvc)
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"mime/multipart"
 	"strings"
 	"time"
 
+	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/ingestion/model"
 	"go-base-agent/internal/biz/ingestion/repo"
@@ -115,10 +117,11 @@ func (s *PipelineService) DefinitionNodes(ctx context.Context, id string) ([]mod
 
 // TaskService 是摄取任务业务服务。
 type TaskService struct {
-	repo        *repo.TaskRepo
-	pipelineSvc *PipelineService
-	db          *gorm.DB
-	executor    TaskExecutor
+	repo          *repo.TaskRepo
+	pipelineSvc   *PipelineService
+	db            *gorm.DB
+	executor      TaskExecutor
+	auditRecorder *auditService.BizChangeLogService
 }
 
 // NewTaskService 创建 TaskService。
@@ -134,6 +137,11 @@ type TaskExecutor interface {
 // SetExecutor 设置摄取任务的实际执行器。
 func (s *TaskService) SetExecutor(executor TaskExecutor) {
 	s.executor = executor
+}
+
+// SetAuditRecorder 设置审计日志记录器。
+func (s *TaskService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.auditRecorder = recorder
 }
 
 // Create 创建并执行摄取任务。
@@ -166,6 +174,15 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 		if updateErr := s.markTaskFailed(ctx, task, nodes, err.Error()); updateErr != nil {
 			return nil, updateErr
 		}
+		s.recordAudit(ctx, auditService.RecordReq{
+			BizType:       auditService.BizTypeIngestionTask,
+			BizID:         task.ID,
+			OperationType: auditService.OperationRun,
+			ActionDesc:    "执行摄取任务：" + task.SourceFileName,
+			AfterSnapshot: taskToResp(task),
+			Success:       boolPtr(false),
+			ErrorMessage:  err.Error(),
+		})
 		return nil, err
 	}
 
@@ -177,6 +194,15 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 		if updateErr := s.markTaskFailed(ctx, task, nodes, msg); updateErr != nil {
 			return nil, updateErr
 		}
+		s.recordAudit(ctx, auditService.RecordReq{
+			BizType:       auditService.BizTypeIngestionTask,
+			BizID:         task.ID,
+			OperationType: auditService.OperationRun,
+			ActionDesc:    "执行摄取任务：" + task.SourceFileName,
+			AfterSnapshot: taskToResp(task),
+			Success:       boolPtr(false),
+			ErrorMessage:  msg,
+		})
 		return nil, fmt.Errorf("执行摄取任务失败: %w", err)
 	}
 
@@ -198,6 +224,13 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 	if err := s.repo.Update(ctx, task); err != nil {
 		return nil, fmt.Errorf("更新摄取任务失败: %w", err)
 	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeIngestionTask,
+		BizID:         task.ID,
+		OperationType: auditService.OperationRun,
+		ActionDesc:    "执行摄取任务：" + task.SourceFileName,
+		AfterSnapshot: taskToResp(task),
+	})
 	return &dto.IngestionResultResp{
 		TaskID:     task.ID,
 		PipelineID: task.PipelineID,
@@ -237,6 +270,19 @@ func (s *TaskService) markTaskFailed(ctx context.Context, task *model.IngestionT
 		return fmt.Errorf("更新摄取任务失败: %w", err)
 	}
 	return nil
+}
+
+func (s *TaskService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
+	}
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 func newTaskNode(task *model.IngestionTask, node model.IngestionPipelineNode, order int, status string, durationMs int64, message, errorMessage string, output map[string]any) *model.IngestionTaskNode {
