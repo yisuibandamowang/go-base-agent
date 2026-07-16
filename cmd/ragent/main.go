@@ -116,6 +116,7 @@ func main() {
 	intentTreeRepo := intentRepo.NewIntentRepo(gormDB)
 	termMappingRepo := intentRepo.NewTermMappingRepo(gormDB)
 	intentSvc := intentService.NewIntentService(intentTreeRepo, termMappingRepo, gormDB)
+	intentSvc.SetAuditRecorder(auditSvc)
 	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
 
 	adminRepoObj := adminRepo.NewAdminRepo(gormDB)

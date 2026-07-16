@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
+	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/intent_tree/dto"
 	"go-base-agent/internal/biz/intent_tree/model"
 	"go-base-agent/internal/biz/intent_tree/repo"
@@ -13,14 +15,20 @@ import (
 
 // IntentService 意图树业务服务。
 type IntentService struct {
-	intentRepo *repo.IntentRepo
-	termRepo   *repo.TermMappingRepo
-	db         *gorm.DB
+	intentRepo    *repo.IntentRepo
+	termRepo      *repo.TermMappingRepo
+	db            *gorm.DB
+	auditRecorder *auditService.BizChangeLogService
 }
 
 // NewIntentService 创建 IntentService。
 func NewIntentService(intentRepo *repo.IntentRepo, termRepo *repo.TermMappingRepo, db *gorm.DB) *IntentService {
 	return &IntentService{intentRepo: intentRepo, termRepo: termRepo, db: db}
+}
+
+// SetAuditRecorder 设置审计日志记录器。
+func (s *IntentService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.auditRecorder = recorder
 }
 
 // CreateNode 创建意图节点。
@@ -47,7 +55,15 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 	if err := s.intentRepo.Create(ctx, node); err != nil {
 		return nil, fmt.Errorf("创建意图节点失败: %w", err)
 	}
-	return toIntentResp(node), nil
+	resp := toIntentResp(node)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeIntentTree,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建意图节点：" + resp.Name,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // GetNode 获取单个意图节点。
@@ -65,22 +81,65 @@ func (s *IntentService) UpdateNode(ctx context.Context, id string, req dto.Updat
 	if err != nil {
 		return nil, err
 	}
+	before := toIntentResp(node)
 	applyIntentUpdate(node, req)
 	node.UpdateBy = userID
 	if err := s.intentRepo.Update(ctx, node); err != nil {
 		return nil, fmt.Errorf("更新意图节点失败: %w", err)
 	}
-	return toIntentResp(node), nil
+	resp := toIntentResp(node)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeIntentTree,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新意图节点：" + resp.Name,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // DeleteNode 删除意图节点。
 func (s *IntentService) DeleteNode(ctx context.Context, id string) error {
-	return s.intentRepo.SoftDelete(ctx, id)
+	node, err := s.intentRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	before := toIntentResp(node)
+	if err := s.intentRepo.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeIntentTree,
+		BizID:          id,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除意图节点：" + before.Name,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // ToggleNode 切换意图节点启用状态。
 func (s *IntentService) ToggleNode(ctx context.Context, id string, enabled int16) error {
-	return s.intentRepo.UpdateEnabled(ctx, id, enabled)
+	node, err := s.intentRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	before := toIntentResp(node)
+	if err := s.intentRepo.UpdateEnabled(ctx, id, enabled); err != nil {
+		return err
+	}
+	node.Enabled = enabled
+	after := toIntentResp(node)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeIntentTree,
+		BizID:          id,
+		OperationType:  operationForEnabled(enabled),
+		ActionDesc:     "切换意图节点状态：" + after.Name,
+		BeforeSnapshot: before,
+		AfterSnapshot:  after,
+	})
+	return nil
 }
 
 // GetTree 获取意图树（以树形结构返回）。
@@ -267,6 +326,22 @@ func toTermResp(m *model.QueryTermMapping) *dto.TermMappingResp {
 		Remark:     m.Remark,
 		CreateTime: m.CreateTime,
 	}
+}
+
+func (s *IntentService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
+	}
+}
+
+func operationForEnabled(enabled int16) string {
+	if enabled == 1 {
+		return auditService.OperationEnable
+	}
+	return auditService.OperationDisable
 }
 
 func applyTermUpdate(m *model.QueryTermMapping, req dto.UpdateTermMappingReq) {
