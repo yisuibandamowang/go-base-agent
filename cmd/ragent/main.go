@@ -20,6 +20,7 @@ import (
 	conversationHandler "go-base-agent/internal/biz/conversation/handler"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
+	"go-base-agent/internal/biz/crawler"
 	ingestionHandler "go-base-agent/internal/biz/ingestion/handler"
 	ingestionRepo "go-base-agent/internal/biz/ingestion/repo"
 	ingestionService "go-base-agent/internal/biz/ingestion/service"
@@ -120,11 +121,33 @@ func main() {
 
 	docRepo := knowledgeRepo.NewKnowledgeDocumentRepo(gormDB)
 	chunkRepo := knowledgeRepo.NewKnowledgeChunkRepo(gormDB)
+	scheduleRepo := knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gormDB)
 	fileStore := knowledgeHandler.NewFileStore()
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, rag.NewPgVectorStore(gormDB), fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
+	docSvc.SetScheduleRepo(scheduleRepo)
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
+
+	documentScheduleSvc := knowledgeService.NewDocumentScheduleService(
+		gormDB,
+		docRepo,
+		scheduleRepo,
+		fileStore,
+		docSvc,
+		cfg.RAG.Knowledge.Schedule,
+	)
+	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "url", MaxBytes: 50 << 20}))
+	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "http", MaxBytes: 50 << 20}))
+	documentScheduleSvc.RegisterSource(crawler.NewFeishuSource(crawler.FeishuSourceConfig{
+		Name:        "feishu",
+		AppID:       cfg.RAG.Knowledge.Feishu.AppID,
+		AppSecret:   cfg.RAG.Knowledge.Feishu.AppSecret,
+		AccessToken: cfg.RAG.Knowledge.Feishu.AccessToken,
+		TenantToken: cfg.RAG.Knowledge.Feishu.TenantToken,
+		BaseURL:     cfg.RAG.Knowledge.Feishu.BaseURL,
+		MaxBytes:    50 << 20,
+	}))
 
 	convRepo := conversationRepo.NewConversationRepo(gormDB)
 	msgRepo := conversationRepo.NewMessageRepo(gormDB)
@@ -352,6 +375,12 @@ func main() {
 		api.GET("/ingestion/tasks/:id", ingestionTaskH.Get)
 		api.GET("/ingestion/tasks/:id/nodes", ingestionTaskH.Nodes)
 		api.GET("/ingestion/tasks", ingestionTaskH.List)
+	}
+
+	if gormDB != nil {
+		scheduleCtx, scheduleCancel := context.WithCancel(context.Background())
+		defer scheduleCancel()
+		go documentScheduleSvc.Run(scheduleCtx)
 	}
 
 	ragGroup := r.Group("/rag/v3")

@@ -27,6 +27,7 @@ import (
 type DocumentService struct {
 	docRepo       *repo.KnowledgeDocumentRepo
 	chunkRepo     *repo.KnowledgeChunkRepo
+	scheduleRepo  *repo.KnowledgeDocumentScheduleRepo
 	kbRepo        knowledgeBaseFinder
 	db            *gorm.DB
 	emb           embedding.Service
@@ -75,6 +76,11 @@ func NewDocumentService(
 	}
 }
 
+// SetScheduleRepo 设置文档定时刷新仓储。
+func (s *DocumentService) SetScheduleRepo(scheduleRepo *repo.KnowledgeDocumentScheduleRepo) {
+	s.scheduleRepo = scheduleRepo
+}
+
 // SetIngestionTaskStarter sets the optional ingestion task service for pipeline-mode documents.
 func (s *DocumentService) SetIngestionTaskStarter(starter ingestionTaskStarter) {
 	s.ingestion = starter
@@ -91,15 +97,17 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		return nil, fmt.Errorf("知识库不存在")
 	}
 	doc := &model.KnowledgeDocument{
-		KbID:           kbID,
-		DocName:        req.DocName,
-		FileURL:        req.FileURL,
-		FileType:       req.FileType,
-		FileSize:       req.FileSize,
-		SourceType:     req.SourceType,
-		Status:         "pending",
-		CreatedBy:      userID,
-		SourceLocation: req.SourceLocation,
+		KbID:            kbID,
+		DocName:         req.DocName,
+		FileURL:         req.FileURL,
+		FileType:        req.FileType,
+		FileSize:        req.FileSize,
+		SourceType:      req.SourceType,
+		Status:          "pending",
+		CreatedBy:       userID,
+		SourceLocation:  req.SourceLocation,
+		ScheduleEnabled: req.ScheduleEnabled,
+		ScheduleCron:    req.ScheduleCron,
 	}
 	doc.CreateTime = time.Now()
 	doc.UpdateTime = time.Now()
@@ -112,6 +120,9 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 
 	if err := s.docRepo.Create(ctx, doc); err != nil {
 		return nil, fmt.Errorf("failed to create document: %w", err)
+	}
+	if err := s.syncDocumentSchedule(ctx, doc, req.ScheduleEnabled, req.ScheduleCron); err != nil {
+		return nil, err
 	}
 	resp := s.docToResp(doc)
 	s.recordAudit(ctx, auditService.RecordReq{
@@ -670,12 +681,21 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	before := s.docToResp(doc)
 	doc.DocName = req.DocName
 	doc.UpdatedBy = userID
+	if req.ScheduleEnabled != nil {
+		doc.ScheduleEnabled = *req.ScheduleEnabled
+	}
+	if strings.TrimSpace(req.ScheduleCron) != "" {
+		doc.ScheduleCron = req.ScheduleCron
+	}
 	if req.ChunkStrategy != "" {
 		doc.ChunkStrategy = req.ChunkStrategy
 		doc.ChunkConfig = req.ChunkConfig
 	}
 	if err := s.docRepo.Update(ctx, doc); err != nil {
 		return nil, fmt.Errorf("update document: %w", err)
+	}
+	if err := s.syncDocumentSchedule(ctx, doc, doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+		return nil, err
 	}
 	resp := s.docToResp(doc)
 	s.recordAudit(ctx, auditService.RecordReq{
@@ -698,6 +718,9 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
 	before := s.docToResp(doc)
 	if err := s.docRepo.SoftDelete(ctx, id); err != nil {
 		return err
+	}
+	if s.scheduleRepo != nil {
+		_ = s.scheduleRepo.DeleteByDocID(ctx, id)
 	}
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeDocument,
@@ -973,6 +996,24 @@ func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentR
 		CreateTime:      doc.CreateTime.Format(time.RFC3339),
 		UpdateTime:      doc.UpdateTime.Format(time.RFC3339),
 	}
+}
+
+func (s *DocumentService) syncDocumentSchedule(ctx context.Context, doc *model.KnowledgeDocument, enabled int16, cronExpr string) error {
+	if s.scheduleRepo == nil {
+		return nil
+	}
+	now := time.Now()
+	if enabled != 1 || strings.TrimSpace(cronExpr) == "" {
+		return s.scheduleRepo.DeleteByDocID(ctx, doc.ID)
+	}
+	schedule := &model.KnowledgeDocumentSchedule{
+		DocID:       doc.ID,
+		KbID:        doc.KbID,
+		CronExpr:    strings.TrimSpace(cronExpr),
+		Enabled:     1,
+		NextRunTime: &now,
+	}
+	return s.scheduleRepo.UpsertByDocID(ctx, schedule)
 }
 
 func (s *DocumentService) recordAudit(ctx context.Context, req auditService.RecordReq) {

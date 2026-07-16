@@ -70,6 +70,12 @@ rag:
       lock-seconds: 900
       batch-size: 20
       min-interval-seconds: 60
+    feishu:
+      app-id: ${FEISHU_APP_ID}
+      app-secret: ${FEISHU_APP_SECRET}
+      access-token: ${FEISHU_ACCESS_TOKEN}
+      tenant-token: ${FEISHU_TENANT_TOKEN}
+      base-url: ${FEISHU_BASE_URL:https://open.feishu.cn}
 
   mcp:
     servers:

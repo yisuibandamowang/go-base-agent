@@ -84,3 +84,45 @@ func TestFeishuSourceDirectUrl(t *testing.T) {
 		t.Fatalf("unexpected content: %q", string(doc.Content))
 	}
 }
+
+func TestFeishuSourceFetchWikiDocument(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal/":
+			_, _ = w.Write([]byte(`{"tenant_access_token":"tenant-token"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/open-apis/wiki/v2/spaces/get_node":
+			if got := r.URL.Query().Get("token"); got != "wikcn-test-token" {
+				t.Fatalf("unexpected wiki token: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"node":{"obj_type":"docx","obj_token":"doc-123","title":"飞书 Wiki 文档"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/open-apis/docx/v1/documents/doc-123/raw_content":
+			if got := r.Header.Get("Authorization"); got != "Bearer tenant-token" {
+				t.Fatalf("unexpected authorization header: %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"content":"# Wiki 文档\n正文"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	source := NewFeishuSource(FeishuSourceConfig{
+		Name:          "feishu-wiki",
+		URL:           server.URL + "/wiki/wikcn-test-token",
+		AppID:         "app-id",
+		AppSecret:     "app-secret",
+		TokenEndpoint: server.URL + "/open-apis/auth/v3/tenant_access_token/internal/",
+		BaseURL:       server.URL,
+	})
+
+	doc, err := source.FetchDocument(context.Background(), "")
+	if err != nil {
+		t.Fatalf("fetch wiki document: %v", err)
+	}
+	if !strings.Contains(string(doc.Content), "Wiki 文档") || !strings.Contains(string(doc.Content), "正文") {
+		t.Fatalf("unexpected wiki content: %q", string(doc.Content))
+	}
+	if doc.Meta.Title != "飞书 Wiki 文档" {
+		t.Fatalf("unexpected wiki title: %+v", doc.Meta)
+	}
+}

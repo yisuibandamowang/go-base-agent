@@ -143,6 +143,7 @@ type RAGSemaphoreEntryConfig struct {
 
 type RAGKnowledgeConfig struct {
 	Schedule RAGKnowledgeScheduleConfig `mapstructure:"schedule"`
+	Feishu   RAGKnowledgeFeishuConfig   `mapstructure:"feishu"`
 }
 
 type RAGKnowledgeScheduleConfig struct {
@@ -150,6 +151,14 @@ type RAGKnowledgeScheduleConfig struct {
 	LockSeconds        int `mapstructure:"lock-seconds"`
 	BatchSize          int `mapstructure:"batch-size"`
 	MinIntervalSeconds int `mapstructure:"min-interval-seconds"`
+}
+
+type RAGKnowledgeFeishuConfig struct {
+	AppID       string `mapstructure:"app-id"`
+	AppSecret   string `mapstructure:"app-secret"`
+	AccessToken string `mapstructure:"access-token"`
+	TenantToken string `mapstructure:"tenant-token"`
+	BaseURL     string `mapstructure:"base-url"`
 }
 
 type RAGMCPConfig struct {

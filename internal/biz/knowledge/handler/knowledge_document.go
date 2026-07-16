@@ -120,6 +120,13 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 		}
 	}
 
+	if vals, ok := form.Value["scheduleEnabled"]; ok && len(vals) > 0 {
+		req.ScheduleEnabled = parseInt16(vals[0])
+	}
+	if vals, ok := form.Value["scheduleCron"]; ok && len(vals) > 0 {
+		req.ScheduleCron = vals[0]
+	}
+
 	// Process mode & chunk strategy
 	if vals, ok := form.Value["processMode"]; ok && len(vals) > 0 {
 		if vals[0] == "pipeline" {
@@ -159,6 +166,15 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+func parseInt16(value string) int16 {
+	switch strings.TrimSpace(value) {
+	case "1", "true", "TRUE", "True":
+		return 1
+	default:
+		return 0
+	}
 }
 
 // ListDocs GET /knowledge-base/:id/docs
