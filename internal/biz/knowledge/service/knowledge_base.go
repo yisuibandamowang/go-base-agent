@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
+	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
@@ -15,12 +17,18 @@ import (
 
 // KnowledgeBaseService 知识库业务逻辑层。
 type KnowledgeBaseService struct {
-	repo *repo.KnowledgeBaseRepo
+	repo          *repo.KnowledgeBaseRepo
+	auditRecorder *auditService.BizChangeLogService
 }
 
 // NewKnowledgeBaseService 创建 KnowledgeBaseService。
 func NewKnowledgeBaseService(repo *repo.KnowledgeBaseRepo) *KnowledgeBaseService {
 	return &KnowledgeBaseService{repo: repo}
+}
+
+// SetAuditRecorder 设置审计日志记录器。
+func (s *KnowledgeBaseService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.auditRecorder = recorder
 }
 
 // Create 创建知识库，校验名称和 collection 唯一性。
@@ -44,7 +52,15 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, req dto.CreateKnowled
 	if err := s.repo.Create(ctx, kb); err != nil {
 		return nil, fmt.Errorf("failed to create knowledge base: %w", err)
 	}
-	return toResp(kb), nil
+	resp := toResp(kb)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeKnowledgeBase,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建知识库：" + resp.Name,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // Get 查询知识库详情。
@@ -68,6 +84,7 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, id string, req dto.Up
 		}
 		return nil, fmt.Errorf("failed to find knowledge base for update: %w", err)
 	}
+	before := toResp(kb)
 
 	if err := s.checkNameUnique(ctx, req.Name, id); err != nil {
 		return nil, err
@@ -85,19 +102,39 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, id string, req dto.Up
 	if err := s.repo.Update(ctx, kb); err != nil {
 		return nil, fmt.Errorf("failed to update knowledge base: %w", err)
 	}
-	return toResp(kb), nil
+	resp := toResp(kb)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeBase,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新知识库：" + resp.Name,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // Delete 软删除知识库。
 func (s *KnowledgeBaseService) Delete(ctx context.Context, id string) error {
-	_, err := s.repo.FindByID(ctx, id)
+	kb, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		return fmt.Errorf("failed to find knowledge base for delete: %w", err)
 	}
-	return s.repo.SoftDelete(ctx, id)
+	before := toResp(kb)
+	if err := s.repo.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeBase,
+		BizID:          id,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除知识库：" + before.Name,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // List 分页查询知识库列表。
@@ -145,5 +182,14 @@ func toResp(kb *model.KnowledgeBase) *dto.KnowledgeBaseResp {
 		UpdatedBy:      kb.UpdatedBy,
 		CreateTime:     kb.CreateTime.Format(time.RFC3339),
 		UpdateTime:     kb.UpdateTime.Format(time.RFC3339),
+	}
+}
+
+func (s *KnowledgeBaseService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
 	}
 }

@@ -90,9 +90,11 @@ func main() {
 	userRepo := userRepoPkg.NewUserRepo(gormDB)
 	authSvc := userService.NewAuthService(userRepo, cfg.Auth)
 	authHandler := userHandler.NewAuthHandler(authSvc)
+	auditSvc := auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB))
 
 	kbRepo := knowledgeRepo.NewKnowledgeBaseRepo(gormDB)
 	kbSvc := knowledgeService.NewKnowledgeBaseService(kbRepo)
+	kbSvc.SetAuditRecorder(auditSvc)
 	kbHandler := knowledgeHandler.NewKnowledgeBaseHandler(kbSvc)
 
 	docRepo := knowledgeRepo.NewKnowledgeDocumentRepo(gormDB)
@@ -118,10 +120,9 @@ func main() {
 	adminRepoObj := adminRepo.NewAdminRepo(gormDB)
 	sampleQRepo := adminRepo.NewSampleQuestionRepo(gormDB)
 	adminSvc := adminService.NewAdminService(adminRepoObj, sampleQRepo, gormDB)
-	adminSvc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB)))
+	adminSvc.SetAuditRecorder(auditSvc)
 	adminH := adminHandler.NewAdminHandler(adminSvc)
 
-	auditSvc := auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB))
 	auditH := auditHandler.NewAuditHandler(auditSvc)
 
 	ingestionPipelineSvc := ingestionService.NewPipelineService(ingestionRepo.NewPipelineRepo(gormDB), gormDB)
