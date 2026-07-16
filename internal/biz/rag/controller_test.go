@@ -6,8 +6,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	appctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/idempotent"
 
 	"github.com/gin-gonic/gin"
 )
@@ -167,5 +171,137 @@ func TestController_Stop(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, `"code":"0"`) {
 		t.Fatal("expected success code")
+	}
+}
+
+func TestController_Chat_IdempotentBlocksDuplicate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	ctl := NewController(&blockingRagService{
+		chatStarted: make(chan struct{}, 1),
+		chatRelease: make(chan struct{}),
+	})
+	ctl.SetIdempotentGuard(idempotent.New(rdb))
+	svc := ctl.svc.(*blockingRagService)
+
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	req1 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello", nil)
+	req1 = req1.WithContext(appctx.WithUser(req1.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c1.Request = req1
+
+	done1 := make(chan struct{})
+	go func() {
+		ctl.Chat(c1)
+		close(done1)
+	}()
+
+	select {
+	case <-svc.chatStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected first chat request to start")
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	req2 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello", nil)
+	req2 = req2.WithContext(appctx.WithUser(req2.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c2.Request = req2
+
+	ctl.Chat(c2)
+	if !strings.Contains(w2.Body.String(), "当前会话处理中") {
+		t.Fatalf("expected duplicate chat to be blocked, got %s", w2.Body.String())
+	}
+
+	close(svc.chatRelease)
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected first chat request to finish")
+	}
+}
+
+func TestController_Stop_IdempotentBlocksDuplicate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	ctl := NewController(&blockingRagService{
+		stopStarted: make(chan struct{}, 1),
+		stopRelease: make(chan struct{}),
+	})
+	ctl.SetIdempotentGuard(idempotent.New(rdb))
+	svc := ctl.svc.(*blockingRagService)
+
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	req1 := httptest.NewRequest(http.MethodPost, "/rag/v3/stop?taskId=task-1", nil)
+	req1 = req1.WithContext(appctx.WithUser(req1.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c1.Request = req1
+
+	done1 := make(chan struct{})
+	go func() {
+		ctl.Stop(c1)
+		close(done1)
+	}()
+
+	select {
+	case <-svc.stopStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected first stop request to start")
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	req2 := httptest.NewRequest(http.MethodPost, "/rag/v3/stop?taskId=task-1", nil)
+	req2 = req2.WithContext(appctx.WithUser(req2.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c2.Request = req2
+
+	ctl.Stop(c2)
+	if !strings.Contains(w2.Body.String(), "您操作太快") {
+		t.Fatalf("expected duplicate stop to be blocked, got %s", w2.Body.String())
+	}
+
+	close(svc.stopRelease)
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected first stop request to finish")
+	}
+}
+
+type blockingRagService struct {
+	chatStarted chan struct{}
+	chatRelease chan struct{}
+	stopStarted chan struct{}
+	stopRelease chan struct{}
+}
+
+func (s *blockingRagService) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+	if s.chatStarted != nil {
+		select {
+		case s.chatStarted <- struct{}{}:
+		default:
+		}
+	}
+	if s.chatRelease != nil {
+		<-s.chatRelease
+	}
+	sender.SendFinish("", "")
+	sender.SendDone()
+	sender.Close()
+}
+
+func (s *blockingRagService) StopTask(taskID string) {
+	if s.stopStarted != nil {
+		select {
+		case s.stopStarted <- struct{}{}:
+		default:
+		}
+	}
+	if s.stopRelease != nil {
+		<-s.stopRelease
 	}
 }

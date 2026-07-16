@@ -4,8 +4,11 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	appctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/idempotent"
 	"go-base-agent/internal/framework/snowflake"
 	"go-base-agent/internal/framework/sse"
 
@@ -21,12 +24,18 @@ type Service interface {
 // Controller handles RAG chat HTTP endpoints.
 // Aligns with Java RAGChatController.
 type Controller struct {
-	svc Service
+	svc   Service
+	guard *idempotent.Guard
 }
 
 // NewController creates a new RAG chat controller.
 func NewController(svc Service) *Controller {
 	return &Controller{svc: svc}
+}
+
+// SetIdempotentGuard configures an optional idempotency guard for chat and stop routes.
+func (ctl *Controller) SetIdempotentGuard(guard *idempotent.Guard) {
+	ctl.guard = guard
 }
 
 // Chat handles GET /rag/v3/chat — SSE streaming chat.
@@ -48,6 +57,11 @@ func (ctl *Controller) Chat(c *gin.Context) {
 	}
 
 	taskID := snowflake.NextIDStr()
+	chatLockKey := chatSubmitLockKey(c)
+	if !ctl.acquireSubmitLock(c, chatLockKey, 5*time.Minute, "当前会话处理中，请稍后再发起新的对话") {
+		return
+	}
+	defer ctl.releaseSubmitLock(chatLockKey)
 
 	s := sse.NewSender(c)
 	sender := NewSSESender(s)
@@ -69,8 +83,51 @@ func (ctl *Controller) Stop(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": "A000001", "message": "taskId不能为空"})
 		return
 	}
+	stopLockKey := stopSubmitLockKey(c, taskID)
+	if !ctl.acquireSubmitLock(c, stopLockKey, 5*time.Minute, "您操作太快，请稍后再试") {
+		return
+	}
+	defer ctl.releaseSubmitLock(stopLockKey)
 	ctl.svc.StopTask(taskID)
 	c.JSON(http.StatusOK, gin.H{"code": "0", "message": "success"})
+}
+
+func (ctl *Controller) acquireSubmitLock(c *gin.Context, key string, ttl time.Duration, duplicateMessage string) bool {
+	if ctl.guard == nil {
+		return true
+	}
+	ok, err := ctl.guard.Check(c.Request.Context(), key, ttl)
+	if err != nil {
+		return true
+	}
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"code": "A000001", "message": duplicateMessage})
+		return false
+	}
+	return true
+}
+
+func (ctl *Controller) releaseSubmitLock(key string) {
+	if ctl.guard == nil {
+		return
+	}
+	_ = ctl.guard.Clear(context.Background(), key)
+}
+
+func chatSubmitLockKey(c *gin.Context) string {
+	userID := "anonymous"
+	if user := appctx.User(c.Request.Context()); user != nil && strings.TrimSpace(user.UserID) != "" {
+		userID = strings.TrimSpace(user.UserID)
+	}
+	return "rag:chat:submit:" + userID
+}
+
+func stopSubmitLockKey(c *gin.Context, taskID string) string {
+	userID := "anonymous"
+	if user := appctx.User(c.Request.Context()); user != nil && strings.TrimSpace(user.UserID) != "" {
+		userID = strings.TrimSpace(user.UserID)
+	}
+	return "rag:stop:submit:" + userID + ":" + strings.TrimSpace(taskID)
 }
 
 func detachedRequestContext(reqCtx context.Context) context.Context {

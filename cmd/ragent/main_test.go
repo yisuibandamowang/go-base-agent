@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,6 +142,203 @@ func TestBuildRerankClients_IncludesHTTPProviderAndNoopFallback(t *testing.T) {
 	if _, ok := clients[1].(*infrarerank.NoopClient); !ok {
 		t.Fatalf("expected noop fallback, got %T", clients[1])
 	}
+}
+
+func TestRagSettingsExposesFullConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{
+		RAG: config.RAGConfig{
+			Vector: config.RAGVectorConfig{Type: "pg"},
+			Default: config.RAGDefaultConfig{
+				CollectionName: "rag_default_store",
+				Dimension:      1536,
+				MetricType:     "COSINE",
+			},
+			QueryRewrite: config.RAGQueryRewriteConfig{
+				Enabled:            true,
+				MaxHistoryMessages: 4,
+				MaxHistoryChars:    500,
+			},
+			RateLimit: config.RAGRateLimitConfig{
+				Global: config.RAGRateLimitGlobalConfig{
+					Enabled:        true,
+					MaxConcurrent:  1,
+					MaxWaitSeconds: 3,
+					LeaseSeconds:   30,
+					PollIntervalMs: 200,
+				},
+			},
+			Memory: config.RAGMemoryConfig{
+				HistoryKeepTurns:  4,
+				SummaryStartTurns: 5,
+				SummaryEnabled:    true,
+				TTLMinutes:        60,
+				SummaryMaxChars:   200,
+				TitleMaxLength:    30,
+			},
+		},
+		AI: config.AIConfig{
+			Providers: config.AIProvidersConfig{
+				"openai": {
+					URL:      "https://api.openai.com",
+					APIKey:   "sk-1234567890abcdef",
+					Protocol: "openai-compatible",
+					Endpoints: map[string]string{
+						"chat": "/v1/chat/completions",
+					},
+				},
+			},
+			Selection: config.AISelectionConfig{
+				FailureThreshold:          2,
+				OpenDurationMs:            30000,
+				FirstPacketTimeoutSeconds: 60,
+			},
+			Stream: config.AIStreamConfig{
+				MessageChunkSize: 1,
+			},
+			Chat: config.AIChatConfig{
+				DefaultModel:      "qwen3-max",
+				DeepThinkingModel: "qwen3-max",
+				Candidates: []config.AICandidateConfig{
+					{
+						ID:               "qwen3-max",
+						Provider:         "openai",
+						Model:            "qwen3-max",
+						SupportsThinking: true,
+						Priority:         1,
+					},
+				},
+			},
+			Embedding: config.AIEmbeddingConfig{
+				DefaultModel: "qwen-emb-8b",
+				Candidates: []config.AIEmbeddingCandidateConfig{
+					{
+						ID:        "qwen-emb-8b",
+						Provider:  "openai",
+						Model:     "qwen-emb-8b",
+						Dimension: 1536,
+						Priority:  1,
+					},
+				},
+			},
+			Rerank: config.AIRerankConfig{
+				DefaultModel: "qwen3-rerank",
+				Candidates: []config.AIRerankCandidateConfig{
+					{
+						ID:       "qwen3-rerank",
+						Provider: "openai",
+						Model:    "qwen3-rerank",
+						Priority: 1,
+					},
+				},
+			},
+			VLM: config.AIVLMConfig{
+				DefaultModel: "qwen-vl",
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/ragent/rag/settings", nil)
+	ragSettings(cfg)(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Code string         `json:"code"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	if resp.Code != "0" {
+		t.Fatalf("unexpected code %s", resp.Code)
+	}
+
+	upload := resp.Data["upload"].(map[string]any)
+	if upload["maxRequestSize"].(float64) != 100<<20 {
+		t.Fatalf("unexpected maxRequestSize: %#v", upload["maxRequestSize"])
+	}
+	ragCfg := resp.Data["rag"].(map[string]any)
+	if ragCfg["default"].(map[string]any)["dimension"].(float64) != 1536 {
+		t.Fatalf("unexpected rag default dimension: %#v", ragCfg["default"])
+	}
+	if ragCfg["memory"].(map[string]any)["titleMaxLength"].(float64) != 30 {
+		t.Fatalf("unexpected memory settings: %#v", ragCfg["memory"])
+	}
+	if ragCfg["rateLimit"].(map[string]any)["global"].(map[string]any)["pollIntervalMs"].(float64) != 200 {
+		t.Fatalf("unexpected rate limit settings: %#v", ragCfg["rateLimit"])
+	}
+	aiCfg := resp.Data["ai"].(map[string]any)
+	provider := aiCfg["providers"].(map[string]any)["openai"].(map[string]any)
+	if provider["apiKey"].(string) == "sk-1234567890abcdef" || !strings.Contains(provider["apiKey"].(string), "***") {
+		t.Fatalf("expected masked apiKey, got %#v", provider["apiKey"])
+	}
+	if aiCfg["chat"].(map[string]any)["defaultModel"].(string) != "qwen3-max" {
+		t.Fatalf("unexpected chat config: %#v", aiCfg["chat"])
+	}
+}
+
+func TestDemoRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	api := r.Group("/api/ragent")
+	registerDemoRoutes(r, api, newDemoHandler())
+
+	t.Run("hello", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test/langchain4j/hello", nil)
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "hello from Go") {
+			t.Fatalf("unexpected hello response: %d %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("simple stream", func(t *testing.T) {
+		ts := httptest.NewServer(r)
+		defer ts.Close()
+
+		resp, err := http.Get(ts.URL + "/api/ragent/test/langchain4j/simple-stream-chat?question=hello")
+		if err != nil {
+			t.Fatalf("stream request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read stream body: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "event:message") || !strings.Contains(string(body), "[DONE]") {
+			t.Fatalf("unexpected stream response: %d %s", resp.StatusCode, string(body))
+		}
+	})
+
+	t.Run("image generation", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/test/langchain4j/image-generation", strings.NewReader(`{"prompt":"一只猫"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		body := w.Body.String()
+		if w.Code != http.StatusOK || !strings.Contains(body, "data:image/png;base64") {
+			t.Fatalf("unexpected image generation response: %d %s", w.Code, body)
+		}
+	})
+
+	t.Run("image analysis", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/ragent/test/langchain4j/image-analysis", strings.NewReader(`{"imageUrl":"https://example.com/a.png","prompt":"看看这张图"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		body := w.Body.String()
+		if w.Code != http.StatusOK || !strings.Contains(body, "demo 分析") || !strings.Contains(body, "example.com/a.png") {
+			t.Fatalf("unexpected image analysis response: %d %s", w.Code, body)
+		}
+	})
 }
 
 type fakeEvalRetriever struct{}

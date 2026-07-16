@@ -37,6 +37,7 @@ import (
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/db"
+	"go-base-agent/internal/framework/idempotent"
 	"go-base-agent/internal/framework/middleware"
 	"go-base-agent/internal/framework/mq"
 	"go-base-agent/internal/framework/ratelimit"
@@ -69,6 +70,7 @@ func main() {
 	if _, err := rdb.Ping(pingCtx).Result(); err != nil {
 		slog.Warn("redis not available, rate limiter disabled", "err", err)
 	}
+	idempotentGuard := idempotent.New(rdb)
 
 	queueLimiter := ratelimit.NewFairQueueLimiter(
 		"rag:chat",
@@ -213,6 +215,7 @@ func main() {
 		retriever,
 		memSvc,
 	))
+	ragCtl.SetIdempotentGuard(idempotentGuard)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -341,6 +344,7 @@ func main() {
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
 		api.GET("/rag/eval", ragEval(pgRetriever))
+		registerDemoRoutes(r, api, newDemoHandler())
 
 		// Knowledge base
 		kb := api.Group("/knowledge-base")
@@ -610,43 +614,7 @@ func embeddingDimension(aiCfg config.AIConfig) int {
 
 func ragSettings(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		embModels := make([]map[string]interface{}, 0)
-		for _, c := range cfg.AI.Embedding.Candidates {
-			embModels = append(embModels, map[string]interface{}{
-				"id":        c.ID,
-				"model":     c.Model,
-				"provider":  c.Provider,
-				"dimension": c.Dimension,
-			})
-		}
-		rerankModels := make([]map[string]interface{}, 0)
-		for _, c := range cfg.AI.Rerank.Candidates {
-			rerankModels = append(rerankModels, map[string]interface{}{
-				"id":       c.ID,
-				"model":    c.Model,
-				"provider": c.Provider,
-			})
-		}
-		c.JSON(http.StatusOK, convention.Success(map[string]interface{}{
-			"upload": map[string]interface{}{
-				"maxFileSize":  "50MB",
-				"allowedTypes": []string{".pdf", ".docx", ".md", ".txt", ".html", ".csv"},
-			},
-			"rag": map[string]interface{}{
-				"queryRewriteEnabled": cfg.RAG.QueryRewrite.Enabled,
-				"deepThinkingEnabled": true,
-			},
-			"ai": map[string]interface{}{
-				"embedding": map[string]interface{}{
-					"defaultModel": cfg.AI.Embedding.DefaultModel,
-					"candidates":   embModels,
-				},
-				"rerank": map[string]interface{}{
-					"defaultModel": cfg.AI.Rerank.DefaultModel,
-					"candidates":   rerankModels,
-				},
-			},
-		}))
+		c.JSON(http.StatusOK, convention.Success(ragSettingsPayload(cfg)))
 	}
 }
 
