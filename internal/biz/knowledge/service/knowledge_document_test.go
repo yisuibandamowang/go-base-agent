@@ -307,6 +307,91 @@ func TestDocumentService_RecordsAuditLogs(t *testing.T) {
 	}
 }
 
+func TestDocumentService_RecordsChunkAuditLogs(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}, &auditModel.BizChangeLog{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	kb := &knowledgeModel.KnowledgeBase{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection_a",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:      kb.ID,
+		DocName:   "会员Agent说明.md",
+		FileType:  "md",
+		Status:    "success",
+		CreatedBy: "admin-1",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+	}
+	svc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gdb)))
+
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	created, err := svc.CreateChunk(ctx, doc.ID, knowledgeDto.CreateChunkReq{
+		Content: "第一段内容",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+
+	updatedContent := "更新后的内容"
+	updated, err := svc.UpdateChunk(ctx, created.ID, knowledgeDto.UpdateChunkReq{
+		Content: updatedContent,
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("update chunk: %v", err)
+	}
+
+	if err := svc.DeleteChunk(ctx, updated.ID); err != nil {
+		t.Fatalf("delete chunk: %v", err)
+	}
+
+	var logs []auditModel.BizChangeLog
+	if err := gdb.Where("biz_type = ? AND biz_id = ?", auditService.BizTypeKnowledgeChunk, created.ID).
+		Order("create_time ASC").
+		Find(&logs).Error; err != nil {
+		t.Fatalf("load audit logs: %v", err)
+	}
+	if len(logs) != 3 {
+		t.Fatalf("expected 3 audit logs, got %d: %+v", len(logs), logs)
+	}
+	if logs[0].OperationType != auditService.OperationCreate || !strings.Contains(logs[0].AfterSnapshot, "第一段内容") {
+		t.Fatalf("unexpected create audit log: %+v", logs[0])
+	}
+	if logs[1].OperationType != auditService.OperationUpdate ||
+		!strings.Contains(logs[1].BeforeSnapshot, "第一段内容") ||
+		!strings.Contains(logs[1].AfterSnapshot, updatedContent) {
+		t.Fatalf("unexpected update audit log: %+v", logs[1])
+	}
+	if logs[2].OperationType != auditService.OperationDelete || !strings.Contains(logs[2].BeforeSnapshot, updatedContent) {
+		t.Fatalf("unexpected delete audit log: %+v", logs[2])
+	}
+}
+
 func TestDocumentService_PersistChunksAndVectorsUsesPersistedChunkIDs(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

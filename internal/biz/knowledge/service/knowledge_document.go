@@ -792,7 +792,15 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 	}); err != nil {
 		return nil, fmt.Errorf("create chunk: %w", err)
 	}
-	return s.chunkToResp(chunk), nil
+	resp := s.chunkToResp(chunk)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeKnowledgeChunk,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建分块：" + doc.DocName,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // UpdateChunk 更新分块内容。
@@ -801,17 +809,42 @@ func (s *DocumentService) UpdateChunk(ctx context.Context, chunkID string, req d
 	if err != nil {
 		return nil, err
 	}
+	before := s.chunkToResp(chunk)
 	chunk.Content = req.Content
 	chunk.UpdatedBy = userID
 	if err := s.chunkRepo.Update(ctx, chunk); err != nil {
 		return nil, fmt.Errorf("update chunk: %w", err)
 	}
-	return s.chunkToResp(chunk), nil
+	resp := s.chunkToResp(chunk)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeChunk,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新分块：" + resp.DocID,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // DeleteChunk 软删除分块。
 func (s *DocumentService) DeleteChunk(ctx context.Context, chunkID string) error {
-	return s.chunkRepo.SoftDelete(ctx, chunkID)
+	chunk, err := s.chunkRepo.FindByID(ctx, chunkID)
+	if err != nil {
+		return err
+	}
+	before := s.chunkToResp(chunk)
+	if err := s.chunkRepo.SoftDelete(ctx, chunkID); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeChunk,
+		BizID:          chunkID,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除分块：" + before.DocID,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // ToggleChunk 切换分块启用状态。
