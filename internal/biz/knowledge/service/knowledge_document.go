@@ -711,15 +711,32 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
 
 // ToggleDocument 切换文档启用状态。
 func (s *DocumentService) ToggleDocument(ctx context.Context, id string, enabled int16) error {
+	doc, err := s.docRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	before := s.docToResp(doc)
+	now := time.Now()
 	result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
 		Where("id = ? AND deleted = 0", id).
-		Updates(map[string]interface{}{"enabled": enabled, "update_time": time.Now()})
+		Updates(map[string]interface{}{"enabled": enabled, "update_time": now})
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
+	doc.Enabled = enabled
+	doc.UpdateTime = now
+	after := s.docToResp(doc)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeDocument,
+		BizID:          id,
+		OperationType:  operationForEnabled(enabled),
+		ActionDesc:     "切换文档状态：" + after.DocName,
+		BeforeSnapshot: before,
+		AfterSnapshot:  after,
+	})
 	return nil
 }
 
@@ -849,12 +866,57 @@ func (s *DocumentService) DeleteChunk(ctx context.Context, chunkID string) error
 
 // ToggleChunk 切换分块启用状态。
 func (s *DocumentService) ToggleChunk(ctx context.Context, chunkID string, enabled int16) error {
-	return s.chunkRepo.UpdateEnabled(ctx, chunkID, enabled)
+	chunk, err := s.chunkRepo.FindByID(ctx, chunkID)
+	if err != nil {
+		return err
+	}
+	before := s.chunkToResp(chunk)
+	if err := s.chunkRepo.UpdateEnabled(ctx, chunkID, enabled); err != nil {
+		return err
+	}
+	chunk.Enabled = enabled
+	after := s.chunkToResp(chunk)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeChunk,
+		BizID:          chunkID,
+		OperationType:  operationForEnabled(enabled),
+		ActionDesc:     "切换分块状态：" + after.DocID,
+		BeforeSnapshot: before,
+		AfterSnapshot:  after,
+	})
+	return nil
 }
 
 // BatchToggleChunks 批量切换分块启用状态。
 func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, ids []string, enabled int16) error {
-	return s.chunkRepo.BatchUpdateEnabled(ctx, docID, ids, enabled)
+	if len(ids) == 0 {
+		return nil
+	}
+	var chunks []model.KnowledgeChunk
+	if err := s.db.WithContext(ctx).
+		Where("doc_id = ? AND id IN ? AND deleted = 0", docID, ids).
+		Order("chunk_index ASC").
+		Find(&chunks).Error; err != nil {
+		return err
+	}
+	if err := s.chunkRepo.BatchUpdateEnabled(ctx, docID, ids, enabled); err != nil {
+		return err
+	}
+	for i := range chunks {
+		before := s.chunkToResp(&chunks[i])
+		chunks[i].Enabled = enabled
+		chunks[i].UpdateTime = time.Now()
+		after := s.chunkToResp(&chunks[i])
+		s.recordAudit(ctx, auditService.RecordReq{
+			BizType:        auditService.BizTypeKnowledgeChunk,
+			BizID:          chunks[i].ID,
+			OperationType:  operationForEnabled(enabled),
+			ActionDesc:     "批量切换分块状态：" + docID,
+			BeforeSnapshot: before,
+			AfterSnapshot:  after,
+		})
+	}
+	return nil
 }
 
 // GetChunkLogs 查询文档分块日志。
@@ -920,6 +982,13 @@ func (s *DocumentService) recordAudit(ctx context.Context, req auditService.Reco
 	if err := s.auditRecorder.Record(ctx, req); err != nil {
 		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
 	}
+}
+
+func operationForEnabled(enabled int16) string {
+	if enabled == 1 {
+		return auditService.OperationEnable
+	}
+	return auditService.OperationDisable
 }
 
 func (s *DocumentService) chunkToResp(c *model.KnowledgeChunk) *dto.ChunkResp {

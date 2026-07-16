@@ -392,6 +392,116 @@ func TestDocumentService_RecordsChunkAuditLogs(t *testing.T) {
 	}
 }
 
+func TestDocumentService_RecordsToggleAuditLogs(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}, &auditModel.BizChangeLog{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	kb := &knowledgeModel.KnowledgeBase{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection_a",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:      kb.ID,
+		DocName:   "会员Agent说明.md",
+		Enabled:   1,
+		FileType:  "md",
+		Status:    "success",
+		CreatedBy: "admin-1",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunkA := &knowledgeModel.KnowledgeChunk{
+		KbID:       kb.ID,
+		DocID:      doc.ID,
+		ChunkIndex: 0,
+		Content:    "第一段内容",
+		Enabled:    1,
+		CreatedBy:  "admin-1",
+	}
+	chunkB := &knowledgeModel.KnowledgeChunk{
+		KbID:       kb.ID,
+		DocID:      doc.ID,
+		ChunkIndex: 1,
+		Content:    "第二段内容",
+		Enabled:    0,
+		CreatedBy:  "admin-1",
+	}
+	if err := gdb.Create(chunkA).Error; err != nil {
+		t.Fatalf("create chunk a: %v", err)
+	}
+	if err := gdb.Create(chunkB).Error; err != nil {
+		t.Fatalf("create chunk b: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeChunk{}).Where("id = ?", chunkB.ID).Update("enabled", 0).Error; err != nil {
+		t.Fatalf("disable chunk b: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+	}
+	svc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gdb)))
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	if err := svc.ToggleDocument(ctx, doc.ID, 0); err != nil {
+		t.Fatalf("toggle document: %v", err)
+	}
+	if err := svc.ToggleChunk(ctx, chunkA.ID, 0); err != nil {
+		t.Fatalf("toggle chunk: %v", err)
+	}
+	if err := svc.BatchToggleChunks(ctx, doc.ID, []string{chunkB.ID}, 1); err != nil {
+		t.Fatalf("batch toggle chunks: %v", err)
+	}
+
+	var docLogs []auditModel.BizChangeLog
+	if err := gdb.Where("biz_type = ? AND biz_id = ?", auditService.BizTypeKnowledgeDocument, doc.ID).
+		Find(&docLogs).Error; err != nil {
+		t.Fatalf("load document audit logs: %v", err)
+	}
+	if len(docLogs) != 1 || docLogs[0].OperationType != auditService.OperationDisable ||
+		!strings.Contains(docLogs[0].BeforeSnapshot, `"enabled":1`) ||
+		!strings.Contains(docLogs[0].AfterSnapshot, `"enabled":0`) {
+		t.Fatalf("unexpected document toggle audit logs: %+v", docLogs)
+	}
+
+	var chunkLogs []auditModel.BizChangeLog
+	if err := gdb.Where("biz_type = ? AND biz_id IN ?", auditService.BizTypeKnowledgeChunk, []string{chunkA.ID, chunkB.ID}).
+		Order("create_time ASC").
+		Find(&chunkLogs).Error; err != nil {
+		t.Fatalf("load chunk audit logs: %v", err)
+	}
+	if len(chunkLogs) != 2 {
+		t.Fatalf("expected 2 chunk audit logs, got %d: %+v", len(chunkLogs), chunkLogs)
+	}
+	if chunkLogs[0].OperationType != auditService.OperationDisable ||
+		!strings.Contains(chunkLogs[0].BeforeSnapshot, `"enabled":1`) ||
+		!strings.Contains(chunkLogs[0].AfterSnapshot, `"enabled":0`) {
+		t.Fatalf("unexpected single chunk toggle audit log: %+v", chunkLogs[0])
+	}
+	if chunkLogs[1].OperationType != auditService.OperationEnable ||
+		!strings.Contains(chunkLogs[1].BeforeSnapshot, `"enabled":0`) ||
+		!strings.Contains(chunkLogs[1].AfterSnapshot, `"enabled":1`) {
+		t.Fatalf("unexpected batch chunk toggle audit log: %+v", chunkLogs[1])
+	}
+}
+
 func TestDocumentService_PersistChunksAndVectorsUsesPersistedChunkIDs(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

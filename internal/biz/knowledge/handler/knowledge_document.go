@@ -181,11 +181,7 @@ func (h *DocumentHandler) ToggleDoc(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
 		return
 	}
-	_, err := h.svc.UpdateDocument(c.Request.Context(), id, dto.UpdateDocumentReq{
-		DocName: "",
-		Enabled: &req.Enabled,
-	}, userID(c))
-	if err != nil {
+	if err := h.svc.ToggleDocument(c.Request.Context(), id, req.Enabled); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
