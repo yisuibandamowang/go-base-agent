@@ -19,13 +19,19 @@ import (
 
 // PipelineService 是摄取流水线业务服务。
 type PipelineService struct {
-	repo *repo.PipelineRepo
-	db   *gorm.DB
+	repo          *repo.PipelineRepo
+	db            *gorm.DB
+	auditRecorder *auditService.BizChangeLogService
 }
 
 // NewPipelineService 创建 PipelineService。
 func NewPipelineService(pipelineRepo *repo.PipelineRepo, database *gorm.DB) *PipelineService {
 	return &PipelineService{repo: pipelineRepo, db: database}
+}
+
+// SetAuditRecorder 设置审计日志记录器。
+func (s *PipelineService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.auditRecorder = recorder
 }
 
 // Create 创建摄取流水线。
@@ -42,11 +48,26 @@ func (s *PipelineService) Create(ctx context.Context, req dto.CreatePipelineReq,
 	if err := s.repo.ReplaceNodes(ctx, pipeline.ID, toPipelineNodes(pipeline.ID, req.Nodes, userID)); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, pipeline.ID)
+	resp, err := s.Get(ctx, pipeline.ID)
+	if err != nil {
+		return nil, err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeIngestionPipeline,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建摄取流水线：" + resp.Name,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // Update 更新摄取流水线。
 func (s *PipelineService) Update(ctx context.Context, id string, req dto.UpdatePipelineReq, userID string) (*dto.PipelineResp, error) {
+	before, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	pipeline, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -66,7 +87,19 @@ func (s *PipelineService) Update(ctx context.Context, id string, req dto.UpdateP
 			return nil, err
 		}
 	}
-	return s.Get(ctx, id)
+	resp, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeIngestionPipeline,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新摄取流水线：" + resp.Name,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // Get 查询摄取流水线详情。
@@ -101,10 +134,21 @@ func (s *PipelineService) List(ctx context.Context, page, size int, keyword stri
 
 // Delete 删除摄取流水线。
 func (s *PipelineService) Delete(ctx context.Context, id string) error {
-	if _, err := s.repo.FindByID(ctx, id); err != nil {
+	before, err := s.Get(ctx, id)
+	if err != nil {
 		return err
 	}
-	return s.repo.SoftDelete(ctx, id)
+	if err := s.repo.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeIngestionPipeline,
+		BizID:          id,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除摄取流水线：" + before.Name,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // DefinitionNodes 返回流水线节点定义。
@@ -273,6 +317,15 @@ func (s *TaskService) markTaskFailed(ctx context.Context, task *model.IngestionT
 }
 
 func (s *TaskService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
+	}
+}
+
+func (s *PipelineService) recordAudit(ctx context.Context, req auditService.RecordReq) {
 	if s.auditRecorder == nil {
 		return
 	}
