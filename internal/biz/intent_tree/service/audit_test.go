@@ -162,3 +162,73 @@ func TestIntentService_RecordsBatchNodeAuditLogs(t *testing.T) {
 		t.Fatalf("unexpected delete audit log: %+v", logs[2])
 	}
 }
+
+func TestIntentService_RecordsTermMappingAuditLogs(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.QueryTermMapping{}, &auditModel.BizChangeLog{}); err != nil {
+		t.Fatalf("migrate tables: %v", err)
+	}
+
+	svc := NewIntentService(repo.NewIntentRepo(gdb), repo.NewTermMappingRepo(gdb), gdb)
+	svc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gdb)))
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	created, err := svc.CreateTermMapping(ctx, dto.CreateTermMappingReq{
+		Domain:     "member",
+		SourceTerm: "VIP",
+		TargetTerm: "会员",
+		MatchType:  1,
+		Priority:   10,
+		Enabled:    1,
+		Remark:     "会员同义词",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create term mapping: %v", err)
+	}
+
+	newTarget := "贵宾会员"
+	newRemark := "升级后的同义词"
+	updated, err := svc.UpdateTermMapping(ctx, created.ID, dto.UpdateTermMappingReq{
+		TargetTerm: &newTarget,
+		Remark:     &newRemark,
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("update term mapping: %v", err)
+	}
+
+	if err := svc.DeleteTermMapping(ctx, updated.ID); err != nil {
+		t.Fatalf("delete term mapping: %v", err)
+	}
+
+	var logs []auditModel.BizChangeLog
+	if err := gdb.Where("biz_type = ? AND biz_id = ?", auditService.BizTypeQueryTermMapping, created.ID).
+		Order("create_time ASC").
+		Find(&logs).Error; err != nil {
+		t.Fatalf("load audit logs: %v", err)
+	}
+	if len(logs) != 3 {
+		t.Fatalf("expected 3 audit logs, got %d: %+v", len(logs), logs)
+	}
+	if logs[0].OperationType != auditService.OperationCreate ||
+		!strings.Contains(logs[0].AfterSnapshot, `"sourceTerm":"VIP"`) ||
+		!strings.Contains(logs[0].AfterSnapshot, `"targetTerm":"会员"`) {
+		t.Fatalf("unexpected create audit log: %+v", logs[0])
+	}
+	if logs[1].OperationType != auditService.OperationUpdate ||
+		!strings.Contains(logs[1].BeforeSnapshot, `"targetTerm":"会员"`) ||
+		!strings.Contains(logs[1].AfterSnapshot, `"targetTerm":"贵宾会员"`) ||
+		!strings.Contains(logs[1].AfterSnapshot, `"remark":"升级后的同义词"`) {
+		t.Fatalf("unexpected update audit log: %+v", logs[1])
+	}
+	if logs[2].OperationType != auditService.OperationDelete ||
+		!strings.Contains(logs[2].BeforeSnapshot, `"targetTerm":"贵宾会员"`) {
+		t.Fatalf("unexpected delete audit log: %+v", logs[2])
+	}
+}

@@ -201,7 +201,15 @@ func (s *IntentService) CreateTermMapping(ctx context.Context, req dto.CreateTer
 	if err := s.termRepo.Create(ctx, m); err != nil {
 		return nil, fmt.Errorf("创建关键词映射失败: %w", err)
 	}
-	return toTermResp(m), nil
+	resp := toTermResp(m)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:       auditService.BizTypeQueryTermMapping,
+		BizID:         resp.ID,
+		OperationType: auditService.OperationCreate,
+		ActionDesc:    "创建关键词映射：" + resp.SourceTerm,
+		AfterSnapshot: resp,
+	})
+	return resp, nil
 }
 
 // GetTermMapping 查询关键词映射详情。
@@ -219,17 +227,42 @@ func (s *IntentService) UpdateTermMapping(ctx context.Context, id string, req dt
 	if err := s.db.WithContext(ctx).Where("id = ? AND deleted = 0", id).First(&m).Error; err != nil {
 		return nil, fmt.Errorf("映射不存在: %w", err)
 	}
+	before := toTermResp(&m)
 	applyTermUpdate(&m, req)
 	m.UpdateBy = userID
 	if err := s.termRepo.Update(ctx, &m); err != nil {
 		return nil, fmt.Errorf("更新关键词映射失败: %w", err)
 	}
-	return toTermResp(&m), nil
+	resp := toTermResp(&m)
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeQueryTermMapping,
+		BizID:          resp.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新关键词映射：" + resp.SourceTerm,
+		BeforeSnapshot: before,
+		AfterSnapshot:  resp,
+	})
+	return resp, nil
 }
 
 // DeleteTermMapping 删除关键词映射。
 func (s *IntentService) DeleteTermMapping(ctx context.Context, id string) error {
-	return s.termRepo.SoftDelete(ctx, id)
+	m, err := s.termRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	before := toTermResp(m)
+	if err := s.termRepo.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeQueryTermMapping,
+		BizID:          id,
+		OperationType:  auditService.OperationDelete,
+		ActionDesc:     "删除关键词映射：" + before.SourceTerm,
+		BeforeSnapshot: before,
+	})
+	return nil
 }
 
 // ListTermMappings 分页查询关键词映射。
