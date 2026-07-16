@@ -186,6 +186,22 @@ func TestDocumentScheduleService_SourceForDocumentPrefersFeishuWikiSource(t *tes
 	}
 }
 
+func TestDocumentScheduleService_SourceForDocumentPrefersConfluenceSource(t *testing.T) {
+	svc := NewDocumentScheduleService(nil, nil, nil, nil, nil, config.RAGKnowledgeScheduleConfig{})
+	svc.RegisterSource(&fakeScheduleSource{name: "url"})
+	svc.RegisterSource(&fakeScheduleSource{name: "confluence"})
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		SourceType:     "url",
+		SourceLocation: "https://mycompany.atlassian.net/wiki/spaces/ENG/pages/12345/Confluence+文档",
+	}
+
+	got := svc.sourceForDocument(doc)
+	if got == nil || got.Name() != "confluence" {
+		t.Fatalf("expected confluence source, got %#v", got)
+	}
+}
+
 func ptrTime(t time.Time) *time.Time {
 	return &t
 }

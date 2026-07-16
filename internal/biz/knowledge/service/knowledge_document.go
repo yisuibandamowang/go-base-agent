@@ -97,20 +97,19 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		return nil, fmt.Errorf("知识库不存在")
 	}
 	doc := &model.KnowledgeDocument{
-		KbID:            kbID,
-		DocName:         req.DocName,
-		FileURL:         req.FileURL,
-		FileType:        req.FileType,
-		FileSize:        req.FileSize,
-		SourceType:      req.SourceType,
-		Status:          "pending",
-		CreatedBy:       userID,
-		SourceLocation:  req.SourceLocation,
-		ScheduleEnabled: req.ScheduleEnabled,
-		ScheduleCron:    req.ScheduleCron,
+		KbID:           kbID,
+		DocName:        req.DocName,
+		FileURL:        req.FileURL,
+		FileType:       req.FileType,
+		FileSize:       req.FileSize,
+		SourceType:     req.SourceType,
+		Status:         "pending",
+		CreatedBy:      userID,
+		SourceLocation: req.SourceLocation,
 	}
 	doc.CreateTime = time.Now()
 	doc.UpdateTime = time.Now()
+	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
 
 	if req.ChunkStrategy != "" {
 		doc.ProcessMode = "chunk"
@@ -691,6 +690,7 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 		doc.ChunkStrategy = req.ChunkStrategy
 		doc.ChunkConfig = req.ChunkConfig
 	}
+	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, doc.ScheduleEnabled, doc.ScheduleCron)
 	if err := s.docRepo.Update(ctx, doc); err != nil {
 		return nil, fmt.Errorf("update document: %w", err)
 	}
@@ -1002,6 +1002,9 @@ func (s *DocumentService) syncDocumentSchedule(ctx context.Context, doc *model.K
 	if s.scheduleRepo == nil {
 		return nil
 	}
+	if strings.TrimSpace(documentSourceURL(doc)) == "" {
+		return s.scheduleRepo.DeleteByDocID(ctx, doc.ID)
+	}
 	now := time.Now()
 	if enabled != 1 || strings.TrimSpace(cronExpr) == "" {
 		return s.scheduleRepo.DeleteByDocID(ctx, doc.ID)
@@ -1014,6 +1017,23 @@ func (s *DocumentService) syncDocumentSchedule(ctx context.Context, doc *model.K
 		NextRunTime: &now,
 	}
 	return s.scheduleRepo.UpsertByDocID(ctx, schedule)
+}
+
+func normalizeDocumentSchedule(doc *model.KnowledgeDocument, enabled int16, cronExpr string) (int16, string) {
+	if doc == nil {
+		return 0, ""
+	}
+	if strings.TrimSpace(documentSourceURL(doc)) == "" {
+		return 0, ""
+	}
+	if enabled != 1 {
+		return 0, ""
+	}
+	cronExpr = strings.TrimSpace(cronExpr)
+	if cronExpr == "" {
+		return 0, ""
+	}
+	return 1, cronExpr
 }
 
 func (s *DocumentService) recordAudit(ctx context.Context, req auditService.RecordReq) {

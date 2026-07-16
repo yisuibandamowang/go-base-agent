@@ -307,6 +307,121 @@ func TestDocumentService_RecordsAuditLogs(t *testing.T) {
 	}
 }
 
+func TestDocumentService_CreateDocumentDisablesScheduleForFileSource(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+	); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	kb := &knowledgeModel.KnowledgeBase{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection_a",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:      knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		scheduleRepo: knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		kbRepo:       knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:           gdb,
+		emb:          fakeEmbeddingService{},
+		vecStore:     &capturingVectorStore{},
+		fileStore:    fakeFileReader{},
+	}
+
+	created, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:         "本地文件.md",
+		FileURL:         "upload://本地文件.md",
+		FileType:        "md",
+		SourceType:      "file",
+		ScheduleEnabled: 1,
+		ScheduleCron:    "@every 1h",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if created.ScheduleEnabled != 0 || created.ScheduleCron != "" {
+		t.Fatalf("expected schedule disabled for file source, got %+v", created)
+	}
+
+	var count int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocumentSchedule{}).Where("doc_id = ?", created.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count schedule: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no schedule for file source, got %d", count)
+	}
+}
+
+func TestDocumentService_CreateDocumentKeepsScheduleForURLSource(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+	); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	kb := &knowledgeModel.KnowledgeBase{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection_a",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:      knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		scheduleRepo: knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		kbRepo:       knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:           gdb,
+		emb:          fakeEmbeddingService{},
+		vecStore:     &capturingVectorStore{},
+		fileStore:    fakeFileReader{},
+	}
+
+	created, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:         "会员Agent说明.md",
+		FileURL:         "https://example.com/member-agent.md",
+		FileType:        "md",
+		SourceType:      "url",
+		SourceLocation:  "https://example.com/member-agent.md",
+		ScheduleEnabled: 1,
+		ScheduleCron:    "@every 1h",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if created.ScheduleEnabled != 1 || created.ScheduleCron != "@every 1h" {
+		t.Fatalf("expected schedule kept for url source, got %+v", created)
+	}
+
+	var count int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocumentSchedule{}).Where("doc_id = ?", created.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count schedule: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one schedule for url source, got %d", count)
+	}
+}
+
 func TestDocumentService_RecordsChunkAuditLogs(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
