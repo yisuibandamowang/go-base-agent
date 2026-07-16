@@ -19,6 +19,7 @@ type MessageResp struct {
 	Content          string    `json:"content"`
 	ThinkingContent  string    `json:"thinkingContent,omitempty"`
 	ThinkingDuration int       `json:"thinkingDuration,omitempty"`
+	Vote             *int16    `json:"vote"`
 	CreateTime       time.Time `json:"createTime"`
 }
 
@@ -29,7 +30,7 @@ type UpdateTitleReq struct {
 
 // FeedbackReq 消息反馈请求。
 type FeedbackReq struct {
-	MessageID      string `json:"messageId" binding:"required"`
+	MessageID      string `json:"messageId"`
 	ConversationID string `json:"conversationId" binding:"required"`
 	Vote           int16  `json:"vote" binding:"required"`
 	Reason         string `json:"reason"`

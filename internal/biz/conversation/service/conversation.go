@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/conversation/model"
@@ -20,6 +22,7 @@ type ConversationService struct {
 	convRepo *repo.ConversationRepo
 	msgRepo  *repo.MessageRepo
 	fbRepo   *repo.FeedbackRepo
+	sumRepo  *repo.ConversationSummaryRepo
 }
 
 // NewConversationService 创建 ConversationService。
@@ -27,11 +30,13 @@ func NewConversationService(
 	convRepo *repo.ConversationRepo,
 	msgRepo *repo.MessageRepo,
 	fbRepo *repo.FeedbackRepo,
+	sumRepo *repo.ConversationSummaryRepo,
 ) *ConversationService {
 	return &ConversationService{
 		convRepo: convRepo,
 		msgRepo:  msgRepo,
 		fbRepo:   fbRepo,
+		sumRepo:  sumRepo,
 	}
 }
 
@@ -52,12 +57,28 @@ func (s *ConversationService) UpdateTitle(ctx context.Context, conversationID, u
 
 // DeleteConversation 删除会话。
 func (s *ConversationService) DeleteConversation(ctx context.Context, conversationID, userID string) error {
-	return s.convRepo.SoftDelete(ctx, conversationID, userID)
+	if err := s.convRepo.SoftDelete(ctx, conversationID, userID); err != nil {
+		return err
+	}
+	if s.sumRepo != nil {
+		if err := s.sumRepo.DeleteByConversationID(ctx, conversationID, userID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetMessages 获取会话消息历史。
 func (s *ConversationService) GetMessages(ctx context.Context, conversationID, userID string, limit int) ([]model.Message, error) {
 	return s.msgRepo.LoadHistory(ctx, conversationID, userID, limit)
+}
+
+// GetMessageVotes 获取消息反馈值映射。
+func (s *ConversationService) GetMessageVotes(ctx context.Context, userID string, messageIDs []string) (map[string]int16, error) {
+	if s.fbRepo == nil {
+		return map[string]int16{}, nil
+	}
+	return s.fbRepo.ListVotesByMessageIDs(ctx, userID, messageIDs)
 }
 
 // CreateFeedback 创建消息反馈。
@@ -80,16 +101,58 @@ func (s *ConversationService) CreateFeedback(ctx context.Context, req struct {
 	return s.fbRepo.Upsert(ctx, fb)
 }
 
+// DeleteFeedback 删除消息反馈。
+func (s *ConversationService) DeleteFeedback(ctx context.Context, messageID, userID string) error {
+	if s.fbRepo == nil {
+		return nil
+	}
+	return s.fbRepo.DeleteByMessageIDAndUserID(ctx, messageID, userID)
+}
+
+// ConversationSummaryGenerator 生成会话摘要。
+type ConversationSummaryGenerator interface {
+	Generate(ctx context.Context, history []chat.Message, previousSummary string, maxChars int) (string, error)
+}
+
 // DBMemoryStore 基于数据库的会话记忆存储，实现 rag.MemoryStore 接口。
 type DBMemoryStore struct {
-	db       *gorm.DB
-	convRepo *repo.ConversationRepo
-	msgRepo  *repo.MessageRepo
+	db                *gorm.DB
+	convRepo          *repo.ConversationRepo
+	msgRepo           *repo.MessageRepo
+	summaryRepo       *repo.ConversationSummaryRepo
+	summaryGenerator  ConversationSummaryGenerator
+	summaryEnabled    bool
+	summaryStartTurns int
+	summaryMaxChars   int
 }
 
 // NewDBMemoryStore 创建 DBMemoryStore。
-func NewDBMemoryStore(database *gorm.DB, convRepo *repo.ConversationRepo, msgRepo *repo.MessageRepo) *DBMemoryStore {
-	return &DBMemoryStore{db: database, convRepo: convRepo, msgRepo: msgRepo}
+func NewDBMemoryStore(
+	database *gorm.DB,
+	convRepo *repo.ConversationRepo,
+	msgRepo *repo.MessageRepo,
+	summaryRepo *repo.ConversationSummaryRepo,
+	summaryGenerator ConversationSummaryGenerator,
+	summaryEnabled bool,
+	summaryStartTurns int,
+	summaryMaxChars int,
+) *DBMemoryStore {
+	if summaryStartTurns <= 0 {
+		summaryStartTurns = 3
+	}
+	if summaryMaxChars <= 0 {
+		summaryMaxChars = 200
+	}
+	return &DBMemoryStore{
+		db:                database,
+		convRepo:          convRepo,
+		msgRepo:           msgRepo,
+		summaryRepo:       summaryRepo,
+		summaryGenerator:  summaryGenerator,
+		summaryEnabled:    summaryEnabled,
+		summaryStartTurns: summaryStartTurns,
+		summaryMaxChars:   summaryMaxChars,
+	}
 }
 
 // LoadHistory 加载会话消息历史，转换为 chat.Message 格式。
@@ -104,7 +167,10 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 	if err != nil {
 		return nil, err
 	}
-	result := make([]chat.Message, 0, len(msgs))
+	result := make([]chat.Message, 0, len(msgs)+1)
+	if summary := s.loadLatestSummary(ctx, conversationID, conv.UserID); summary != nil && summary.Content != "" {
+		result = append(result, chat.NewSystemMessage("历史摘要："+summary.Content))
+	}
 	for _, m := range msgs {
 		result = append(result, chat.Message{
 			Role:             chat.Role(m.Role),
@@ -155,6 +221,7 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 		return "", fmt.Errorf("create message: %w", err)
 	}
 	_ = s.convRepo.TouchLastTime(ctx, conversationID)
+	s.maybeUpdateSummary(ctx, conversationID, &conv, m, msg)
 	return m.ID, nil
 }
 
@@ -192,4 +259,83 @@ func (s *DBMemoryStore) UpdateTitle(ctx context.Context, conversationID, title s
 		return fmt.Errorf("find conversation to update title: %w", err)
 	}
 	return s.convRepo.UpdateTitle(ctx, conversationID, conv.UserID, title)
+}
+
+func (s *DBMemoryStore) loadLatestSummary(ctx context.Context, conversationID, userID string) *model.ConversationSummary {
+	if s.summaryRepo == nil {
+		return nil
+	}
+	summary, err := s.summaryRepo.FindLatestByConversationID(ctx, conversationID, userID)
+	if err != nil {
+		slog.Warn("load conversation summary failed", "conversationId", conversationID, "err", err)
+		return nil
+	}
+	return summary
+}
+
+func (s *DBMemoryStore) maybeUpdateSummary(ctx context.Context, conversationID string, conv *model.Conversation, saved *model.Message, incoming chat.Message) {
+	if s.summaryRepo == nil || s.summaryGenerator == nil || !s.summaryEnabled || conv == nil || saved == nil {
+		return
+	}
+	if incoming.Role != chat.RoleAssistant {
+		return
+	}
+	userCount, err := s.msgRepo.CountUserMessages(ctx, conversationID, conv.UserID)
+	if err != nil {
+		slog.Warn("count conversation messages failed", "conversationId", conversationID, "err", err)
+		return
+	}
+	if int(userCount) < s.summaryStartTurns {
+		return
+	}
+
+	var previous string
+	var history []model.Message
+	if latest := s.loadLatestSummary(ctx, conversationID, conv.UserID); latest != nil {
+		previous = latest.Content
+		history, err = s.msgRepo.LoadHistorySince(ctx, conversationID, conv.UserID, latest.LastMessageID)
+	} else {
+		history, err = s.msgRepo.LoadHistory(ctx, conversationID, conv.UserID, 0)
+	}
+	if err != nil {
+		slog.Warn("load conversation history for summary failed", "conversationId", conversationID, "err", err)
+		return
+	}
+	if len(history) == 0 {
+		return
+	}
+
+	summary, err := s.summaryGenerator.Generate(ctx, toChatMessages(history), previous, s.summaryMaxChars)
+	if err != nil {
+		slog.Warn("generate conversation summary failed", "conversationId", conversationID, "err", err)
+		return
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return
+	}
+	record := &model.ConversationSummary{
+		ConversationID: conversationID,
+		UserID:         conv.UserID,
+		LastMessageID:  saved.ID,
+		Content:        summary,
+	}
+	record.CreateTime = time.Now()
+	record.UpdateTime = time.Now()
+	if err := s.summaryRepo.Create(ctx, record); err != nil {
+		slog.Warn("save conversation summary failed", "conversationId", conversationID, "err", err)
+	}
+}
+
+func toChatMessages(msgs []model.Message) []chat.Message {
+	result := make([]chat.Message, 0, len(msgs))
+	for _, m := range msgs {
+		result = append(result, chat.Message{
+			Role:             chat.Role(m.Role),
+			Content:          m.Content,
+			ThinkingContent:  m.ThinkingContent,
+			ThinkingDuration: m.ThinkingDuration,
+		})
+	}
+	return result
 }

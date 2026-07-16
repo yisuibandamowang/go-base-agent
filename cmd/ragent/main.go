@@ -81,6 +81,27 @@ func main() {
 	)
 	defer queueLimiter.Shutdown()
 
+	uploadSemaphoreCfg := cfg.RAG.Semaphore.DocumentUpload
+	uploadSemaphoreName := strings.TrimSpace(uploadSemaphoreCfg.Name)
+	if uploadSemaphoreName == "" {
+		uploadSemaphoreName = "rag:document:upload"
+	}
+	documentUploadLimiter := ratelimit.NewFairQueueLimiter(
+		uploadSemaphoreName,
+		rdb,
+		ratelimit.LimiterConfig{
+			MaxConcurrent:  uploadSemaphoreCfg.MaxConcurrent,
+			MaxWaitSeconds: uploadSemaphoreCfg.MaxWaitSeconds,
+			LeaseSeconds:   uploadSemaphoreCfg.LeaseSeconds,
+			PollIntervalMs: cfg.RAG.RateLimit.Global.PollIntervalMs,
+		},
+	)
+	defer documentUploadLimiter.Shutdown()
+	documentUploadMaxWait := time.Duration(uploadSemaphoreCfg.MaxWaitSeconds) * time.Second
+	if documentUploadMaxWait <= 0 {
+		documentUploadMaxWait = time.Second
+	}
+
 	llmService, embService, rerankService := setupAI(cfg, logger)
 	mqProducer, mqConsumer, shutdownMQ := setupMQ(cfg.RocketMQ)
 	defer shutdownMQ()
@@ -103,14 +124,26 @@ func main() {
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, rag.NewPgVectorStore(gormDB), fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
+	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
 
 	convRepo := conversationRepo.NewConversationRepo(gormDB)
 	msgRepo := conversationRepo.NewMessageRepo(gormDB)
 	fbRepo := conversationRepo.NewFeedbackRepo(gormDB)
-	convSvc := conversationService.NewConversationService(convRepo, msgRepo, fbRepo)
+	sumRepo := conversationRepo.NewConversationSummaryRepo(gormDB)
+	convSvc := conversationService.NewConversationService(convRepo, msgRepo, fbRepo, sumRepo)
 	convHandler := conversationHandler.NewConversationHandler(convSvc)
 
-	dbMemStore := conversationService.NewDBMemoryStore(gormDB, convRepo, msgRepo)
+	summaryGenerator := conversationService.NewLLMSummaryGenerator(llmService, "")
+	dbMemStore := conversationService.NewDBMemoryStore(
+		gormDB,
+		convRepo,
+		msgRepo,
+		sumRepo,
+		summaryGenerator,
+		cfg.RAG.Memory.SummaryEnabled,
+		cfg.RAG.Memory.SummaryStartTurns,
+		cfg.RAG.Memory.SummaryMaxChars,
+	)
 	memSvc := rag.NewDefaultMemoryService(dbMemStore, cfg.RAG.Memory.HistoryKeepTurns)
 
 	intentTreeRepo := intentRepo.NewIntentRepo(gormDB)
@@ -204,6 +237,7 @@ func main() {
 			conv.DELETE("/:conversationId", convHandler.Delete)
 			conv.POST("/feedback", convHandler.SubmitFeedback)
 			conv.POST("/messages/:messageId/feedback", convHandler.SubmitFeedback)
+			conv.DELETE("/messages/:messageId/feedback", convHandler.DeleteFeedback)
 		}
 
 		// Intent tree — 同时注册 /intent-tree/* 和旧风格路径

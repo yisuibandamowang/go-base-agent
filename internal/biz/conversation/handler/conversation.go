@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"go-base-agent/internal/biz/conversation/dto"
+	"go-base-agent/internal/biz/conversation/model"
 	"go-base-agent/internal/biz/conversation/service"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/middleware"
@@ -125,7 +126,17 @@ func (h *ConversationHandler) Messages(c *gin.Context) {
 		return
 	}
 	records := make([]dto.MessageResp, 0, len(msgs))
+	votes, err := h.svc.GetMessageVotes(c.Request.Context(), user.UserID, messageIDs(msgs))
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
 	for _, m := range msgs {
+		var vote *int16
+		if v, ok := votes[m.ID]; ok {
+			vv := v
+			vote = &vv
+		}
 		records = append(records, dto.MessageResp{
 			ID:               m.ID,
 			ConversationID:   m.ConversationID,
@@ -133,6 +144,7 @@ func (h *ConversationHandler) Messages(c *gin.Context) {
 			Content:          m.Content,
 			ThinkingContent:  m.ThinkingContent,
 			ThinkingDuration: m.ThinkingDuration,
+			Vote:             vote,
 			CreateTime:       m.CreateTime,
 		})
 	}
@@ -149,6 +161,13 @@ func (h *ConversationHandler) SubmitFeedback(c *gin.Context) {
 	var req dto.FeedbackReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
+		return
+	}
+	if req.MessageID == "" {
+		req.MessageID = c.Param("messageId")
+	}
+	if req.MessageID == "" {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "messageId不能为空"))
 		return
 	}
 	err := h.svc.CreateFeedback(c.Request.Context(), struct {
@@ -173,6 +192,25 @@ func (h *ConversationHandler) SubmitFeedback(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
+// DeleteFeedback DELETE /api/ragent/conversations/messages/:messageId/feedback
+func (h *ConversationHandler) DeleteFeedback(c *gin.Context) {
+	user := middleware.GetLoginUser(c)
+	if user == nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "未登录"))
+		return
+	}
+	messageID := c.Param("messageId")
+	if messageID == "" {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "messageId不能为空"))
+		return
+	}
+	if err := h.svc.DeleteFeedback(c.Request.Context(), messageID, user.UserID); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
+}
+
 func paginationParams(c *gin.Context) (int, int) {
 	page, err := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	if err != nil || page < 1 {
@@ -191,4 +229,12 @@ func wantsPaged(c *gin.Context) bool {
 		v = c.Query("pageMode")
 	}
 	return v == "true" || v == "1" || v == "page"
+}
+
+func messageIDs(msgs []model.Message) []string {
+	ids := make([]string, 0, len(msgs))
+	for _, msg := range msgs {
+		ids = append(ids, msg.ID)
+	}
+	return ids
 }

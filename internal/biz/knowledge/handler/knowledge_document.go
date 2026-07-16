@@ -1,24 +1,34 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/service"
 	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/framework/ratelimit"
 
 	"github.com/gin-gonic/gin"
 )
 
 // DocumentHandler 文档管理 HTTP 处理层。
 type DocumentHandler struct {
-	svc       *service.DocumentService
-	fileStore *FileStore
+	svc           *service.DocumentService
+	fileStore     *FileStore
+	uploadLimiter uploadLimiter
+	uploadMaxWait time.Duration
+}
+
+type uploadLimiter interface {
+	Acquire(ctx context.Context, req ratelimit.AcquireRequest) error
 }
 
 // NewDocumentHandler 创建 DocumentHandler。
@@ -26,8 +36,47 @@ func NewDocumentHandler(svc *service.DocumentService, fs *FileStore) *DocumentHa
 	return &DocumentHandler{svc: svc, fileStore: fs}
 }
 
+// SetUploadLimiter 为文档上传接口设置并发限流器。
+func (h *DocumentHandler) SetUploadLimiter(limiter uploadLimiter, maxWait time.Duration) {
+	h.uploadLimiter = limiter
+	h.uploadMaxWait = maxWait
+}
+
 // Upload POST /knowledge-base/:id/docs/upload
 func (h *DocumentHandler) Upload(c *gin.Context) {
+	if h.uploadLimiter == nil {
+		h.uploadDocument(c)
+		return
+	}
+	var once sync.Once
+	done := make(chan struct{})
+	finish := func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
+	err := h.uploadLimiter.Acquire(c.Request.Context(), ratelimit.AcquireRequest{
+		MaxWait: h.uploadMaxWait,
+		OnAcquire: func() {
+			defer finish()
+			h.uploadDocument(c)
+		},
+		OnTimeout: func() {
+			defer finish()
+			c.JSON(http.StatusOK, convention.Failure("A000001", "文档上传请求过于频繁，请稍后再试"))
+		},
+	})
+	if err != nil {
+		select {
+		case <-done:
+		case <-c.Request.Context().Done():
+		}
+		return
+	}
+	<-done
+}
+
+func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	kbID := c.Param("id")
 
 	// Parse multipart form (max 50MB)

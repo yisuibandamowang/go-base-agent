@@ -129,6 +129,18 @@ func (r *MessageRepo) LoadHistorySince(ctx context.Context, conversationID, user
 	return msgs, nil
 }
 
+// CountUserMessages 统计会话中的用户消息数量。
+func (r *MessageRepo) CountUserMessages(ctx context.Context, conversationID, userID string) (int64, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.Message{}).
+		Where("conversation_id = ? AND user_id = ? AND role = ?", conversationID, userID, "user").
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count user messages: %w", err)
+	}
+	return count, nil
+}
+
 // FeedbackRepo 消息反馈数据访问层。
 type FeedbackRepo struct {
 	db *gorm.DB
@@ -150,4 +162,64 @@ func (r *FeedbackRepo) Upsert(ctx context.Context, fb *model.MessageFeedback) er
 			"update_time": time.Now(),
 		}).
 		FirstOrCreate(fb).Error
+}
+
+// ListVotesByMessageIDs 查询指定消息的反馈值。
+func (r *FeedbackRepo) ListVotesByMessageIDs(ctx context.Context, userID string, messageIDs []string) (map[string]int16, error) {
+	if len(messageIDs) == 0 {
+		return map[string]int16{}, nil
+	}
+	var records []model.MessageFeedback
+	if err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("user_id = ? AND message_id IN ?", userID, messageIDs).
+		Find(&records).Error; err != nil {
+		return nil, fmt.Errorf("list feedback votes: %w", err)
+	}
+	result := make(map[string]int16, len(records))
+	for _, record := range records {
+		result[record.MessageID] = record.Vote
+	}
+	return result, nil
+}
+
+// DeleteByMessageIDAndUserID 删除消息反馈。
+func (r *FeedbackRepo) DeleteByMessageIDAndUserID(ctx context.Context, messageID, userID string) error {
+	var fb model.MessageFeedback
+	return db.SoftDelete(r.db.WithContext(ctx).
+		Where("message_id = ? AND user_id = ?", messageID, userID), &fb)
+}
+
+// ConversationSummaryRepo 会话摘要数据访问层。
+type ConversationSummaryRepo struct {
+	db *gorm.DB
+}
+
+// NewConversationSummaryRepo 创建 ConversationSummaryRepo。
+func NewConversationSummaryRepo(database *gorm.DB) *ConversationSummaryRepo {
+	return &ConversationSummaryRepo{db: database}
+}
+
+// Create 创建会话摘要。
+func (r *ConversationSummaryRepo) Create(ctx context.Context, summary *model.ConversationSummary) error {
+	return r.db.WithContext(ctx).Create(summary).Error
+}
+
+// FindLatestByConversationID 获取最新摘要。
+func (r *ConversationSummaryRepo) FindLatestByConversationID(ctx context.Context, conversationID, userID string) (*model.ConversationSummary, error) {
+	var summary model.ConversationSummary
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
+		Order("create_time DESC").
+		First(&summary).Error
+	if err != nil {
+		return nil, fmt.Errorf("find latest summary: %w", err)
+	}
+	return &summary, nil
+}
+
+// DeleteByConversationID 删除会话摘要。
+func (r *ConversationSummaryRepo) DeleteByConversationID(ctx context.Context, conversationID, userID string) error {
+	var summary model.ConversationSummary
+	return db.SoftDelete(r.db.WithContext(ctx).
+		Where("conversation_id = ? AND user_id = ?", conversationID, userID), &summary)
 }
