@@ -142,8 +142,9 @@ type RAGSemaphoreEntryConfig struct {
 }
 
 type RAGKnowledgeConfig struct {
-	Schedule RAGKnowledgeScheduleConfig `mapstructure:"schedule"`
-	Feishu   RAGKnowledgeFeishuConfig   `mapstructure:"feishu"`
+	Schedule   RAGKnowledgeScheduleConfig   `mapstructure:"schedule"`
+	Feishu     RAGKnowledgeFeishuConfig     `mapstructure:"feishu"`
+	Confluence RAGKnowledgeConfluenceConfig `mapstructure:"confluence"`
 }
 
 type RAGKnowledgeScheduleConfig struct {
@@ -159,6 +160,13 @@ type RAGKnowledgeFeishuConfig struct {
 	AccessToken string `mapstructure:"access-token"`
 	TenantToken string `mapstructure:"tenant-token"`
 	BaseURL     string `mapstructure:"base-url"`
+}
+
+type RAGKnowledgeConfluenceConfig struct {
+	BaseURL     string `mapstructure:"base-url"`
+	Username    string `mapstructure:"username"`
+	APIKey      string `mapstructure:"api-key"`
+	AccessToken string `mapstructure:"access-token"`
 }
 
 type RAGMCPConfig struct {

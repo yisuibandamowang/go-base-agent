@@ -76,6 +76,11 @@ rag:
       access-token: ${FEISHU_ACCESS_TOKEN}
       tenant-token: ${FEISHU_TENANT_TOKEN}
       base-url: ${FEISHU_BASE_URL:https://open.feishu.cn}
+    confluence:
+      base-url: ${CONFLUENCE_BASE_URL}
+      username: ${CONFLUENCE_USERNAME}
+      api-key: ${CONFLUENCE_API_KEY}
+      access-token: ${CONFLUENCE_ACCESS_TOKEN}
 
   mcp:
     servers:

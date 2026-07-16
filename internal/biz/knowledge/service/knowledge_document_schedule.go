@@ -286,6 +286,9 @@ func (s *DocumentScheduleService) sourceForDocument(doc *model.KnowledgeDocument
 		strings.ToLower(strings.TrimSpace(doc.SourceType)),
 	}
 	location := firstNonEmpty(doc.SourceLocation, doc.FileURL)
+	if isConfluenceDocumentURL(location) {
+		keys = append([]string{"confluence"}, keys...)
+	}
 	if isFeishuDocumentURL(location) {
 		keys = append([]string{"feishu"}, keys...)
 	}
@@ -310,6 +313,17 @@ func isFeishuDocumentURL(location string) bool {
 	host := strings.ToLower(parsed.Host)
 	path := strings.ToLower(parsed.Path)
 	return strings.Contains(host, "feishu.cn") && (strings.Contains(path, "/wiki/") || strings.Contains(path, "/docx/") || strings.Contains(path, "/docs/"))
+}
+
+func isConfluenceDocumentURL(location string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(location))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Host)
+	path := strings.ToLower(parsed.Path)
+	return (strings.Contains(path, "/wiki/spaces/") && strings.Contains(path, "/pages/")) ||
+		(strings.Contains(host, "atlassian.net") && strings.Contains(path, "/wiki/"))
 }
 
 func sha256Hex(data []byte) string {

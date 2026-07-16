@@ -148,6 +148,14 @@ func main() {
 		BaseURL:     cfg.RAG.Knowledge.Feishu.BaseURL,
 		MaxBytes:    50 << 20,
 	}))
+	documentScheduleSvc.RegisterSource(crawler.NewConfluenceSource(crawler.ConfluenceSourceConfig{
+		Name:        "confluence",
+		BaseURL:     cfg.RAG.Knowledge.Confluence.BaseURL,
+		Username:    cfg.RAG.Knowledge.Confluence.Username,
+		APIKey:      cfg.RAG.Knowledge.Confluence.APIKey,
+		AccessToken: cfg.RAG.Knowledge.Confluence.AccessToken,
+		MaxBytes:    50 << 20,
+	}))
 
 	convRepo := conversationRepo.NewConversationRepo(gormDB)
 	msgRepo := conversationRepo.NewMessageRepo(gormDB)
