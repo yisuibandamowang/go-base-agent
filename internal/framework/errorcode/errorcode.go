@@ -5,9 +5,6 @@ type ErrorCode struct {
 	Message string
 }
 
-func (e ErrorCode) code() string    { return e.Code }
-func (e ErrorCode) message() string { return e.Message }
-
 var (
 	CliErr                   = ErrorCode{"A000001", "用户端错误"}
 	UserRegisterErr          = ErrorCode{"A000100", "用户注册错误"}

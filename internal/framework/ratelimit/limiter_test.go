@@ -12,17 +12,6 @@ import (
 	"go-base-agent/internal/framework/ratelimit"
 )
 
-func newTestLimiter(maxConcurrent int) (*ratelimit.FairQueueLimiter, func()) {
-	mr, _ := miniredis.Run()
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	return ratelimit.NewFairQueueLimiter("test", rdb, ratelimit.LimiterConfig{
-		MaxConcurrent:  maxConcurrent,
-		MaxWaitSeconds: 3,
-		LeaseSeconds:   30,
-		PollIntervalMs: 50,
-	}), func() { mr.Close() }
-}
-
 func newTestLimiterT(t *testing.T, maxConcurrent int) (*ratelimit.FairQueueLimiter, func()) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})

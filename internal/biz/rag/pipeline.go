@@ -322,7 +322,6 @@ type pipelineCallback struct {
 	conversationID string
 	memory         MemoryService
 	sender         *SSESender
-	buf            []byte
 	answer         strings.Builder
 	answerPrefix   string
 	citations      string
@@ -409,13 +408,6 @@ func runeLimit(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func withChunkSources(chunks []RetrievedChunk, fallback string) string {

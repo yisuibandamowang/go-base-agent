@@ -44,12 +44,6 @@ const (
 	MethodPing       = "ping"
 )
 
-// initialize params/result.
-type initParams struct {
-	ProtocolVersion string                 `json:"protocolVersion"`
-	ClientInfo      map[string]interface{} `json:"clientInfo,omitempty"`
-}
-
 type initResult struct {
 	ProtocolVersion string             `json:"protocolVersion"`
 	ServerInfo      serverInfo         `json:"serverInfo"`
@@ -108,11 +102,6 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
-// nullResult returns the null JSON value.
-func nullResult() json.RawMessage {
-	return json.RawMessage("null")
-}
-
 // pingResult returns an empty object.
 func pingResult() json.RawMessage {
 	return json.RawMessage("{}")
@@ -151,14 +140,6 @@ func newErrorResp(id json.RawMessage, code int, msg string) jsonRPCResponse {
 		ID:      rid,
 		Error:   &rpcError{Code: code, Message: msg},
 	}
-}
-
-func jsonPtr(v interface{}) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nullResult()
-	}
-	return b
 }
 
 func parseCallParams(raw json.RawMessage) (callToolParams, error) {

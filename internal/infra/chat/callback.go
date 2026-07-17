@@ -15,11 +15,3 @@ type StreamHandle interface {
 	Cancel()
 	Wait()
 }
-
-// noopStreamCallback is a no-op implementation for testing.
-type noopStreamCallback struct{}
-
-func (n *noopStreamCallback) OnContent(string)  {}
-func (n *noopStreamCallback) OnThinking(string) {}
-func (n *noopStreamCallback) OnComplete()       {}
-func (n *noopStreamCallback) OnError(error)     {}
