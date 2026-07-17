@@ -124,7 +124,11 @@ func main() {
 	docRepo := knowledgeRepo.NewKnowledgeDocumentRepo(gormDB)
 	chunkRepo := knowledgeRepo.NewKnowledgeChunkRepo(gormDB)
 	scheduleRepo := knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gormDB)
-	fileStore := knowledgeHandler.NewFileStore()
+	fileStore, err := knowledgeHandler.NewConfiguredFileStore(cfg.RustFS)
+	if err != nil {
+		slog.Warn("rustfs file store unavailable, fallback to memory", "err", err)
+		fileStore = knowledgeHandler.NewFileStore()
+	}
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, rag.NewPgVectorStore(gormDB), fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)
@@ -203,18 +207,41 @@ func main() {
 	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
 
 	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
-	retriever := rag.NewRerankRetriever(pgRetriever, rerankService)
+	searchChannels := make([]rag.SearchChannel, 0, 4)
+	if cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault() {
+		searchChannels = append(searchChannels, rag.NewPgIntentDirectedSearchChannel(gormDB, 1))
+	}
+	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefault() {
+		searchChannels = append(searchChannels, rag.NewPgKeywordSearchChannel(gormDB, kbRepo, 5))
+	}
+	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
+		searchChannels = append(searchChannels, rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, pgRetriever))
+	}
+	webSearchCfg := cfg.RAG.Search.Channels.WebSearch
+	searchChannels = append(searchChannels, rag.NewYouComWebSearchChannel(
+		webSearchCfg.APIURL,
+		webSearchCfg.APIKey,
+		webSearchCfg.Count,
+		webSearchCfg.TimeoutSeconds,
+		webSearchCfg.Enabled,
+	))
+	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, []rag.SearchResultPostProcessor{&rag.DedupPostProcessor{}}))
+	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
 	llmRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
 		cfg.RAG.QueryRewrite.MaxHistoryChars,
 	)
 
-	ragCtl := rag.NewController(rag.NewPipeline(llmService,
+	ragPipeline := rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
 		llmRewriter,
 		retriever,
 		memSvc,
-	))
+	)
+	if cfg.RAG.Trace.Enabled {
+		ragPipeline.SetTraceRecorder(rag.NewDBTraceRecorder(gormDB, cfg.RAG.Trace.MaxErrorLength))
+	}
+	ragCtl := rag.NewController(ragPipeline)
 	ragCtl.SetIdempotentGuard(idempotentGuard)
 
 	gin.SetMode(gin.ReleaseMode)

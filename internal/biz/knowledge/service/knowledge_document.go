@@ -14,6 +14,8 @@ import (
 	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/core/parser"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
+	ingestionModel "go-base-agent/internal/biz/ingestion/model"
+	ingestionService "go-base-agent/internal/biz/ingestion/service"
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
@@ -115,6 +117,10 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		doc.ProcessMode = "chunk"
 		doc.ChunkStrategy = req.ChunkStrategy
 		doc.ChunkConfig = req.ChunkConfig
+		if strings.EqualFold(req.ChunkStrategy, "pipeline") {
+			doc.ProcessMode = "pipeline"
+			doc.PipelineID = firstNonEmpty(req.PipelineID, pipelineIDFromChunkConfig(req.ChunkConfig))
+		}
 	}
 
 	if err := s.docRepo.Create(ctx, doc); err != nil {
@@ -132,6 +138,57 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		AfterSnapshot: resp,
 	})
 	return resp, nil
+}
+
+func pipelineIDFromChunkConfig(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	var cfg struct {
+		PipelineID string `json:"pipelineId"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.PipelineID)
+}
+
+func buildDocumentPipelineNodeResults(nodes []ingestionModel.IngestionPipelineNode, chunkCount int, durationMs int64) []ingestionService.TaskNodeExecutionResult {
+	results := make([]ingestionService.TaskNodeExecutionResult, 0, len(nodes))
+	for _, node := range nodes {
+		output := map[string]any{}
+		if strings.EqualFold(node.NodeType, "indexer") {
+			output["chunkCount"] = chunkCount
+		}
+		results = append(results, ingestionService.TaskNodeExecutionResult{
+			NodeID:     node.NodeID,
+			NodeType:   node.NodeType,
+			Status:     "success",
+			DurationMs: durationMs,
+			Message:    documentPipelineNodeMessage(node.NodeType, chunkCount),
+			Output:     output,
+		})
+	}
+	return results
+}
+
+func documentPipelineNodeMessage(nodeType string, chunkCount int) string {
+	switch strings.ToLower(strings.TrimSpace(nodeType)) {
+	case "fetcher":
+		return "文件读取完成"
+	case "parser":
+		return "文档解析完成"
+	case "chunker":
+		return "文档分块完成"
+	case "enhancer":
+		return "文档增强节点已跳过：当前 Go 侧未配置独立增强任务"
+	case "enricher":
+		return "分块补元数据节点已跳过：当前 Go 侧未配置独立补元数据任务"
+	case "indexer":
+		return fmt.Sprintf("索引完成，共写入 %d 个分块", chunkCount)
+	default:
+		return "节点执行完成"
+	}
 }
 
 // StartChunk 开始文档分块处理：状态校验 → 更新为 running → 异步执行分块任务。
@@ -279,6 +336,32 @@ func (s *DocumentService) ExecuteIngestionTask(ctx context.Context, req ingestio
 		return 0, err
 	}
 	return savedCount, nil
+}
+
+// ExecuteIngestionPipelineTask 执行文档入库并返回每个 pipeline 节点的执行结果。
+func (s *DocumentService) ExecuteIngestionPipelineTask(ctx context.Context, req ingestionDto.CreateTaskReq, nodes []ingestionModel.IngestionPipelineNode) (ingestionService.TaskExecutionResult, error) {
+	docID, _ := req.Metadata["docId"].(string)
+	if strings.TrimSpace(docID) == "" {
+		return ingestionService.TaskExecutionResult{}, fmt.Errorf("ingestion metadata docId is empty")
+	}
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return ingestionService.TaskExecutionResult{}, fmt.Errorf("document not found: %w", err)
+	}
+	start := time.Now()
+	_, _, _, chunks, err := s.runChunkProcess(ctx, doc)
+	if err != nil {
+		return ingestionService.TaskExecutionResult{}, err
+	}
+	savedCount, err := s.persistChunksAndVectors(ctx, doc, chunks)
+	if err != nil {
+		return ingestionService.TaskExecutionResult{}, err
+	}
+	durationMs := time.Since(start).Milliseconds()
+	return ingestionService.TaskExecutionResult{
+		ChunkCount: savedCount,
+		Nodes:      buildDocumentPipelineNodeResults(nodes, savedCount, durationMs),
+	}, nil
 }
 
 // runChunkProcess 执行分块处理：Extract → Chunk → Embed

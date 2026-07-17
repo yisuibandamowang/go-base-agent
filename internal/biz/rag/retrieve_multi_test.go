@@ -78,3 +78,25 @@ func TestDedupPostProcessor(t *testing.T) {
 		t.Fatal("unexpected dedup result")
 	}
 }
+
+func TestMultiChannelRetrieverImplementsRetriever(t *testing.T) {
+	channels := []SearchChannel{
+		&testChannel{name: "vector", priority: 1, enabled: true, typ: ChannelVectorGlobal, chunks: []RetrievedChunk{
+			{ID: "chunk-1", Text: "vector result"},
+		}},
+		&testChannel{name: "keyword", priority: 2, enabled: true, typ: ChannelKeyword, chunks: []RetrievedChunk{
+			{ID: "chunk-2", Text: "keyword result"},
+		}},
+	}
+	retriever := NewMultiChannelRetriever(
+		NewMultiChannelRetrievalEngine(channels, []SearchResultPostProcessor{&DedupPostProcessor{}}),
+	)
+
+	chunks, err := retriever.Retrieve(context.Background(), "会员Agent能力", 5)
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected two chunks, got %+v", chunks)
+	}
+}

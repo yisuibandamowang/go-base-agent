@@ -132,6 +132,7 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 		if vals[0] == "pipeline" {
 			if pvals, ok := form.Value["pipelineId"]; ok && len(pvals) > 0 {
 				req.ChunkStrategy = "pipeline"
+				req.PipelineID = pvals[0]
 				req.ChunkConfig = fmt.Sprintf(`{"pipelineId":"%s"}`, pvals[0])
 			}
 		}
@@ -162,7 +163,10 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	// Save file content for later retrieval
 	if file != nil {
 		data, _ := io.ReadAll(file)
-		h.fileStore.Put(resp.ID, header.Filename, data)
+		if err := h.fileStore.PutWithContext(c.Request.Context(), resp.ID, header.Filename, data); err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", "保存上传文件失败: "+err.Error()))
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, convention.Success(resp))
@@ -377,7 +381,10 @@ func (h *DocumentHandler) File(c *gin.Context) {
 	docID := c.Param("docId")
 	f, ok := h.fileStore.Get(docID)
 	if ok {
-		contentType := detectMIME(f.Name)
+		contentType := f.ContentType
+		if contentType == "" {
+			contentType = detectMIME(f.Name)
+		}
 		c.Data(http.StatusOK, contentType, f.Data)
 		return
 	}

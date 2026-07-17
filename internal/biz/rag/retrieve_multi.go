@@ -15,6 +15,7 @@ const (
 	ChannelIntentDirected SearchChannelType = "INTENT_DIRECTED"
 	ChannelKeyword        SearchChannelType = "KEYWORD"
 	ChannelHybrid         SearchChannelType = "HYBRID"
+	ChannelWebSearch      SearchChannelType = "WEB_SEARCH"
 )
 
 // SearchContext carries parameters for a retrieval channel.
@@ -60,6 +61,28 @@ type MultiChannelRetrievalEngine struct {
 	postProcessors []SearchResultPostProcessor
 }
 
+// MultiChannelRetriever adapts MultiChannelRetrievalEngine to the Retriever interface.
+type MultiChannelRetriever struct {
+	engine *MultiChannelRetrievalEngine
+}
+
+// NewMultiChannelRetriever creates a Retriever backed by multi-channel retrieval.
+func NewMultiChannelRetriever(engine *MultiChannelRetrievalEngine) *MultiChannelRetriever {
+	return &MultiChannelRetriever{engine: engine}
+}
+
+// Retrieve runs the configured retrieval channels for one question.
+func (r *MultiChannelRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	if r == nil || r.engine == nil {
+		return nil, nil
+	}
+	return r.engine.Retrieve(ctx, SearchContext{
+		OriginalQuestion:  question,
+		RewrittenQuestion: question,
+		TopK:              topK,
+	})
+}
+
 // NewMultiChannelRetrievalEngine creates a new retrieval engine.
 func NewMultiChannelRetrievalEngine(channels []SearchChannel, postProcessors []SearchResultPostProcessor) *MultiChannelRetrievalEngine {
 	sort.Slice(channels, func(i, j int) bool {
@@ -101,6 +124,7 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 	for _, r := range results {
 		if r.err == nil && len(r.chunks) > 0 {
 			allChunks = append(allChunks, r.chunks...)
+			allResults = append(allResults, SearchChannelResult{Chunks: r.chunks})
 		}
 	}
 

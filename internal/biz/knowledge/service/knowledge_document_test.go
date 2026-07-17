@@ -169,6 +169,43 @@ func TestDocumentService_RunPipelineProcessCreatesIngestionTask(t *testing.T) {
 	}
 }
 
+func TestDocumentService_CreateDocumentStoresPipelineMode(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	svc := NewDocumentService(
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+
+	resp, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:       "会员Agent说明.md",
+		FileURL:       "upload://会员Agent说明.md",
+		FileType:      "md",
+		ChunkStrategy: "pipeline",
+		ChunkConfig:   `{"pipelineId":"pipe-1"}`,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if resp.ProcessMode != "pipeline" || resp.PipelineID != "pipe-1" {
+		t.Fatalf("expected pipeline mode and id, got %+v", resp)
+	}
+}
+
 func TestDocumentService_ExecuteIngestionTaskPersistsChunksAndVectors(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

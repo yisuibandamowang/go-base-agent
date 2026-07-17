@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/infra/chat"
 )
 
@@ -19,6 +20,7 @@ type Pipeline struct {
 	retrieve Retriever
 	memory   MemoryService
 	mcp      McpContextProvider
+	trace    TraceRecorder
 	tasks    *streamTaskManager
 }
 
@@ -32,6 +34,11 @@ func (p *Pipeline) SetMcpContextProvider(provider McpContextProvider) {
 	p.mcp = provider
 }
 
+// SetTraceRecorder sets an optional recorder for RAG trace runs and nodes.
+func (p *Pipeline) SetTraceRecorder(recorder TraceRecorder) {
+	p.trace = recorder
+}
+
 // StreamChat implements Service.StreamChat.
 func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
 	// Timeout context: the entire pipeline should complete within 120s
@@ -39,6 +46,16 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	defer cancel()
 	task := p.tasks.register(taskID, sender, cancel)
 	defer p.tasks.unregister(taskID)
+
+	traceRun := p.startTraceRun(ctx, conversationID, taskID)
+	finishTraceRun := func(status string, err error) {
+		if traceRun == nil || p.trace == nil {
+			return
+		}
+		if finishErr := p.trace.FinishRun(ctx, traceRun.TraceID, status, err); finishErr != nil {
+			slog.Warn("rag trace: finish run failed", "traceId", traceRun.TraceID, "err", finishErr)
+		}
+	}
 
 	// Start heartbeat to keep SSE connection alive during LLM processing
 	heartbeatDone := make(chan struct{})
@@ -59,39 +76,54 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}()
 	defer close(heartbeatDone)
 
+	historySpan := p.startTraceNode(ctx, traceRun, "", "load-history", "MEMORY", 0)
 	history, err := p.memory.LoadHistory(ctx, conversationID)
 	if err != nil {
 		slog.Warn("rag memory: load history failed", "conversationId", conversationID, "err", err)
 		history = nil
+		historySpan.finish(traceStatusError, err)
+	} else {
+		historySpan.finish(traceStatusSuccess, nil)
 	}
 
+	rewriteSpan := p.startTraceNode(ctx, traceRun, "", "rewrite", "REWRITE", 0)
 	result, err := p.rewrite.Rewrite(ctx, question, history)
 	q := question
 	var subQuestions []string
 	if err != nil {
 		slog.Warn("rag: rewrite failed", "err", err)
+		rewriteSpan.finish(traceStatusError, err)
 	} else if result != nil {
+		rewriteSpan.finish(traceStatusSuccess, nil)
 		subQuestions = result.SubQuestions
 		if result.RewrittenQuestion != "" {
 			slog.Info("rag: query rewritten", "from", question, "to", result.RewrittenQuestion)
 			q = result.RewrittenQuestion
 		}
+	} else {
+		rewriteSpan.finish(traceStatusSuccess, nil)
 	}
 
+	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
 	chunks, err := p.retrieveChunks(ctx, q, subQuestions, 10)
 	var kbCtx string
 	if err != nil {
+		retrieveSpan.finish(traceStatusError, err)
 		slog.Warn("rag: retrieve failed", "err", err)
 		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库检索执行失败："+err.Error())
+		finishTraceRun(traceStatusSuccess, nil)
 		return
 	} else if len(chunks) > 0 {
+		retrieveSpan.finish(traceStatusSuccess, nil)
 		slog.Info("rag: chunks retrieved", "count", len(chunks))
 		for _, c := range chunks {
 			kbCtx += c.Text + "\n"
 		}
 	} else {
+		retrieveSpan.finish(traceStatusSuccess, nil)
 		slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
 		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
+		finishTraceRun(traceStatusSuccess, nil)
 		return
 	}
 
@@ -120,26 +152,70 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		sender:         sender,
 		citations:      formatCitations(chunks),
 		task:           task,
+		traceRecorder:  p.trace,
+		traceRun:       traceRun,
 	}
+	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)
+	cb.traceSpan = llmSpan
 	if ctx.Err() != nil {
 		if task.isCancelled() {
+			llmSpan.finish(traceStatusCancelled, nil)
+			finishTraceRun(traceStatusCancelled, nil)
 			return
 		}
 		slog.Info("rag pipeline: cancelled before llm call", "err", ctx.Err())
+		llmSpan.finish(traceStatusError, ctx.Err())
 		sender.SendFinish("", "")
 		sender.SendDone()
 		sender.Close()
+		finishTraceRun(traceStatusError, ctx.Err())
 		return
 	}
 	handle, err := p.llm.StreamChat(ctx, req, cb)
 	if err != nil {
 		slog.Error("rag pipeline: stream chat failed", "err", err)
+		llmSpan.finish(traceStatusError, err)
 		cb.OnError(err)
+		finishTraceRun(traceStatusError, err)
 		return
 	}
 	task.bindHandle(handle)
 	slog.Info("rag pipeline: llm stream started")
 	handle.Wait()
+	if task.isCancelled() {
+		llmSpan.finish(traceStatusCancelled, nil)
+		finishTraceRun(traceStatusCancelled, nil)
+		return
+	}
+	llmSpan.finish(traceStatusSuccess, nil)
+	finishTraceRun(traceStatusSuccess, nil)
+}
+
+func (p *Pipeline) startTraceRun(ctx context.Context, conversationID, taskID string) *TraceRunRecord {
+	if p.trace == nil {
+		return nil
+	}
+	run, err := p.trace.StartRun(ctx, conversationID, taskID)
+	if err != nil {
+		slog.Warn("rag trace: start run failed", "conversationId", conversationID, "taskId", taskID, "err", err)
+		return nil
+	}
+	if run != nil && run.TraceID != "" {
+		ctx = appctx.WithTraceID(ctx, run.TraceID)
+	}
+	return run
+}
+
+func (p *Pipeline) startTraceNode(ctx context.Context, run *TraceRunRecord, parentNodeID, nodeName, nodeType string, depth int) *traceSpan {
+	if p.trace == nil || run == nil || run.TraceID == "" {
+		return nil
+	}
+	node, err := p.trace.StartNode(ctx, run.TraceID, parentNodeID, nodeName, nodeType, depth)
+	if err != nil {
+		slog.Warn("rag trace: start node failed", "traceId", run.TraceID, "node", nodeName, "err", err)
+		return nil
+	}
+	return &traceSpan{ctx: ctx, recorder: p.trace, traceID: run.TraceID, nodeID: node.NodeID}
 }
 
 func (p *Pipeline) buildMcpContext(ctx context.Context, question string) string {
@@ -251,6 +327,10 @@ type pipelineCallback struct {
 	answerPrefix   string
 	citations      string
 	task           *streamTask
+	traceRecorder  TraceRecorder
+	traceRun       *TraceRunRecord
+	traceSpan      *traceSpan
+	firstPacket    bool
 }
 
 func (c *pipelineCallback) OnContent(content string) {
@@ -258,6 +338,7 @@ func (c *pipelineCallback) OnContent(content string) {
 		return
 	}
 	slog.Info("rag pipeline: llm content chunk", "len", len(content))
+	c.recordFirstPacket()
 	c.answer.WriteString(content)
 	c.sender.SendMessage(MsgTypeResponse, content)
 }
@@ -267,13 +348,16 @@ func (c *pipelineCallback) OnThinking(content string) {
 		return
 	}
 	slog.Info("rag pipeline: llm thinking chunk", "len", len(content))
+	c.recordFirstPacket()
 	c.sender.SendMessage(MsgTypeThink, content)
 }
 
 func (c *pipelineCallback) OnComplete() {
 	if c.task != nil && c.task.isCancelled() {
+		c.traceSpan.finish(traceStatusCancelled, nil)
 		return
 	}
+	c.traceSpan.finish(traceStatusSuccess, nil)
 	slog.Info("rag pipeline: llm stream complete")
 	if c.memory != nil {
 		if answer := c.answerPrefix + c.answer.String(); answer != "" {
@@ -293,13 +377,30 @@ func (c *pipelineCallback) OnComplete() {
 
 func (c *pipelineCallback) OnError(err error) {
 	if c.task != nil && c.task.isCancelled() {
+		c.traceSpan.finish(traceStatusCancelled, nil)
 		return
 	}
+	c.traceSpan.finish(traceStatusError, err)
 	slog.Error("rag pipeline: llm error", "err", err)
 	// Ignore send errors — client may have already disconnected
 	_ = c.sender.SendFinish("", "")
 	_ = c.sender.SendDone()
 	c.sender.Close()
+}
+
+func (c *pipelineCallback) recordFirstPacket() {
+	if c.firstPacket || c.traceRecorder == nil || c.traceRun == nil {
+		return
+	}
+	c.firstPacket = true
+	node, err := c.traceRecorder.StartNode(c.ctx, c.traceRun.TraceID, "", "user-first-packet", "STREAM", 0)
+	if err != nil {
+		slog.Warn("rag trace: first packet node failed", "traceId", c.traceRun.TraceID, "err", err)
+		return
+	}
+	if err := c.traceRecorder.FinishNode(c.ctx, c.traceRun.TraceID, node.NodeID, traceStatusSuccess, nil); err != nil {
+		slog.Warn("rag trace: finish first packet node failed", "traceId", c.traceRun.TraceID, "err", err)
+	}
 }
 
 func runeLimit(s string, n int) string {

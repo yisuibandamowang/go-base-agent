@@ -90,11 +90,22 @@ rag:
   search:
     channels:
       vector-global:
+        enabled: true
         confidence-threshold: 0.6
         top-k-multiplier: 3
       intent-directed:
+        enabled: true
         min-intent-score: 0.4
         top-k-multiplier: 2
+      keyword:
+        enabled: true
+        top-k-multiplier: 1
+      web-search:
+        enabled: false
+        api-url: ${YOUCOM_API_URL:https://api.ydc-index.io/search}
+        api-key: ${YDC_API_KEY}
+        count: 5
+        timeout-seconds: 5
 
   trace:
     enabled: true
@@ -199,6 +210,9 @@ rustfs:
   url: ${RUSTFS_URL}
   access-key-id: ${RUSTFS_ACCESS_KEY_ID}
   secret-access-key: ${RUSTFS_SECRET_ACCESS_KEY}
+  region: ${RUSTFS_REGION:us-east-1}
+  kb-bucket: ${RUSTFS_KB_BUCKET:ragent-kb}
+  asset-bucket: ${RUSTFS_ASSET_BUCKET:ragent-assets}
 
 auth:
   token-name: Authorization

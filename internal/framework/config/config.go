@@ -185,12 +185,30 @@ type RAGSearchConfig struct {
 type RAGSearchChannelsConfig struct {
 	VectorGlobal   RAGSearchChannelConfig `mapstructure:"vector-global"`
 	IntentDirected RAGSearchChannelConfig `mapstructure:"intent-directed"`
+	Keyword        RAGSearchChannelConfig `mapstructure:"keyword"`
+	WebSearch      RAGWebSearchConfig     `mapstructure:"web-search"`
 }
 
 type RAGSearchChannelConfig struct {
+	Enabled             *bool   `mapstructure:"enabled"`
 	ConfidenceThreshold float64 `mapstructure:"confidence-threshold"`
 	TopKMultiplier      int     `mapstructure:"top-k-multiplier"`
 	MinIntentScore      float64 `mapstructure:"min-intent-score"`
+}
+
+func (c RAGSearchChannelConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+type RAGWebSearchConfig struct {
+	Enabled        bool   `mapstructure:"enabled"`
+	APIURL         string `mapstructure:"api-url"`
+	APIKey         string `mapstructure:"api-key"`
+	Count          int    `mapstructure:"count"`
+	TimeoutSeconds int    `mapstructure:"timeout-seconds"`
 }
 
 type RAGTraceConfig struct {
@@ -319,6 +337,9 @@ type RustFSConfig struct {
 	URL             string `mapstructure:"url"`
 	AccessKeyID     string `mapstructure:"access-key-id"`
 	SecretAccessKey string `mapstructure:"secret-access-key"`
+	Region          string `mapstructure:"region"`
+	KBBucket        string `mapstructure:"kb-bucket"`
+	AssetBucket     string `mapstructure:"asset-bucket"`
 }
 
 type AuthConfig struct {

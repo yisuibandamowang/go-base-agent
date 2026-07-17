@@ -29,6 +29,19 @@ func (f *fakeTaskExecutor) ExecuteIngestionTask(ctx context.Context, req dto.Cre
 	return f.chunkCount, f.err
 }
 
+type fakePipelineTaskExecutor struct {
+	result TaskExecutionResult
+	err    error
+}
+
+func (f fakePipelineTaskExecutor) ExecuteIngestionTask(ctx context.Context, req dto.CreateTaskReq) (int, error) {
+	return f.result.ChunkCount, f.err
+}
+
+func (f fakePipelineTaskExecutor) ExecuteIngestionPipelineTask(ctx context.Context, req dto.CreateTaskReq, nodes []model.IngestionPipelineNode) (TaskExecutionResult, error) {
+	return f.result, f.err
+}
+
 func TestTaskService_CreateExecutesInjectedExecutor(t *testing.T) {
 	gdb, pipelineID := setupTaskServiceTestDB(t)
 	taskSvc := NewTaskService(repo.NewTaskRepo(gdb), NewPipelineService(repo.NewPipelineRepo(gdb), gdb), gdb)
@@ -60,6 +73,44 @@ func TestTaskService_CreateExecutesInjectedExecutor(t *testing.T) {
 	}
 	if len(nodes) != 2 || nodes[0].Status != "success" || nodes[1].Status != "success" {
 		t.Fatalf("unexpected task nodes: %+v", nodes)
+	}
+}
+
+func TestTaskService_CreatePersistsPipelineAwareNodeResults(t *testing.T) {
+	gdb, pipelineID := setupTaskServiceTestDB(t)
+	taskSvc := NewTaskService(repo.NewTaskRepo(gdb), NewPipelineService(repo.NewPipelineRepo(gdb), gdb), gdb)
+	taskSvc.SetExecutor(fakePipelineTaskExecutor{result: TaskExecutionResult{
+		ChunkCount: 4,
+		Nodes: []TaskNodeExecutionResult{
+			{NodeID: "fetch", NodeType: "fetcher", Status: "success", Message: "fetched", Output: map[string]any{"bytes": 12}},
+			{NodeID: "index", NodeType: "indexer", Status: "success", Message: "indexed", Output: map[string]any{"chunkCount": 4}},
+		},
+	}})
+
+	resp, err := taskSvc.Create(t.Context(), dto.CreateTaskReq{
+		PipelineID: pipelineID,
+		Source:     dto.DocumentSourceReq{Type: "file", Location: "doc-1", FileName: "doc.md"},
+		Metadata:   map[string]any{"docId": "doc-1"},
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if resp.ChunkCount != 4 || resp.Status != "completed" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+
+	nodes, err := taskSvc.Nodes(t.Context(), resp.TaskID)
+	if err != nil {
+		t.Fatalf("list task nodes: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("expected two nodes, got %+v", nodes)
+	}
+	if nodes[0].NodeID != "fetch" || nodes[0].Message != "fetched" || nodes[0].Output["bytes"] == nil {
+		t.Fatalf("unexpected fetch node: %+v", nodes[0])
+	}
+	if nodes[1].NodeID != "index" || nodes[1].Message != "indexed" || nodes[1].Output["chunkCount"] == nil {
+		t.Fatalf("unexpected index node: %+v", nodes[1])
 	}
 }
 

@@ -12,6 +12,7 @@ type CreateDocumentReq struct {
 	ScheduleCron    string `json:"scheduleCron"`
 	ChunkStrategy   string `json:"chunkStrategy"`
 	ChunkConfig     string `json:"chunkConfig"`
+	PipelineID      string `json:"pipelineId"`
 }
 
 // UpdateDocumentReq 更新文档请求。

@@ -178,6 +178,28 @@ type TaskExecutor interface {
 	ExecuteIngestionTask(ctx context.Context, req dto.CreateTaskReq) (int, error)
 }
 
+// PipelineTaskExecutor can return per-node execution results for a pipeline task.
+type PipelineTaskExecutor interface {
+	ExecuteIngestionPipelineTask(ctx context.Context, req dto.CreateTaskReq, nodes []model.IngestionPipelineNode) (TaskExecutionResult, error)
+}
+
+// TaskExecutionResult contains the outcome of a pipeline task.
+type TaskExecutionResult struct {
+	ChunkCount int
+	Nodes      []TaskNodeExecutionResult
+}
+
+// TaskNodeExecutionResult contains the outcome of one pipeline node.
+type TaskNodeExecutionResult struct {
+	NodeID       string
+	NodeType     string
+	Status       string
+	DurationMs   int64
+	Message      string
+	ErrorMessage string
+	Output       map[string]any
+}
+
 // SetExecutor 设置摄取任务的实际执行器。
 func (s *TaskService) SetExecutor(executor TaskExecutor) {
 	s.executor = executor
@@ -231,7 +253,14 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 	}
 
 	execStart := time.Now()
-	chunkCount, err := s.executor.ExecuteIngestionTask(ctx, req)
+	execResult := TaskExecutionResult{}
+	if pipelineExecutor, ok := s.executor.(PipelineTaskExecutor); ok {
+		execResult, err = pipelineExecutor.ExecuteIngestionPipelineTask(ctx, req, nodes)
+	} else {
+		chunkCount, execErr := s.executor.ExecuteIngestionTask(ctx, req)
+		err = execErr
+		execResult = TaskExecutionResult{ChunkCount: chunkCount}
+	}
 	durationMs := time.Since(execStart).Milliseconds()
 	if err != nil {
 		msg := fmt.Sprintf("执行摄取任务失败: %v", err)
@@ -251,20 +280,39 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 	}
 
 	logs := make([]map[string]any, 0, len(nodes))
+	nodeResultMap := make(map[string]TaskNodeExecutionResult, len(execResult.Nodes))
+	for _, nodeResult := range execResult.Nodes {
+		nodeResultMap[nodeResult.NodeID] = nodeResult
+	}
 	for idx, node := range nodes {
-		taskNode := newTaskNode(task, node, idx+1, "success", durationMs, "OK", "", map[string]any{
-			"chunkCount": chunkCount,
-		})
+		nodeResult, ok := nodeResultMap[node.NodeID]
+		if !ok {
+			nodeResult = TaskNodeExecutionResult{
+				NodeID:     node.NodeID,
+				NodeType:   node.NodeType,
+				Status:     "success",
+				DurationMs: durationMs,
+				Message:    "OK",
+				Output:     map[string]any{"chunkCount": execResult.ChunkCount},
+			}
+		}
+		status := firstNonEmpty(nodeResult.Status, "success")
+		message := firstNonEmpty(nodeResult.Message, "OK")
+		nodeDuration := nodeResult.DurationMs
+		if nodeDuration == 0 {
+			nodeDuration = durationMs
+		}
+		taskNode := newTaskNode(task, node, idx+1, status, nodeDuration, message, nodeResult.ErrorMessage, nodeResult.Output)
 		if err := s.repo.CreateNode(ctx, taskNode); err != nil {
 			return nil, fmt.Errorf("创建摄取任务节点失败: %w", err)
 		}
-		logs = append(logs, taskNodeLog(node, true, "OK", durationMs))
+		logs = append(logs, taskNodeLog(node, status == "success", message, nodeDuration))
 	}
 	completed := time.Now()
 	task.Status = "completed"
 	task.CompletedAt = &completed
 	task.LogsJSON = writeJSON(logs)
-	task.ChunkCount = chunkCount
+	task.ChunkCount = execResult.ChunkCount
 	if err := s.repo.Update(ctx, task); err != nil {
 		return nil, fmt.Errorf("更新摄取任务失败: %w", err)
 	}
@@ -504,6 +552,15 @@ func normalizeSourceType(sourceType string) string {
 func normalizeStatus(status string) string {
 	v := strings.TrimSpace(strings.ToLower(status))
 	return strings.ReplaceAll(v, "-", "_")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func writeJSON(value any) string {
