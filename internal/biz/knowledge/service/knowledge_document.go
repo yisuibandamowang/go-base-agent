@@ -20,6 +20,7 @@ import (
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/biz/rag"
+	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/infra/embedding"
 
 	"gorm.io/gorm"
@@ -965,12 +966,24 @@ func (s *DocumentService) SearchDocuments(ctx context.Context, keyword string, l
 		return nil, err
 	}
 	kbNames := map[string]string{}
+	kbIDs := make([]string, 0, len(docs))
+	seenKB := make(map[string]struct{}, len(docs))
 	for _, doc := range docs {
-		if _, ok := kbNames[doc.KbID]; ok {
+		if doc.KbID == "" {
 			continue
 		}
-		if kb, err := s.kbRepo.FindByID(ctx, doc.KbID); err == nil && kb != nil {
-			kbNames[doc.KbID] = kb.Name
+		if _, ok := seenKB[doc.KbID]; ok {
+			continue
+		}
+		seenKB[doc.KbID] = struct{}{}
+		kbIDs = append(kbIDs, doc.KbID)
+	}
+	if len(kbIDs) > 0 {
+		var bases []model.KnowledgeBase
+		if err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Where("id IN ?", kbIDs).Find(&bases).Error; err == nil {
+			for _, kb := range bases {
+				kbNames[kb.ID] = kb.Name
+			}
 		}
 	}
 	records := make([]dto.DocumentResp, 0, len(docs))

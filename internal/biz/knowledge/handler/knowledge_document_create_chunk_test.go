@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
@@ -79,9 +80,23 @@ func TestSearchDocsReturnsJavaStyleArrayWithKBName(t *testing.T) {
 	if err := gdb.Create(kb).Error; err != nil {
 		t.Fatalf("seed kb: %v", err)
 	}
-	doc := &model.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent能力.md", FileURL: "upload://doc.md", FileType: "md", Status: "success", CreatedBy: "tester"}
-	if err := gdb.Create(doc).Error; err != nil {
-		t.Fatalf("seed doc: %v", err)
+	olderKB := &model.KnowledgeBase{Name: "旧知识库", EmbeddingModel: "emb", CollectionName: "old_kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(olderKB).Error; err != nil {
+		t.Fatalf("seed older kb: %v", err)
+	}
+	olderDoc := &model.KnowledgeDocument{KbID: olderKB.ID, DocName: "旧会员Agent能力.md", FileURL: "upload://old-doc.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	newerDoc := &model.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent能力.md", FileURL: "upload://doc.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(olderDoc).Error; err != nil {
+		t.Fatalf("seed older doc: %v", err)
+	}
+	if err := gdb.Create(newerDoc).Error; err != nil {
+		t.Fatalf("seed newer doc: %v", err)
+	}
+	if err := gdb.Model(&model.KnowledgeDocument{}).Where("id = ?", olderDoc.ID).Updates(map[string]any{"update_time": time.Now().Add(-time.Hour)}).Error; err != nil {
+		t.Fatalf("update older doc time: %v", err)
+	}
+	if err := gdb.Model(&model.KnowledgeDocument{}).Where("id = ?", newerDoc.ID).Updates(map[string]any{"update_time": time.Now()}).Error; err != nil {
+		t.Fatalf("update newer doc time: %v", err)
 	}
 	svc := service.NewDocumentService(repo.NewKnowledgeDocumentRepo(gdb), repo.NewKnowledgeChunkRepo(gdb), repo.NewKnowledgeBaseRepo(gdb), gdb, nil, nil, nil)
 	h := NewDocumentHandler(svc, NewFileStore())
@@ -103,12 +118,16 @@ func TestSearchDocsReturnsJavaStyleArrayWithKBName(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected Java-style array data, got %T: %s", resp["data"], w.Body.String())
 	}
-	if len(data) != 1 {
-		t.Fatalf("expected one result, got %s", w.Body.String())
+	if len(data) != 2 {
+		t.Fatalf("expected two results, got %s", w.Body.String())
 	}
-	item, ok := data[0].(map[string]any)
-	if !ok || item["docName"] != "会员Agent能力.md" || item["kbName"] != "会员知识库" {
-		t.Fatalf("unexpected search item: %s", w.Body.String())
+	first, ok := data[0].(map[string]any)
+	if !ok || first["docName"] != "会员Agent能力.md" || first["kbName"] != "会员知识库" {
+		t.Fatalf("unexpected first search item: %s", w.Body.String())
+	}
+	second, ok := data[1].(map[string]any)
+	if !ok || second["docName"] != "旧会员Agent能力.md" || second["kbName"] != "旧知识库" {
+		t.Fatalf("unexpected second search item: %s", w.Body.String())
 	}
 
 	w = httptest.NewRecorder()
