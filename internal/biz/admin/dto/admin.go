@@ -110,7 +110,10 @@ type PerformanceResp struct {
 
 // TrendsResp 趋势数据响应。
 type TrendsResp struct {
-	Series []TrendSeries `json:"series"`
+	Metric      string        `json:"metric"`
+	Window      string        `json:"window"`
+	Granularity string        `json:"granularity"`
+	Series      []TrendSeries `json:"series"`
 }
 
 // TrendSeries 趋势序列。
@@ -121,6 +124,6 @@ type TrendSeries struct {
 
 // TrendPoint 趋势数据点。
 type TrendPoint struct {
-	Ts    string  `json:"ts"`
+	Ts    int64   `json:"ts"`
 	Value float64 `json:"value"`
 }

@@ -313,36 +313,7 @@ func main() {
 		}
 
 		// Intent tree — 同时注册 /intent-tree/* 和旧风格路径
-		api.GET("/intent-tree/trees", intentTreeHandler.GetTree)
-		api.POST("/intent-tree", intentTreeHandler.CreateNode)
-		api.PUT("/intent-tree/:id", intentTreeHandler.UpdateNode)
-		api.DELETE("/intent-tree/:id", intentTreeHandler.DeleteNode)
-		api.POST("/intent-tree/batch/enable", intentTreeHandler.BatchEnable)
-		api.POST("/intent-tree/batch/disable", intentTreeHandler.BatchDisable)
-		api.POST("/intent-tree/batch/delete", intentTreeHandler.BatchDelete)
-
-		it := api.Group("/intent-tree")
-		{
-			it.GET("/tree", intentTreeHandler.GetTree)
-			it.GET("/nodes", intentTreeHandler.ListNodes)
-			it.POST("/nodes", intentTreeHandler.CreateNode)
-			it.GET("/nodes/:id", intentTreeHandler.GetNode)
-			it.PUT("/nodes/:id", intentTreeHandler.UpdateNode)
-			it.DELETE("/nodes/:id", intentTreeHandler.DeleteNode)
-			it.PATCH("/nodes/:id/enable", intentTreeHandler.ToggleNode)
-		}
-
-		// Term mappings — 同时注册 /mappings/* 和 /intent-tree/term-mappings/*
-		api.GET("/mappings", intentTreeHandler.ListTermMappings)
-		api.GET("/mappings/:id", intentTreeHandler.GetTermMapping)
-		api.POST("/mappings", intentTreeHandler.CreateTermMapping)
-		api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMapping)
-		api.DELETE("/mappings/:id", intentTreeHandler.DeleteTermMapping)
-
-		it.GET("/term-mappings", intentTreeHandler.ListTermMappings)
-		it.POST("/term-mappings", intentTreeHandler.CreateTermMapping)
-		it.PUT("/term-mappings/:id", intentTreeHandler.UpdateTermMapping)
-		it.DELETE("/term-mappings/:id", intentTreeHandler.DeleteTermMapping)
+		registerIntentRoutes(api, intentTreeHandler)
 
 		// Admin — 同时注册 /admin/* 和 /rag/* 兼容路径
 		api.GET("/admin/dashboard/overview", adminH.Dashboard)
@@ -529,6 +500,39 @@ func setupMQ(cfg config.RocketMQConfig) (mq.Producer, mq.Consumer, func()) {
 		}
 	}
 	return producer, consumer, shutdown
+}
+
+func registerIntentRoutes(api *gin.RouterGroup, intentTreeHandler *intentHandler.IntentHandler) {
+	api.GET("/intent-tree/trees", intentTreeHandler.GetTree)
+	api.POST("/intent-tree", intentTreeHandler.CreateNode)
+	api.PUT("/intent-tree/:id", intentTreeHandler.UpdateNode)
+	api.DELETE("/intent-tree/:id", intentTreeHandler.DeleteNode)
+	api.POST("/intent-tree/batch/enable", intentTreeHandler.BatchEnable)
+	api.POST("/intent-tree/batch/disable", intentTreeHandler.BatchDisable)
+	api.POST("/intent-tree/batch/delete", intentTreeHandler.BatchDelete)
+
+	it := api.Group("/intent-tree")
+	{
+		it.GET("/tree", intentTreeHandler.GetTree)
+		it.GET("/nodes", intentTreeHandler.ListNodes)
+		it.POST("/nodes", intentTreeHandler.CreateNode)
+		it.GET("/nodes/:id", intentTreeHandler.GetNode)
+		it.PUT("/nodes/:id", intentTreeHandler.UpdateNode)
+		it.DELETE("/nodes/:id", intentTreeHandler.DeleteNode)
+		it.PATCH("/nodes/:id/enable", intentTreeHandler.ToggleNode)
+
+		it.GET("/term-mappings", intentTreeHandler.ListTermMappings)
+		it.GET("/term-mappings/:id", intentTreeHandler.GetTermMapping)
+		it.POST("/term-mappings", intentTreeHandler.CreateTermMapping)
+		it.PUT("/term-mappings/:id", intentTreeHandler.UpdateTermMapping)
+		it.DELETE("/term-mappings/:id", intentTreeHandler.DeleteTermMapping)
+	}
+
+	api.GET("/mappings", intentTreeHandler.ListTermMappings)
+	api.GET("/mappings/:id", intentTreeHandler.GetTermMapping)
+	api.POST("/mappings", intentTreeHandler.CreateTermMapping)
+	api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMapping)
+	api.DELETE("/mappings/:id", intentTreeHandler.DeleteTermMapping)
 }
 
 func splitCSV(value string) []string {

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
+	"strings"
+	"time"
 
 	adminDto "go-base-agent/internal/biz/admin/dto"
 	adminModel "go-base-agent/internal/biz/admin/model"
@@ -425,42 +428,275 @@ func (s *AdminService) GetPerformance(ctx context.Context) (*adminDto.Performanc
 	}, nil
 }
 
-// GetTrends returns simple time-series data from the last 7 days.
-func (s *AdminService) GetTrends(ctx context.Context) (*adminDto.TrendsResp, error) {
-	type row struct {
-		Day   string `gorm:"column:day"`
-		Count int64  `gorm:"column:cnt"`
+// GetTrends returns dashboard time-series data.
+func (s *AdminService) GetTrends(ctx context.Context, metric, window, granularity string) (*adminDto.TrendsResp, error) {
+	duration := parseDashboardWindow(window, 7*24*time.Hour)
+	resolvedGranularity := resolveDashboardGranularity(granularity, duration)
+	windowLabel := strings.TrimSpace(window)
+	if windowLabel == "" {
+		windowLabel = formatDashboardWindow(duration)
 	}
+	start, end, buckets := dashboardTrendBuckets(time.Now(), duration, resolvedGranularity)
+	normalizedMetric := strings.ToLower(strings.TrimSpace(metric))
 
-	// Messages by day
-	var msgRows []row
-	s.db.WithContext(ctx).Raw(
-		`SELECT to_char(create_time,'YYYY-MM-DD') as day, count(*) as cnt
-		 FROM t_message WHERE deleted=0 AND create_time >= now() - interval '7 days'
-		 GROUP BY day ORDER BY day`,
-	).Scan(&msgRows)
-
-	// Conversations by day
-	var convRows []row
-	s.db.WithContext(ctx).Raw(
-		`SELECT to_char(create_time,'YYYY-MM-DD') as day, count(*) as cnt
-		 FROM t_conversation WHERE deleted=0 AND create_time >= now() - interval '7 days'
-		 GROUP BY day ORDER BY day`,
-	).Scan(&convRows)
-
-	msgPoints := make([]adminDto.TrendPoint, 0)
-	for _, r := range msgRows {
-		msgPoints = append(msgPoints, adminDto.TrendPoint{Ts: r.Day, Value: float64(r.Count)})
-	}
-	convPoints := make([]adminDto.TrendPoint, 0)
-	for _, r := range convRows {
-		convPoints = append(convPoints, adminDto.TrendPoint{Ts: r.Day, Value: float64(r.Count)})
+	series := make([]adminDto.TrendSeries, 0)
+	switch normalizedMetric {
+	case "sessions":
+		values, err := s.countByTime(ctx, "t_conversation", "create_time", start, end, resolvedGranularity)
+		if err != nil {
+			return nil, err
+		}
+		series = append(series, adminDto.TrendSeries{Name: "会话数", Data: trendPoints(buckets, values, resolvedGranularity)})
+	case "messages", "":
+		values, err := s.countByTime(ctx, "t_message", "create_time", start, end, resolvedGranularity)
+		if err != nil {
+			return nil, err
+		}
+		series = append(series, adminDto.TrendSeries{Name: "消息数", Data: trendPoints(buckets, values, resolvedGranularity)})
+	case "activeusers":
+		values, err := s.countActiveUsersByTime(ctx, start, end, resolvedGranularity)
+		if err != nil {
+			return nil, err
+		}
+		series = append(series, adminDto.TrendSeries{Name: "活跃用户", Data: trendPoints(buckets, values, resolvedGranularity)})
+	case "avglatency":
+		values, err := s.averageLatencyByTime(ctx, start, end, resolvedGranularity)
+		if err != nil {
+			return nil, err
+		}
+		series = append(series, adminDto.TrendSeries{Name: "平均响应时间", Data: trendPoints(buckets, values, resolvedGranularity)})
+	case "quality":
+		errorRate, noDocRate, err := s.qualityRatesByTime(ctx, start, end, resolvedGranularity)
+		if err != nil {
+			return nil, err
+		}
+		series = append(series,
+			adminDto.TrendSeries{Name: "错误率", Data: trendPoints(buckets, errorRate, resolvedGranularity)},
+			adminDto.TrendSeries{Name: "无知识率", Data: trendPoints(buckets, noDocRate, resolvedGranularity)},
+		)
 	}
 
 	return &adminDto.TrendsResp{
-		Series: []adminDto.TrendSeries{
-			{Name: "消息数", Data: msgPoints},
-			{Name: "会话数", Data: convPoints},
-		},
+		Metric:      metric,
+		Window:      windowLabel,
+		Granularity: resolvedGranularity,
+		Series:      series,
 	}, nil
+}
+
+type dashboardTimeRow struct {
+	CreateTime time.Time `gorm:"column:create_time"`
+	UserID     string    `gorm:"column:user_id"`
+	Role       string    `gorm:"column:role"`
+	Content    string    `gorm:"column:content"`
+}
+
+type dashboardTraceRow struct {
+	StartTime  time.Time `gorm:"column:start_time"`
+	Status     string    `gorm:"column:status"`
+	DurationMs int64     `gorm:"column:duration_ms"`
+}
+
+func (s *AdminService) countByTime(ctx context.Context, table, timeColumn string, start, end time.Time, granularity string) (map[time.Time]float64, error) {
+	var rows []dashboardTimeRow
+	if err := s.db.WithContext(ctx).Table(table).
+		Select(timeColumn+" AS create_time").
+		Where("deleted = 0 AND "+timeColumn+" >= ? AND "+timeColumn+" < ?", start, end).
+		Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("query dashboard trend %s: %w", table, err)
+	}
+	values := make(map[time.Time]float64)
+	for _, row := range rows {
+		values[dashboardBucket(row.CreateTime, granularity)]++
+	}
+	return values, nil
+}
+
+func (s *AdminService) countActiveUsersByTime(ctx context.Context, start, end time.Time, granularity string) (map[time.Time]float64, error) {
+	var rows []dashboardTimeRow
+	if err := s.db.WithContext(ctx).Table("t_message").
+		Select("create_time, user_id").
+		Where("deleted = 0 AND create_time >= ? AND create_time < ?", start, end).
+		Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("query dashboard active users: %w", err)
+	}
+	sets := make(map[time.Time]map[string]bool)
+	for _, row := range rows {
+		bucket := dashboardBucket(row.CreateTime, granularity)
+		if sets[bucket] == nil {
+			sets[bucket] = make(map[string]bool)
+		}
+		sets[bucket][row.UserID] = true
+	}
+	values := make(map[time.Time]float64, len(sets))
+	for bucket, users := range sets {
+		values[bucket] = float64(len(users))
+	}
+	return values, nil
+}
+
+func (s *AdminService) averageLatencyByTime(ctx context.Context, start, end time.Time, granularity string) (map[time.Time]float64, error) {
+	rows, err := s.listTraceRows(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	sum := make(map[time.Time]float64)
+	count := make(map[time.Time]float64)
+	for _, row := range rows {
+		if row.Status != "SUCCESS" || row.DurationMs <= 0 {
+			continue
+		}
+		bucket := dashboardBucket(row.StartTime, granularity)
+		sum[bucket] += float64(row.DurationMs)
+		count[bucket]++
+	}
+	values := make(map[time.Time]float64, len(sum))
+	for bucket, total := range sum {
+		values[bucket] = roundDashboard1(total / count[bucket])
+	}
+	return values, nil
+}
+
+func (s *AdminService) qualityRatesByTime(ctx context.Context, start, end time.Time, granularity string) (map[time.Time]float64, map[time.Time]float64, error) {
+	traceRows, err := s.listTraceRows(ctx, start, end)
+	if err != nil {
+		return nil, nil, err
+	}
+	success := make(map[time.Time]float64)
+	failures := make(map[time.Time]float64)
+	for _, row := range traceRows {
+		bucket := dashboardBucket(row.StartTime, granularity)
+		if row.Status == "ERROR" {
+			failures[bucket]++
+		} else if row.Status == "SUCCESS" {
+			success[bucket]++
+		}
+	}
+
+	var messageRows []dashboardTimeRow
+	if err := s.db.WithContext(ctx).Table("t_message").
+		Select("create_time, role, content").
+		Where("deleted = 0 AND create_time >= ? AND create_time < ?", start, end).
+		Scan(&messageRows).Error; err != nil {
+		return nil, nil, fmt.Errorf("query dashboard quality messages: %w", err)
+	}
+	assistant := make(map[time.Time]float64)
+	noDoc := make(map[time.Time]float64)
+	for _, row := range messageRows {
+		if row.Role != "assistant" {
+			continue
+		}
+		bucket := dashboardBucket(row.CreateTime, granularity)
+		assistant[bucket]++
+		if row.Content == "未检索到与问题相关的文档内容。" {
+			noDoc[bucket]++
+		}
+	}
+
+	errorRate := make(map[time.Time]float64)
+	noDocRate := make(map[time.Time]float64)
+	for bucket, errCount := range failures {
+		total := errCount + success[bucket]
+		if total > 0 {
+			errorRate[bucket] = roundDashboard1(errCount * 100 / total)
+		}
+	}
+	for bucket, noDocCount := range noDoc {
+		if assistant[bucket] > 0 {
+			noDocRate[bucket] = roundDashboard1(noDocCount * 100 / assistant[bucket])
+		}
+	}
+	return errorRate, noDocRate, nil
+}
+
+func (s *AdminService) listTraceRows(ctx context.Context, start, end time.Time) ([]dashboardTraceRow, error) {
+	var rows []dashboardTraceRow
+	if err := s.db.WithContext(ctx).Table("t_rag_trace_run").
+		Select("start_time, status, duration_ms").
+		Where("deleted = 0 AND start_time >= ? AND start_time < ?", start, end).
+		Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("query dashboard trace trend: %w", err)
+	}
+	return rows, nil
+}
+
+func trendPoints(buckets []time.Time, values map[time.Time]float64, granularity string) []adminDto.TrendPoint {
+	points := make([]adminDto.TrendPoint, 0, len(buckets))
+	for _, bucket := range buckets {
+		points = append(points, adminDto.TrendPoint{
+			Ts:    bucket.UnixMilli(),
+			Value: values[dashboardBucket(bucket, granularity)],
+		})
+	}
+	return points
+}
+
+func dashboardTrendBuckets(now time.Time, duration time.Duration, granularity string) (time.Time, time.Time, []time.Time) {
+	step := 24 * time.Hour
+	end := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
+	if granularity == "hour" {
+		step = time.Hour
+		end = now.Truncate(time.Hour).Add(time.Hour)
+	}
+	count := int(math.Ceil(duration.Hours() / step.Hours()))
+	if count < 1 {
+		count = 1
+	}
+	start := end.Add(-time.Duration(count) * step)
+	buckets := make([]time.Time, 0, count)
+	for cursor := start; cursor.Before(end); cursor = cursor.Add(step) {
+		buckets = append(buckets, cursor)
+	}
+	return start, end, buckets
+}
+
+func dashboardBucket(t time.Time, granularity string) time.Time {
+	t = t.In(time.Local)
+	if granularity == "hour" {
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.Local)
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+}
+
+func parseDashboardWindow(window string, fallback time.Duration) time.Duration {
+	normalized := strings.ToLower(strings.TrimSpace(window))
+	if normalized == "" {
+		return fallback
+	}
+	unit := normalized[len(normalized)-1:]
+	value := strings.TrimSpace(normalized[:len(normalized)-1])
+	var number int64
+	if _, err := fmt.Sscan(value, &number); err != nil || number <= 0 {
+		return fallback
+	}
+	if unit == "h" {
+		return time.Duration(number) * time.Hour
+	}
+	if unit == "d" {
+		return time.Duration(number) * 24 * time.Hour
+	}
+	return fallback
+}
+
+func resolveDashboardGranularity(granularity string, duration time.Duration) string {
+	normalized := strings.ToLower(strings.TrimSpace(granularity))
+	if normalized == "hour" || normalized == "day" {
+		return normalized
+	}
+	if duration <= 48*time.Hour {
+		return "hour"
+	}
+	return "day"
+}
+
+func formatDashboardWindow(duration time.Duration) string {
+	hours := int64(duration.Hours())
+	if hours%24 == 0 {
+		return fmt.Sprintf("%dd", hours/24)
+	}
+	return fmt.Sprintf("%dh", hours)
+}
+
+func roundDashboard1(value float64) float64 {
+	return math.Round(value*10) / 10
 }

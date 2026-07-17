@@ -6,11 +6,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	adminHandler "go-base-agent/internal/biz/admin/handler"
 	adminModel "go-base-agent/internal/biz/admin/model"
 	adminRepo "go-base-agent/internal/biz/admin/repo"
 	adminService "go-base-agent/internal/biz/admin/service"
+	conversationModel "go-base-agent/internal/biz/conversation/model"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
@@ -112,6 +114,55 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 			t.Fatalf("unexpected detail response: %s", w.Body.String())
 		}
 	})
+}
+
+func TestDashboardTrendsPassesQueryParameters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Message{}); err != nil {
+		t.Fatalf("migrate messages: %v", err)
+	}
+	messageTime := time.Now().Add(-30 * time.Minute).Truncate(time.Hour).Add(10 * time.Minute)
+	if err := gdb.Create(&conversationModel.Message{
+		ConversationID: "conv-trends",
+		UserID:         "user-trends",
+		Role:           "user",
+		Content:        "hello",
+	}).Error; err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	if err := gdb.Model(&conversationModel.Message{}).Where("conversation_id = ?", "conv-trends").
+		Updates(map[string]any{"create_time": messageTime, "update_time": messageTime}).Error; err != nil {
+		t.Fatalf("update message time: %v", err)
+	}
+
+	svc := adminService.NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	h := adminHandler.NewAdminHandler(svc)
+	r := gin.New()
+	r.GET("/api/ragent/admin/dashboard/trends", h.Trends)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/admin/dashboard/trends?metric=messages&window=24h&granularity=hour", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %T: %s", resp["data"], w.Body.String())
+	}
+	if data["metric"] != "messages" || data["window"] != "24h" || data["granularity"] != "hour" {
+		t.Fatalf("unexpected trends metadata: %s", w.Body.String())
+	}
 }
 
 func TestTraceNodesReturnsStoredNodes(t *testing.T) {

@@ -11,12 +11,18 @@ import (
 	"strings"
 	"testing"
 
+	intentHandler "go-base-agent/internal/biz/intent_tree/handler"
+	intentModel "go-base-agent/internal/biz/intent_tree/model"
+	intentRepo "go-base-agent/internal/biz/intent_tree/repo"
+	intentService "go-base-agent/internal/biz/intent_tree/service"
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/mq"
 	infrarerank "go-base-agent/internal/infra/rerank"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestStatusProbeRoutes(t *testing.T) {
@@ -84,6 +90,43 @@ func TestRagEvalHandler(t *testing.T) {
 			t.Fatalf("expected eval retrieval response, got %d %s", w.Code, body)
 		}
 	})
+}
+
+func TestRegisterIntentRoutesIncludesTermMappingDetailCompatibilityPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&intentModel.QueryTermMapping{}); err != nil {
+		t.Fatalf("migrate mapping: %v", err)
+	}
+	mapping := &intentModel.QueryTermMapping{Domain: "member", SourceTerm: "VIP", TargetTerm: "会员", Enabled: 1}
+	if err := gdb.Create(mapping).Error; err != nil {
+		t.Fatalf("seed mapping: %v", err)
+	}
+
+	r := gin.New()
+	api := r.Group("/api/ragent")
+	h := intentHandler.NewIntentHandler(intentService.NewIntentService(
+		intentRepo.NewIntentRepo(gdb),
+		intentRepo.NewTermMappingRepo(gdb),
+		gdb,
+	))
+	registerIntentRoutes(api, h)
+
+	for _, path := range []string{
+		"/api/ragent/mappings/" + mapping.ID,
+		"/api/ragent/intent-tree/term-mappings/" + mapping.ID,
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sourceTerm":"VIP"`) {
+			t.Fatalf("expected mapping detail from %s, got %d %s", path, w.Code, w.Body.String())
+		}
+	}
 }
 
 func TestSetupMQ_FallsBackToNoopWhenNameServerMissing(t *testing.T) {

@@ -43,7 +43,7 @@ func (h *AdminHandler) Performance(c *gin.Context) {
 
 // Trends GET /api/ragent/admin/dashboard/trends
 func (h *AdminHandler) Trends(c *gin.Context) {
-	resp, err := h.svc.GetTrends(c.Request.Context())
+	resp, err := h.svc.GetTrends(c.Request.Context(), c.Query("metric"), c.Query("window"), c.Query("granularity"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
