@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	auditModel "go-base-agent/internal/biz/audit/model"
 	auditRepo "go-base-agent/internal/biz/audit/repo"
@@ -71,16 +72,47 @@ func (s failingVectorStore) IndexDocumentChunks(context.Context, string, string,
 	return s.err
 }
 
-type capturingVectorStore struct {
-	chunks []rag.VectorChunk
+func (s failingVectorStore) UpdateChunk(context.Context, string, string, rag.VectorChunk) error {
+	return nil
 }
 
-func (s *capturingVectorStore) DeleteDocumentVectors(context.Context, string, string) error {
+func (s failingVectorStore) DeleteChunkByID(context.Context, string, string) error {
+	return nil
+}
+
+func (s failingVectorStore) DeleteChunksByIDs(context.Context, string, []string) error {
+	return nil
+}
+
+type capturingVectorStore struct {
+	deletedDocCalls []string
+	indexedChunks   []rag.VectorChunk
+	updatedChunks   []rag.VectorChunk
+	deletedChunkIDs []string
+}
+
+func (s *capturingVectorStore) DeleteDocumentVectors(_ context.Context, collectionName, docID string) error {
+	s.deletedDocCalls = append(s.deletedDocCalls, collectionName+"|"+docID)
 	return nil
 }
 
 func (s *capturingVectorStore) IndexDocumentChunks(_ context.Context, _ string, _ string, chunks []rag.VectorChunk) error {
-	s.chunks = append([]rag.VectorChunk(nil), chunks...)
+	s.indexedChunks = append([]rag.VectorChunk(nil), chunks...)
+	return nil
+}
+
+func (s *capturingVectorStore) UpdateChunk(_ context.Context, _ string, _ string, chunk rag.VectorChunk) error {
+	s.updatedChunks = append(s.updatedChunks, chunk)
+	return nil
+}
+
+func (s *capturingVectorStore) DeleteChunkByID(_ context.Context, _ string, chunkID string) error {
+	s.deletedChunkIDs = append(s.deletedChunkIDs, chunkID)
+	return nil
+}
+
+func (s *capturingVectorStore) DeleteChunksByIDs(_ context.Context, _ string, chunkIDs []string) error {
+	s.deletedChunkIDs = append(s.deletedChunkIDs, chunkIDs...)
 	return nil
 }
 
@@ -249,8 +281,8 @@ func TestDocumentService_ExecuteIngestionTaskPersistsChunksAndVectors(t *testing
 	if count != 1 {
 		t.Fatalf("expected 1 chunk, got %d", count)
 	}
-	if len(vecStore.chunks) != 1 || vecStore.chunks[0].Metadata["doc_name"] != "会员Agent说明.md" {
-		t.Fatalf("unexpected vector chunks: %+v", vecStore.chunks)
+	if len(vecStore.indexedChunks) != 1 || vecStore.indexedChunks[0].Metadata["doc_name"] != "会员Agent说明.md" {
+		t.Fatalf("unexpected vector chunks: %+v", vecStore.indexedChunks)
 	}
 	var updated knowledgeModel.KnowledgeDocument
 	if err := gdb.First(&updated, "id = ?", "doc-1").Error; err != nil {
@@ -612,14 +644,14 @@ func TestDocumentService_RecordsToggleAuditLogs(t *testing.T) {
 		Role:     "admin",
 	})
 
-	if err := svc.ToggleDocument(ctx, doc.ID, 0); err != nil {
-		t.Fatalf("toggle document: %v", err)
-	}
 	if err := svc.ToggleChunk(ctx, chunkA.ID, 0); err != nil {
 		t.Fatalf("toggle chunk: %v", err)
 	}
 	if err := svc.BatchToggleChunks(ctx, doc.ID, []string{chunkB.ID}, 1); err != nil {
 		t.Fatalf("batch toggle chunks: %v", err)
+	}
+	if err := svc.ToggleDocument(ctx, doc.ID, 0); err != nil {
+		t.Fatalf("toggle document: %v", err)
 	}
 
 	var docLogs []auditModel.BizChangeLog
@@ -651,6 +683,223 @@ func TestDocumentService_RecordsToggleAuditLogs(t *testing.T) {
 		!strings.Contains(chunkLogs[1].BeforeSnapshot, `"enabled":0`) ||
 		!strings.Contains(chunkLogs[1].AfterSnapshot, `"enabled":1`) {
 		t.Fatalf("unexpected batch chunk toggle audit log: %+v", chunkLogs[1])
+	}
+}
+
+func TestDocumentService_ToggleDocumentSyncsVectorsAndChunkStates(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 0, FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunk1 := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 0, CreatedBy: "tester"}
+	chunk2 := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 1, Content: "第二段内容", Enabled: 0, CreatedBy: "tester"}
+	if err := gdb.Create(chunk1).Error; err != nil {
+		t.Fatalf("create chunk1: %v", err)
+	}
+	if err := gdb.Create(chunk2).Error; err != nil {
+		t.Fatalf("create chunk2: %v", err)
+	}
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  vecStore,
+	}
+	if err := svc.ToggleDocument(context.Background(), doc.ID, 1); err != nil {
+		t.Fatalf("enable document: %v", err)
+	}
+	if len(vecStore.deletedDocCalls) != 1 || len(vecStore.indexedChunks) != 2 {
+		t.Fatalf("expected vector rebuild on enable, got %+v %+v", vecStore.deletedDocCalls, vecStore.indexedChunks)
+	}
+	var enabledChunks int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeChunk{}).Where("doc_id = ? AND enabled = 1 AND deleted = 0", doc.ID).Count(&enabledChunks).Error; err != nil {
+		t.Fatalf("count enabled chunks: %v", err)
+	}
+	if enabledChunks != 2 {
+		t.Fatalf("expected chunks enabled after document enable, got %d", enabledChunks)
+	}
+	if err := svc.ToggleDocument(context.Background(), doc.ID, 0); err != nil {
+		t.Fatalf("disable document: %v", err)
+	}
+	if len(vecStore.deletedDocCalls) != 2 {
+		t.Fatalf("expected vectors deleted on disable, got %+v", vecStore.deletedDocCalls)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeChunk{}).Where("doc_id = ? AND enabled = 0 AND deleted = 0", doc.ID).Count(&enabledChunks).Error; err != nil {
+		t.Fatalf("count disabled chunks: %v", err)
+	}
+	if enabledChunks != 2 {
+		t.Fatalf("expected chunks disabled after document disable, got %d", enabledChunks)
+	}
+}
+
+func TestDocumentService_ToggleChunkRequiresEnabledDocument(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 0, FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", doc.ID).Update("enabled", 0).Error; err != nil {
+		t.Fatalf("disable doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 0, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+	}
+	err = svc.ToggleChunk(context.Background(), chunk.ID, 1)
+	if err == nil || !strings.Contains(err.Error(), "文档未启用") {
+		t.Fatalf("expected document enabled validation error, got %v", err)
+	}
+}
+
+func TestDocumentService_BatchToggleChunksRequiresEnabledDocument(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 0, FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", doc.ID).Update("enabled", 0).Error; err != nil {
+		t.Fatalf("disable doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 0, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+	}
+	err = svc.BatchToggleChunks(context.Background(), doc.ID, []string{chunk.ID}, 1)
+	if err == nil || !strings.Contains(err.Error(), "文档未启用") {
+		t.Fatalf("expected document enabled validation error, got %v", err)
+	}
+}
+
+func TestDocumentService_ToggleChunkSyncsVectors(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 1, FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 0, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  vecStore,
+	}
+	if err := svc.ToggleChunk(context.Background(), chunk.ID, 1); err != nil {
+		t.Fatalf("enable chunk: %v", err)
+	}
+	if len(vecStore.updatedChunks) != 1 || vecStore.updatedChunks[0].ChunkID != chunk.ID {
+		t.Fatalf("expected vector update on enable, got %+v", vecStore.updatedChunks)
+	}
+	if err := svc.ToggleChunk(context.Background(), chunk.ID, 0); err != nil {
+		t.Fatalf("disable chunk: %v", err)
+	}
+	if len(vecStore.deletedChunkIDs) != 1 || vecStore.deletedChunkIDs[0] != chunk.ID {
+		t.Fatalf("expected vector delete on disable, got %+v", vecStore.deletedChunkIDs)
+	}
+}
+
+func TestDocumentService_SearchDocumentsOrdersByUpdateTime(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now().Add(-1 * time.Hour)
+	doc1 := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "老文档Agent.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	doc2 := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "新文档Agent.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc1).Error; err != nil {
+		t.Fatalf("create doc1: %v", err)
+	}
+	if err := gdb.Create(doc2).Error; err != nil {
+		t.Fatalf("create doc2: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", doc1.ID).Updates(map[string]any{"update_time": newer, "create_time": older}).Error; err != nil {
+		t.Fatalf("update doc1 time: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", doc2.ID).Updates(map[string]any{"update_time": older, "create_time": newer}).Error; err != nil {
+		t.Fatalf("update doc2 time: %v", err)
+	}
+	svc := NewDocumentService(knowledgeRepo.NewKnowledgeDocumentRepo(gdb), knowledgeRepo.NewKnowledgeChunkRepo(gdb), knowledgeRepo.NewKnowledgeBaseRepo(gdb), gdb, fakeEmbeddingService{}, &capturingVectorStore{}, nil)
+	records, err := svc.SearchDocuments(context.Background(), "Agent", 8)
+	if err != nil {
+		t.Fatalf("search documents: %v", err)
+	}
+	if len(records) != 2 || records[0].DocName != "老文档Agent.md" || records[1].DocName != "新文档Agent.md" {
+		t.Fatalf("expected update_time desc order, got %+v", records)
 	}
 }
 
@@ -686,11 +935,11 @@ func TestDocumentService_PersistChunksAndVectorsUsesPersistedChunkIDs(t *testing
 		t.Fatalf("persist chunks and vectors: %v", err)
 	}
 
-	if len(vecStore.chunks) != 2 {
-		t.Fatalf("expected 2 vector chunks, got %d", len(vecStore.chunks))
+	if len(vecStore.indexedChunks) != 2 {
+		t.Fatalf("expected 2 vector chunks, got %d", len(vecStore.indexedChunks))
 	}
 	seen := make(map[string]bool)
-	for _, c := range vecStore.chunks {
+	for _, c := range vecStore.indexedChunks {
 		if c.ChunkID == "" {
 			t.Fatal("expected vector chunk ID to be populated from persisted chunk ID")
 		}
@@ -735,10 +984,10 @@ func TestDocumentService_PersistChunksAndVectorsCompletesDocumentMetadata(t *tes
 		t.Fatalf("persist chunks and vectors: %v", err)
 	}
 
-	if len(vecStore.chunks) != 1 {
-		t.Fatalf("expected 1 vector chunk, got %d", len(vecStore.chunks))
+	if len(vecStore.indexedChunks) != 1 {
+		t.Fatalf("expected 1 vector chunk, got %d", len(vecStore.indexedChunks))
 	}
-	meta := vecStore.chunks[0].Metadata
+	meta := vecStore.indexedChunks[0].Metadata
 	if meta["doc_id"] != "doc-1" {
 		t.Fatalf("expected doc_id metadata, got %+v", meta)
 	}

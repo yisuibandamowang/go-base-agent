@@ -94,14 +94,18 @@ func (r *KnowledgeDocumentRepo) SearchDocs(ctx context.Context, keyword string, 
 		records []model.KnowledgeDocument
 		total   int64
 	)
-	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{})
+	countQuery := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{})
 	if keyword != "" {
-		query = query.Where("LOWER(doc_name) LIKE LOWER(?)", "%"+keyword+"%")
+		countQuery = countQuery.Where("LOWER(doc_name) LIKE LOWER(?)", "%"+keyword+"%")
 	}
-	if err := query.Count(&total).Error; err != nil {
+	if err := countQuery.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	if err := query.Scopes(db.Paginate(page, size)).Order("create_time DESC").Find(&records).Error; err != nil {
+	listQuery := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{})
+	if keyword != "" {
+		listQuery = listQuery.Where("LOWER(doc_name) LIKE LOWER(?)", "%"+keyword+"%")
+	}
+	if err := listQuery.Scopes(db.Paginate(page, size)).Order("update_time DESC").Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
 	return records, total, nil

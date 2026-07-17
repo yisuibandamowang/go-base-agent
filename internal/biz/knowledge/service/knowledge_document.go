@@ -47,6 +47,9 @@ type knowledgeBaseFinder interface {
 type vectorStore interface {
 	DeleteDocumentVectors(ctx context.Context, collectionName, docID string) error
 	IndexDocumentChunks(ctx context.Context, collectionName, docID string, chunks []rag.VectorChunk) error
+	UpdateChunk(ctx context.Context, collectionName, docID string, chunk rag.VectorChunk) error
+	DeleteChunkByID(ctx context.Context, collectionName, chunkID string) error
+	DeleteChunksByIDs(ctx context.Context, collectionName string, chunkIDs []string) error
 }
 
 // FileReader reads file content for chunk processing.
@@ -729,6 +732,57 @@ func completeVectorChunkMetadata(doc *model.KnowledgeDocument, chunk *rag.Vector
 	chunk.Metadata["chunk_index"] = fmt.Sprintf("%d", chunk.Index)
 }
 
+func (s *DocumentService) buildChunkVector(ctx context.Context, doc *model.KnowledgeDocument, kb *model.KnowledgeBase, chunk *model.KnowledgeChunk) (rag.VectorChunk, error) {
+	if s.emb == nil {
+		return rag.VectorChunk{}, fmt.Errorf("embedding service not configured")
+	}
+	vec, err := s.emb.EmbedWithModel(ctx, chunk.Content, kb.EmbeddingModel)
+	if err != nil {
+		return rag.VectorChunk{}, fmt.Errorf("embed chunk %s: %w", chunk.ID, err)
+	}
+	vecChunk := rag.VectorChunk{
+		ChunkID:   chunk.ID,
+		DocID:     doc.ID,
+		Content:   chunk.Content,
+		Embedding: vec,
+		Index:     chunk.ChunkIndex,
+	}
+	completeVectorChunkMetadata(doc, &vecChunk)
+	return vecChunk, nil
+}
+
+func (s *DocumentService) syncDocumentVectors(ctx context.Context, doc *model.KnowledgeDocument) error {
+	if s.vecStore == nil {
+		return nil
+	}
+	kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+	if err != nil {
+		return fmt.Errorf("知识库不存在: %w", err)
+	}
+	if err := s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID); err != nil {
+		return fmt.Errorf("delete document vectors: %w", err)
+	}
+	var chunks []model.KnowledgeChunk
+	if err := s.db.WithContext(ctx).Where("doc_id = ? AND deleted = 0", doc.ID).Order("chunk_index ASC").Find(&chunks).Error; err != nil {
+		return fmt.Errorf("load chunks: %w", err)
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
+	for i := range chunks {
+		vecChunk, err := s.buildChunkVector(ctx, doc, kb, &chunks[i])
+		if err != nil {
+			return err
+		}
+		vecChunks = append(vecChunks, vecChunk)
+	}
+	if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, vecChunks); err != nil {
+		return fmt.Errorf("index document vectors: %w", err)
+	}
+	return nil
+}
+
 func (s *DocumentService) markChunkFailed(ctx context.Context, docID string) {
 	s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", docID).
 		Updates(map[string]interface{}{"status": "failed", "update_time": time.Now()})
@@ -851,17 +905,37 @@ func (s *DocumentService) ToggleDocument(ctx context.Context, id string, enabled
 	}
 	before := s.docToResp(doc)
 	now := time.Now()
-	result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
-		Where("id = ? AND deleted = 0", id).
-		Updates(map[string]interface{}{"enabled": enabled, "update_time": now})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.KnowledgeDocument{}).
+			Where("id = ? AND deleted = 0", id).
+			Updates(map[string]interface{}{"enabled": enabled, "update_time": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return tx.Model(&model.KnowledgeChunk{}).
+			Where("doc_id = ? AND deleted = 0", id).
+			Updates(map[string]interface{}{"enabled": enabled, "update_time": now}).Error
+	}); err != nil {
+		return err
 	}
 	doc.Enabled = enabled
 	doc.UpdateTime = now
+	if enabled == 1 {
+		if err := s.syncDocumentVectors(ctx, doc); err != nil {
+			return err
+		}
+	} else if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return fmt.Errorf("知识库不存在: %w", err)
+		}
+		if err := s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID); err != nil {
+			return fmt.Errorf("delete document vectors: %w", err)
+		}
+	}
 	after := s.docToResp(doc)
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeDocument,
@@ -1025,11 +1099,38 @@ func (s *DocumentService) ToggleChunk(ctx context.Context, chunkID string, enabl
 	if err != nil {
 		return err
 	}
+	doc, err := s.docRepo.FindByID(ctx, chunk.DocID)
+	if err != nil {
+		return err
+	}
+	if enabled == 1 && doc.Enabled != 1 {
+		return fmt.Errorf("文档未启用，无法启用 Chunk")
+	}
 	before := s.chunkToResp(chunk)
 	if err := s.chunkRepo.UpdateEnabled(ctx, chunkID, enabled); err != nil {
 		return err
 	}
 	chunk.Enabled = enabled
+	chunk.UpdateTime = time.Now()
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, chunk.KbID)
+		if err != nil {
+			return fmt.Errorf("知识库不存在: %w", err)
+		}
+		if enabled == 1 {
+			vecChunk, err := s.buildChunkVector(ctx, doc, kb, chunk)
+			if err != nil {
+				return err
+			}
+			if err := s.vecStore.UpdateChunk(ctx, kb.CollectionName, chunk.DocID, vecChunk); err != nil {
+				return fmt.Errorf("update chunk vector: %w", err)
+			}
+		} else {
+			if err := s.vecStore.DeleteChunkByID(ctx, kb.CollectionName, chunk.ID); err != nil {
+				return fmt.Errorf("delete chunk vector: %w", err)
+			}
+		}
+	}
 	after := s.chunkToResp(chunk)
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeChunk,
@@ -1050,6 +1151,13 @@ func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, i
 	if len(ids) > 500 {
 		return fmt.Errorf("单次批量操作 Chunk 数量不能超过 500")
 	}
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return err
+	}
+	if enabled == 1 && doc.Enabled != 1 {
+		return fmt.Errorf("文档未启用，无法启用 Chunk")
+	}
 	var chunks []model.KnowledgeChunk
 	if err := s.db.WithContext(ctx).
 		Where("id IN ? AND deleted = 0", ids).
@@ -1067,6 +1175,25 @@ func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, i
 	}
 	if err := s.chunkRepo.BatchUpdateEnabled(ctx, docID, ids, enabled); err != nil {
 		return err
+	}
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return fmt.Errorf("知识库不存在: %w", err)
+		}
+		if enabled == 1 {
+			for i := range chunks {
+				vecChunk, err := s.buildChunkVector(ctx, doc, kb, &chunks[i])
+				if err != nil {
+					return err
+				}
+				if err := s.vecStore.UpdateChunk(ctx, kb.CollectionName, chunks[i].DocID, vecChunk); err != nil {
+					return fmt.Errorf("update chunk vector: %w", err)
+				}
+			}
+		} else if err := s.vecStore.DeleteChunksByIDs(ctx, kb.CollectionName, ids); err != nil {
+			return fmt.Errorf("delete chunk vectors: %w", err)
+		}
 	}
 	for i := range chunks {
 		before := s.chunkToResp(&chunks[i])
