@@ -23,7 +23,7 @@ func NewAdminHandler(svc *service.AdminService) *AdminHandler {
 
 // Dashboard GET /api/ragent/admin/dashboard
 func (h *AdminHandler) Dashboard(c *gin.Context) {
-	resp, err := h.svc.GetDashboard(c.Request.Context())
+	resp, err := h.svc.GetDashboard(c.Request.Context(), c.Query("window"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
@@ -33,7 +33,7 @@ func (h *AdminHandler) Dashboard(c *gin.Context) {
 
 // Performance GET /api/ragent/admin/dashboard/performance
 func (h *AdminHandler) Performance(c *gin.Context) {
-	resp, err := h.svc.GetPerformance(c.Request.Context())
+	resp, err := h.svc.GetPerformance(c.Request.Context(), c.Query("window"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
@@ -68,6 +68,9 @@ func (h *AdminHandler) ListTraceRuns(c *gin.Context) {
 // TraceDetail GET /api/ragent/admin/traces/:traceId
 func (h *AdminHandler) TraceDetail(c *gin.Context) {
 	traceID := c.Param("traceId")
+	if traceID == "" {
+		traceID = c.Param("id")
+	}
 	resp, err := h.svc.GetTraceDetail(c.Request.Context(), traceID)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))

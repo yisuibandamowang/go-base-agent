@@ -875,16 +875,37 @@ func (s *DocumentService) ToggleDocument(ctx context.Context, id string, enabled
 }
 
 // SearchDocuments 搜索文档。
-func (s *DocumentService) SearchDocuments(ctx context.Context, keyword string, page, size int) ([]dto.DocumentResp, int64, error) {
-	docs, total, err := s.docRepo.SearchDocs(ctx, keyword, page, size)
+func (s *DocumentService) SearchDocuments(ctx context.Context, keyword string, limit int) ([]dto.DocumentResp, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return []dto.DocumentResp{}, nil
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	docs, _, err := s.docRepo.SearchDocs(ctx, keyword, 1, limit)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
+	}
+	kbNames := map[string]string{}
+	for _, doc := range docs {
+		if _, ok := kbNames[doc.KbID]; ok {
+			continue
+		}
+		if kb, err := s.kbRepo.FindByID(ctx, doc.KbID); err == nil && kb != nil {
+			kbNames[doc.KbID] = kb.Name
+		}
 	}
 	records := make([]dto.DocumentResp, 0, len(docs))
 	for _, d := range docs {
-		records = append(records, *s.docToResp(&d))
+		resp := s.docToResp(&d)
+		resp.KbName = kbNames[d.KbID]
+		records = append(records, *resp)
 	}
-	return records, total, nil
+	return records, nil
 }
 
 // ListChunks 查询文档分块列表。
@@ -1024,14 +1045,25 @@ func (s *DocumentService) ToggleChunk(ctx context.Context, chunkID string, enabl
 // BatchToggleChunks 批量切换分块启用状态。
 func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, ids []string, enabled int16) error {
 	if len(ids) == 0 {
-		return nil
+		return fmt.Errorf("请指定需要操作的 Chunk，全量启用/禁用请使用文档启用接口")
+	}
+	if len(ids) > 500 {
+		return fmt.Errorf("单次批量操作 Chunk 数量不能超过 500")
 	}
 	var chunks []model.KnowledgeChunk
 	if err := s.db.WithContext(ctx).
-		Where("doc_id = ? AND id IN ? AND deleted = 0", docID, ids).
+		Where("id IN ? AND deleted = 0", ids).
 		Order("chunk_index ASC").
 		Find(&chunks).Error; err != nil {
 		return err
+	}
+	if len(chunks) != len(ids) {
+		return fmt.Errorf("存在无效的 Chunk ID，请求 %d 个，实际找到 %d 个", len(ids), len(chunks))
+	}
+	for i := range chunks {
+		if chunks[i].DocID != docID {
+			return fmt.Errorf("Chunk %s 不属于文档 %s", chunks[i].ID, docID)
+		}
 	}
 	if err := s.chunkRepo.BatchUpdateEnabled(ctx, docID, ids, enabled); err != nil {
 		return err

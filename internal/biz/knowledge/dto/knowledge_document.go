@@ -29,6 +29,7 @@ type UpdateDocumentReq struct {
 type DocumentResp struct {
 	ID              string `json:"id"`
 	KbID            string `json:"kbId"`
+	KbName          string `json:"kbName,omitempty"`
 	DocName         string `json:"docName"`
 	Enabled         int16  `json:"enabled"`
 	ChunkCount      int    `json:"chunkCount"`
@@ -79,8 +80,9 @@ type CreateChunkReq struct {
 
 // BatchEnableChunksReq 批量启用/禁用分块请求。
 type BatchEnableChunksReq struct {
-	IDs     []string `json:"ids" binding:"required"`
-	Enabled int16    `json:"enabled"`
+	IDs      []string `json:"ids"`
+	ChunkIDs []string `json:"chunkIds"`
+	Enabled  int16    `json:"enabled"`
 }
 
 // ToggleChunkReq 单个分块启用/禁用请求。

@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -233,24 +234,40 @@ func (h *DocumentHandler) DeleteDoc(c *gin.Context) {
 // SearchDocs GET /knowledge-base/docs/search
 func (h *DocumentHandler) SearchDocs(c *gin.Context) {
 	keyword := c.Query("keyword")
-	page, size := pagination(c)
-	records, total, err := h.svc.SearchDocuments(c.Request.Context(), keyword, page, size)
+	limit := parseSearchLimit(c)
+	records, err := h.svc.SearchDocuments(c.Request.Context(), keyword, limit)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(records, total, page, size)))
+	if len(records) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"code":    "0",
+			"data":    []dto.DocumentResp{},
+			"message": "",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(records))
 }
 
 // ToggleDoc PATCH /knowledge-base/docs/:docId/enable
 func (h *DocumentHandler) ToggleDoc(c *gin.Context) {
 	id := c.Param("docId")
-	var req dto.ToggleChunkReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
+	enabled, ok, err := enabledFromValueQuery(c)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", err.Error()))
 		return
 	}
-	if err := h.svc.ToggleDocument(c.Request.Context(), id, req.Enabled); err != nil {
+	if !ok {
+		var req dto.ToggleChunkReq
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
+			return
+		}
+		enabled = req.Enabled
+	}
+	if err := h.svc.ToggleDocument(c.Request.Context(), id, enabled); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
@@ -298,12 +315,20 @@ func (h *DocumentHandler) DeleteChunk(c *gin.Context) {
 // ToggleChunk PATCH /knowledge-base/docs/:docId/chunks/:chunkId/enable
 func (h *DocumentHandler) ToggleChunk(c *gin.Context) {
 	chunkID := c.Param("chunkId")
-	var req dto.ToggleChunkReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
+	enabled, ok, err := enabledFromValueQuery(c)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", err.Error()))
 		return
 	}
-	if err := h.svc.ToggleChunk(c.Request.Context(), chunkID, req.Enabled); err != nil {
+	if !ok {
+		var req dto.ToggleChunkReq
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
+			return
+		}
+		enabled = req.Enabled
+	}
+	if err := h.svc.ToggleChunk(c.Request.Context(), chunkID, enabled); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
@@ -318,11 +343,45 @@ func (h *DocumentHandler) BatchToggleChunks(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
 		return
 	}
-	if err := h.svc.BatchToggleChunks(c.Request.Context(), docID, req.IDs, req.Enabled); err != nil {
+	enabled, ok, err := enabledFromValueQuery(c)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", err.Error()))
+		return
+	}
+	if !ok {
+		enabled = req.Enabled
+	}
+	if len(req.IDs) == 0 {
+		req.IDs = req.ChunkIDs
+	}
+	if err := h.svc.BatchToggleChunks(c.Request.Context(), docID, req.IDs, enabled); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
+}
+
+func enabledFromValueQuery(c *gin.Context) (int16, bool, error) {
+	raw, ok := c.GetQuery("value")
+	if !ok {
+		return 0, false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true":
+		return 1, true, nil
+	case "0", "false":
+		return 0, true, nil
+	default:
+		return 0, true, fmt.Errorf("value参数必须为true或false")
+	}
+}
+
+func parseSearchLimit(c *gin.Context) int {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "8"))
+	if err != nil || limit < 1 {
+		return 8
+	}
+	return limit
 }
 
 // ChunkLogs GET /knowledge-base/docs/:docId/chunk-logs

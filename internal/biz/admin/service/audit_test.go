@@ -59,6 +59,129 @@ func TestAdminService_CreateUserRecordsAuditLog(t *testing.T) {
 	}
 }
 
+func TestAdminService_GetDashboardSupportsWindowOverviewShape(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}, &conversationModel.Conversation{}, &conversationModel.Message{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	for _, table := range []string{"t_knowledge_base", "t_knowledge_document", "t_knowledge_chunk", "t_knowledge_vector"} {
+		if err := gdb.Exec("CREATE TABLE " + table + " (id text primary key, deleted integer default 0, create_time datetime)").Error; err != nil {
+			t.Fatalf("create %s: %v", table, err)
+		}
+	}
+
+	now := time.Now()
+	prevWindow := now.Add(-25 * time.Hour)
+	inWindow := now.Add(-30 * time.Minute)
+	if err := gdb.Create(&userModel.User{Username: "u1", Password: "pwd", Role: "user"}).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	for _, conv := range []conversationModel.Conversation{
+		{ConversationID: "conv-current", UserID: "u1", Title: "current", LastTime: inWindow},
+		{ConversationID: "conv-prev", UserID: "u1", Title: "prev", LastTime: prevWindow},
+	} {
+		if err := gdb.Create(&conv).Error; err != nil {
+			t.Fatalf("seed conversation: %v", err)
+		}
+	}
+	if err := gdb.Model(&conversationModel.Conversation{}).Where("conversation_id = ?", "conv-current").
+		Updates(map[string]any{"create_time": inWindow, "update_time": inWindow}).Error; err != nil {
+		t.Fatalf("update current conversation time: %v", err)
+	}
+	if err := gdb.Model(&conversationModel.Conversation{}).Where("conversation_id = ?", "conv-prev").
+		Updates(map[string]any{"create_time": prevWindow, "update_time": prevWindow}).Error; err != nil {
+		t.Fatalf("update prev conversation time: %v", err)
+	}
+	for _, msg := range []conversationModel.Message{
+		{ConversationID: "conv-current", UserID: "u1", Role: "user", Content: "current"},
+		{ConversationID: "conv-prev", UserID: "u1", Role: "user", Content: "prev"},
+	} {
+		if err := gdb.Create(&msg).Error; err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+	}
+	if err := gdb.Model(&conversationModel.Message{}).Where("conversation_id = ?", "conv-current").
+		Updates(map[string]any{"create_time": inWindow, "update_time": inWindow}).Error; err != nil {
+		t.Fatalf("update current message time: %v", err)
+	}
+	if err := gdb.Model(&conversationModel.Message{}).Where("conversation_id = ?", "conv-prev").
+		Updates(map[string]any{"create_time": prevWindow, "update_time": prevWindow}).Error; err != nil {
+		t.Fatalf("update prev message time: %v", err)
+	}
+
+	svc := NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	resp, err := svc.GetDashboard(context.Background(), "24h")
+	if err != nil {
+		t.Fatalf("get dashboard: %v", err)
+	}
+	if resp.Window != "24h" || resp.CompareWindow != "prev_24h" || resp.UpdatedAt == 0 {
+		t.Fatalf("unexpected dashboard metadata: %+v", resp)
+	}
+	if resp.Kpis == nil || resp.Kpis.Sessions24h.Value != 1 || resp.Kpis.Sessions24h.Delta != 0 {
+		t.Fatalf("unexpected session kpis: %+v", resp.Kpis)
+	}
+	if resp.Kpis.TotalSessions.Value != 2 || resp.ConversationCount != 2 {
+		t.Fatalf("expected total sessions to keep old and new fields, got %+v", resp)
+	}
+}
+
+func TestAdminService_GetPerformanceSupportsWindowMetrics(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Message{}, &rag.TraceRunRecord{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Now()
+	inWindow := now.Add(-30 * time.Minute)
+	end := inWindow.Add(time.Second)
+	old := now.Add(-48 * time.Hour)
+	noDocReply := "未检索到与问题相关的文档内容。"
+	for _, msg := range []conversationModel.Message{
+		{ConversationID: "conv-perf", UserID: "u1", Role: "assistant", Content: noDocReply},
+		{ConversationID: "conv-old", UserID: "u1", Role: "assistant", Content: noDocReply},
+	} {
+		if err := gdb.Create(&msg).Error; err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+	}
+	if err := gdb.Model(&conversationModel.Message{}).Where("conversation_id = ?", "conv-perf").
+		Updates(map[string]any{"create_time": inWindow, "update_time": inWindow}).Error; err != nil {
+		t.Fatalf("update current message time: %v", err)
+	}
+	if err := gdb.Model(&conversationModel.Message{}).Where("conversation_id = ?", "conv-old").
+		Updates(map[string]any{"create_time": old, "update_time": old}).Error; err != nil {
+		t.Fatalf("update old message time: %v", err)
+	}
+	for _, run := range []rag.TraceRunRecord{
+		{ID: "run-fast", TraceID: "trace-fast", Status: "SUCCESS", StartTime: &inWindow, EndTime: &end, DurationMs: 1000, Deleted: 0},
+		{ID: "run-slow", TraceID: "trace-slow", Status: "SUCCESS", StartTime: &inWindow, EndTime: &end, DurationMs: 21000, Deleted: 0},
+		{ID: "run-error", TraceID: "trace-error", Status: "ERROR", StartTime: &inWindow, EndTime: &end, DurationMs: 0, Deleted: 0},
+		{ID: "run-old", TraceID: "trace-old", Status: "ERROR", StartTime: &old, EndTime: &old, DurationMs: 0, Deleted: 0},
+	} {
+		if err := gdb.Create(&run).Error; err != nil {
+			t.Fatalf("seed trace run: %v", err)
+		}
+	}
+
+	svc := NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	resp, err := svc.GetPerformance(context.Background(), "24h")
+	if err != nil {
+		t.Fatalf("get performance: %v", err)
+	}
+	if resp.Window != "24h" || resp.AvgLatencyMs != 11000 || resp.P95LatencyMs != 21000 {
+		t.Fatalf("unexpected latency metrics: %+v", resp)
+	}
+	if resp.SuccessRate != 66.7 || resp.ErrorRate != 33.3 || resp.NoDocRate != 100 || resp.SlowRate != 50 {
+		t.Fatalf("unexpected rate metrics: %+v", resp)
+	}
+}
+
 func TestAdminService_SampleQuestionRecordsAuditLogs(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

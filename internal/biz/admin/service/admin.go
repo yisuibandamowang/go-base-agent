@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,11 +47,41 @@ func (s *AdminService) SetAuditRecorder(recorder *auditService.BizChangeLogServi
 }
 
 // GetDashboard 获取仪表盘统计。
-func (s *AdminService) GetDashboard(ctx context.Context) (*adminDto.DashboardResp, error) {
+func (s *AdminService) GetDashboard(ctx context.Context, window string) (*adminDto.DashboardResp, error) {
 	stats, err := s.adminRepo.GetDashboard(ctx)
 	if err != nil {
 		return nil, err
 	}
+	rangeInfo := dashboardWindow(window, 24*time.Hour)
+	usersInWindow, err := s.countByTimeRange(ctx, "t_user", "create_time", rangeInfo.Start, rangeInfo.End)
+	if err != nil {
+		return nil, err
+	}
+	sessionsInWindow, err := s.countByTimeRange(ctx, "t_conversation", "create_time", rangeInfo.Start, rangeInfo.End)
+	if err != nil {
+		return nil, err
+	}
+	sessionsPrevWindow, err := s.countByTimeRange(ctx, "t_conversation", "create_time", rangeInfo.PrevStart, rangeInfo.PrevEnd)
+	if err != nil {
+		return nil, err
+	}
+	messagesInWindow, err := s.countByTimeRange(ctx, "t_message", "create_time", rangeInfo.Start, rangeInfo.End)
+	if err != nil {
+		return nil, err
+	}
+	messagesPrevWindow, err := s.countByTimeRange(ctx, "t_message", "create_time", rangeInfo.PrevStart, rangeInfo.PrevEnd)
+	if err != nil {
+		return nil, err
+	}
+	activeUsers, err := s.countDistinctUsersByTimeRange(ctx, rangeInfo.Start, rangeInfo.End)
+	if err != nil {
+		return nil, err
+	}
+	activeUsersPrev, err := s.countDistinctUsersByTimeRange(ctx, rangeInfo.PrevStart, rangeInfo.PrevEnd)
+	if err != nil {
+		return nil, err
+	}
+
 	return &adminDto.DashboardResp{
 		KnowledgeBaseCount: stats.KnowledgeBaseCount,
 		DocumentCount:      stats.DocumentCount,
@@ -59,6 +90,17 @@ func (s *AdminService) GetDashboard(ctx context.Context) (*adminDto.DashboardRes
 		ConversationCount:  stats.ConversationCount,
 		MessageCount:       stats.MessageCount,
 		VectorCount:        stats.VectorCount,
+		Window:             rangeInfo.Label,
+		CompareWindow:      rangeInfo.CompareLabel,
+		UpdatedAt:          time.Now().UnixMilli(),
+		Kpis: &adminDto.DashboardKpisResp{
+			TotalUsers:    dashboardKpi(stats.UserCount, usersInWindow, nil),
+			ActiveUsers:   dashboardKpi(activeUsers, activeUsers-activeUsersPrev, dashboardPct(activeUsers, activeUsersPrev)),
+			TotalSessions: dashboardKpi(stats.ConversationCount, sessionsInWindow, nil),
+			Sessions24h:   dashboardKpi(sessionsInWindow, sessionsInWindow-sessionsPrevWindow, dashboardPct(sessionsInWindow, sessionsPrevWindow)),
+			TotalMessages: dashboardKpi(stats.MessageCount, messagesInWindow, nil),
+			Messages24h:   dashboardKpi(messagesInWindow, messagesInWindow-messagesPrevWindow, dashboardPct(messagesInWindow, messagesPrevWindow)),
+		},
 	}, nil
 }
 
@@ -393,37 +435,159 @@ func (s *AdminService) recordAudit(ctx context.Context, req auditService.RecordR
 	}
 }
 
-// GetPerformance returns RAG performance metrics from trace runs.
-func (s *AdminService) GetPerformance(ctx context.Context) (*adminDto.PerformanceResp, error) {
-	type row struct {
-		Count      int64 `gorm:"column:cnt"`
-		AvgLatency int64 `gorm:"column:avg_latency"`
+type dashboardWindowRange struct {
+	Start        time.Time
+	End          time.Time
+	PrevStart    time.Time
+	PrevEnd      time.Time
+	Label        string
+	CompareLabel string
+}
+
+func dashboardWindow(window string, fallback time.Duration) dashboardWindowRange {
+	duration := parseDashboardWindow(window, fallback)
+	label := strings.TrimSpace(window)
+	if label == "" {
+		label = formatDashboardWindow(fallback)
 	}
+	end := time.Now()
+	start := end.Add(-duration)
+	return dashboardWindowRange{
+		Start:        start,
+		End:          end,
+		PrevStart:    start.Add(-duration),
+		PrevEnd:      start,
+		Label:        label,
+		CompareLabel: "prev_" + label,
+	}
+}
 
-	// Success count + avg latency
-	var success row
-	s.db.WithContext(ctx).Raw(
-		`SELECT count(*) as cnt, coalesce(avg(duration_ms),0)::bigint as avg_latency
-		 FROM t_rag_trace_run WHERE status='SUCCESS' AND deleted=0`,
-	).Scan(&success)
+func dashboardKpi(value, delta int64, deltaPct *float64) adminDto.DashboardKpiResp {
+	return adminDto.DashboardKpiResp{Value: value, Delta: delta, DeltaPct: deltaPct}
+}
 
-	// Error count
-	var errCount int64
-	s.db.WithContext(ctx).Raw(
-		`SELECT count(*) FROM t_rag_trace_run WHERE status='ERROR' AND deleted=0`,
-	).Scan(&errCount)
+func dashboardPct(current, prev int64) *float64 {
+	if prev <= 0 {
+		return nil
+	}
+	value := roundDashboard1(float64(current-prev) * 100 / float64(prev))
+	return &value
+}
 
-	total := success.Count + errCount
-	var successRate, errorRate float64
-	if total > 0 {
-		successRate = float64(success.Count) / float64(total) * 100
-		errorRate = float64(errCount) / float64(total) * 100
+func dashboardRate(part, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return roundDashboard1(float64(part) * 100 / float64(total))
+}
+
+func dashboardAverage(values []int64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var total int64
+	for _, value := range values {
+		total += value
+	}
+	return int64(math.Round(float64(total) / float64(len(values))))
+}
+
+func dashboardPercentile(values []int64, percentile float64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]int64(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(math.Ceil(float64(len(sorted))*percentile)) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+func (s *AdminService) countByTimeRange(ctx context.Context, table, timeColumn string, start, end time.Time) (int64, error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Table(table).
+		Where("deleted = 0 AND "+timeColumn+" >= ? AND "+timeColumn+" < ?", start, end).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count dashboard %s: %w", table, err)
+	}
+	return count, nil
+}
+
+func (s *AdminService) countDistinctUsersByTimeRange(ctx context.Context, start, end time.Time) (int64, error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Table("t_message").
+		Where("deleted = 0 AND create_time >= ? AND create_time < ?", start, end).
+		Distinct("user_id").
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count dashboard active users: %w", err)
+	}
+	return count, nil
+}
+
+func (s *AdminService) countAssistantMessages(ctx context.Context, start, end time.Time, exactContent string) (int64, error) {
+	query := s.db.WithContext(ctx).Table("t_message").
+		Where("deleted = 0 AND create_time >= ? AND create_time < ? AND role = ?", start, end, "assistant")
+	if exactContent != "" {
+		query = query.Where("content = ?", exactContent)
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count dashboard assistant messages: %w", err)
+	}
+	return count, nil
+}
+
+// GetPerformance returns RAG performance metrics from trace runs.
+func (s *AdminService) GetPerformance(ctx context.Context, window string) (*adminDto.PerformanceResp, error) {
+	rangeInfo := dashboardWindow(window, 24*time.Hour)
+	rows, err := s.listTraceRows(ctx, rangeInfo.Start, rangeInfo.End)
+	if err != nil {
+		return nil, err
+	}
+	durations := make([]int64, 0, len(rows))
+	var successCount, errorCount int64
+	for _, row := range rows {
+		if row.Status == "SUCCESS" {
+			successCount++
+			if row.DurationMs > 0 {
+				durations = append(durations, row.DurationMs)
+			}
+			continue
+		}
+		if row.Status == "ERROR" {
+			errorCount++
+		}
+	}
+	total := successCount + errorCount
+
+	assistantCount, err := s.countAssistantMessages(ctx, rangeInfo.Start, rangeInfo.End, "")
+	if err != nil {
+		return nil, err
+	}
+	noDocCount, err := s.countAssistantMessages(ctx, rangeInfo.Start, rangeInfo.End, "未检索到与问题相关的文档内容。")
+	if err != nil {
+		return nil, err
+	}
+	var slowCount int64
+	for _, duration := range durations {
+		if duration > 20000 {
+			slowCount++
+		}
 	}
 
 	return &adminDto.PerformanceResp{
-		AvgLatencyMs: success.AvgLatency,
-		SuccessRate:  successRate,
-		ErrorRate:    errorRate,
+		Window:       rangeInfo.Label,
+		AvgLatencyMs: dashboardAverage(durations),
+		P95LatencyMs: dashboardPercentile(durations, 0.95),
+		SuccessRate:  dashboardRate(successCount, total),
+		ErrorRate:    dashboardRate(errorCount, total),
+		NoDocRate:    dashboardRate(noDocCount, assistantCount),
+		SlowRate:     dashboardRate(slowCount, int64(len(durations))),
 		TotalTraces:  total,
 	}, nil
 }

@@ -96,7 +96,7 @@ func (r *KnowledgeDocumentRepo) SearchDocs(ctx context.Context, keyword string, 
 	)
 	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{})
 	if keyword != "" {
-		query = query.Where("doc_name ILIKE ?", "%"+keyword+"%")
+		query = query.Where("LOWER(doc_name) LIKE LOWER(?)", "%"+keyword+"%")
 	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err

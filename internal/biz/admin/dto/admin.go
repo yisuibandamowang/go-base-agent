@@ -4,13 +4,34 @@ import "time"
 
 // DashboardResp 仪表盘统计响应。
 type DashboardResp struct {
-	KnowledgeBaseCount int64 `json:"knowledgeBaseCount"`
-	DocumentCount      int64 `json:"documentCount"`
-	ChunkCount         int64 `json:"chunkCount"`
-	UserCount          int64 `json:"userCount"`
-	ConversationCount  int64 `json:"conversationCount"`
-	MessageCount       int64 `json:"messageCount"`
-	VectorCount        int64 `json:"vectorCount"`
+	KnowledgeBaseCount int64              `json:"knowledgeBaseCount"`
+	DocumentCount      int64              `json:"documentCount"`
+	ChunkCount         int64              `json:"chunkCount"`
+	UserCount          int64              `json:"userCount"`
+	ConversationCount  int64              `json:"conversationCount"`
+	MessageCount       int64              `json:"messageCount"`
+	VectorCount        int64              `json:"vectorCount"`
+	Window             string             `json:"window,omitempty"`
+	CompareWindow      string             `json:"compareWindow,omitempty"`
+	UpdatedAt          int64              `json:"updatedAt,omitempty"`
+	Kpis               *DashboardKpisResp `json:"kpis,omitempty"`
+}
+
+// DashboardKpisResp 仪表盘 KPI 分组。
+type DashboardKpisResp struct {
+	TotalUsers    DashboardKpiResp `json:"totalUsers"`
+	ActiveUsers   DashboardKpiResp `json:"activeUsers"`
+	TotalSessions DashboardKpiResp `json:"totalSessions"`
+	Sessions24h   DashboardKpiResp `json:"sessions24h"`
+	TotalMessages DashboardKpiResp `json:"totalMessages"`
+	Messages24h   DashboardKpiResp `json:"messages24h"`
+}
+
+// DashboardKpiResp 仪表盘单个 KPI。
+type DashboardKpiResp struct {
+	Value    int64    `json:"value"`
+	Delta    int64    `json:"delta"`
+	DeltaPct *float64 `json:"deltaPct"`
 }
 
 // TraceRunResp 链路追踪运行记录响应。
@@ -103,9 +124,13 @@ type UserResp struct {
 // PerformanceResp RAG 性能统计响应。
 type PerformanceResp struct {
 	AvgLatencyMs int64   `json:"avgLatencyMs"`
+	P95LatencyMs int64   `json:"p95LatencyMs"`
 	SuccessRate  float64 `json:"successRate"`
 	ErrorRate    float64 `json:"errorRate"`
+	NoDocRate    float64 `json:"noDocRate"`
+	SlowRate     float64 `json:"slowRate"`
 	TotalTraces  int64   `json:"totalTraces"`
+	Window       string  `json:"window,omitempty"`
 }
 
 // TrendsResp 趋势数据响应。
