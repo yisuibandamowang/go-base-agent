@@ -67,7 +67,7 @@ type ParsedDocument struct {
 type DocumentParser interface {
 	Type() ParserType
 	Supports(mimeType string) bool
-	Parse(ctx context.Context, data []byte, mimeType string) (*ParsedDocument, error)
+	Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*ParsedDocument, error)
 }
 
 // NoopParser is a fallback parser that returns raw text as a single paragraph.
@@ -75,7 +75,7 @@ type NoopParser struct{}
 
 func (n *NoopParser) Type() ParserType              { return ParserTika }
 func (n *NoopParser) Supports(mimeType string) bool { return true }
-func (n *NoopParser) Parse(ctx context.Context, data []byte, mimeType string) (*ParsedDocument, error) {
+func (n *NoopParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*ParsedDocument, error) {
 	return &ParsedDocument{
 		Blocks: []Block{{Type: BlockParagraph, Content: string(data)}},
 	}, nil

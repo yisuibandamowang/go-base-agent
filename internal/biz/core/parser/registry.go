@@ -29,19 +29,19 @@ func (r *Registry) Register(p rag.DocumentParser) {
 
 // Parse 根据 MIME 类型自动选择解析器解析文档。
 // 如果找不到匹配的解析器，使用 fallback；未配置 fallback 时返回不支持格式错误。
-func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	for _, p := range r.parsers {
 		if p.Supports(mimeType) {
-			return p.Parse(ctx, data, mimeType)
+			return p.Parse(ctx, data, mimeType, options)
 		}
 	}
 	if r.fallback == nil {
 		return nil, ErrUnsupportedFormat
 	}
-	return r.fallback.Parse(ctx, data, mimeType)
+	return r.fallback.Parse(ctx, data, mimeType, options)
 }
 
 // Supports 检查是否有解析器支持给定 MIME 类型。

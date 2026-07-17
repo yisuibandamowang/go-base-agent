@@ -27,16 +27,17 @@ import (
 
 // DocumentService 文档管理业务逻辑层。
 type DocumentService struct {
-	docRepo       *repo.KnowledgeDocumentRepo
-	chunkRepo     *repo.KnowledgeChunkRepo
-	scheduleRepo  *repo.KnowledgeDocumentScheduleRepo
-	kbRepo        knowledgeBaseFinder
-	db            *gorm.DB
-	emb           embedding.Service
-	vecStore      vectorStore
-	fileStore     FileReader
-	ingestion     ingestionTaskStarter
-	auditRecorder *auditService.BizChangeLogService
+	docRepo        *repo.KnowledgeDocumentRepo
+	chunkRepo      *repo.KnowledgeChunkRepo
+	scheduleRepo   *repo.KnowledgeDocumentScheduleRepo
+	kbRepo         knowledgeBaseFinder
+	db             *gorm.DB
+	emb            embedding.Service
+	vecStore       vectorStore
+	fileStore      FileReader
+	ingestion      ingestionTaskStarter
+	auditRecorder  *auditService.BizChangeLogService
+	parserRegistry *parser.Registry
 }
 
 type knowledgeBaseFinder interface {
@@ -91,6 +92,11 @@ func (s *DocumentService) SetIngestionTaskStarter(starter ingestionTaskStarter) 
 // SetAuditRecorder 设置审计日志记录器。
 func (s *DocumentService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
 	s.auditRecorder = recorder
+}
+
+// SetParserRegistry 设置文档解析器注册表。
+func (s *DocumentService) SetParserRegistry(registry *parser.Registry) {
+	s.parserRegistry = registry
 }
 
 // CreateDocument 创建文档记录，状态为 pending。
@@ -379,7 +385,17 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 	}
 
 	// 2. 文档解析：按 MIME/文件类型选择解析器，保留结构化 blocks
-	parsed, err := parser.DefaultRegistry().Parse(ctx, fileBytes, detectDocumentMIME(doc))
+	registry := s.parserRegistry
+	if registry == nil {
+		registry = parser.DefaultRegistry()
+	}
+	parsed, err := registry.Parse(ctx, fileBytes, detectDocumentMIME(doc), map[string]string{
+		"sourceFile":    doc.DocName,
+		"documentId":    doc.ID,
+		"sourceURL":     documentSourceURL(doc),
+		"sourceType":    doc.SourceType,
+		"knowledgeBase": doc.KbID,
+	})
 	if err != nil {
 		return 0, 0, 0, nil, fmt.Errorf("文件解析失败: %w", err)
 	}
@@ -528,6 +544,12 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 		return "text/plain"
 	case "json":
 		return "application/json"
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "svg":
+		return "image/svg+xml"
 	default:
 		ext := strings.ToLower(filepath.Ext(doc.DocName))
 		switch ext {
@@ -545,6 +567,12 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 			return "text/html"
 		case ".json":
 			return "application/json"
+		case ".png":
+			return "image/png"
+		case ".jpg", ".jpeg":
+			return "image/jpeg"
+		case ".svg":
+			return "image/svg+xml"
 		default:
 			return "text/plain"
 		}

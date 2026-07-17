@@ -15,7 +15,7 @@ func TestNoopParser(t *testing.T) {
 		t.Fatal("noop should support everything")
 	}
 
-	doc, err := p.Parse(context.Background(), []byte("hello world"), "text/plain")
+	doc, err := p.Parse(context.Background(), []byte("hello world"), "text/plain", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

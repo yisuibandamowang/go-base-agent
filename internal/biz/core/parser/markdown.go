@@ -17,7 +17,7 @@ func (p *MarkdownParser) Supports(mimeType string) bool {
 		strings.HasSuffix(mimeType, "/markdown")
 }
 
-func (p *MarkdownParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *MarkdownParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	blocks := parseMarkdownBlocks(string(data))
 	return &rag.ParsedDocument{Blocks: blocks, Metadata: map[string]string{"mime": mimeType}}, nil
 }

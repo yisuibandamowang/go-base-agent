@@ -18,6 +18,7 @@ type Config struct {
 	Redis    RedisConfig    `mapstructure:"redis"`
 	RocketMQ RocketMQConfig `mapstructure:"rocketmq"`
 	Milvus   MilvusConfig   `mapstructure:"milvus"`
+	MinerU   MinerUConfig   `mapstructure:"mineru"`
 	RAG      RAGConfig      `mapstructure:"rag"`
 	AI       AIConfig       `mapstructure:"ai"`
 	RustFS   RustFSConfig   `mapstructure:"rustfs"`
@@ -78,6 +79,18 @@ type RocketMQProducerConfig struct {
 
 type MilvusConfig struct {
 	URI string `mapstructure:"uri"`
+}
+
+type MinerUConfig struct {
+	APIURL           string `mapstructure:"api-url"`
+	APIKey           string `mapstructure:"api-key"`
+	PollIntervalSecs int    `mapstructure:"poll-interval-seconds"`
+	TimeoutSecs      int    `mapstructure:"timeout-seconds"`
+	EnableTable      bool   `mapstructure:"enable-table"`
+	EnableFormula    bool   `mapstructure:"enable-formula"`
+	OCR              bool   `mapstructure:"ocr"`
+	Language         string `mapstructure:"language"`
+	ConcurrencyLimit int64  `mapstructure:"concurrency-limit"`
 }
 
 type RAGConfig struct {

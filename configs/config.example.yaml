@@ -206,6 +206,17 @@ ai:
         model: noop
         priority: 100
 
+mineru:
+  api-url: ${MINERU_API_URL:https://mineru.net/api/v4}
+  api-key: ${MINERU_API_KEY:}
+  poll-interval-seconds: 5
+  timeout-seconds: 300
+  enable-table: true
+  enable-formula: true
+  ocr: false
+  language: ch
+  concurrency-limit: 16
+
 rustfs:
   url: ${RUSTFS_URL}
   access-key-id: ${RUSTFS_ACCESS_KEY_ID}

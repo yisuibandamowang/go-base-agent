@@ -24,7 +24,7 @@ func (p *PDFParser) Supports(mimeType string) bool {
 	return mimeType == "application/pdf"
 }
 
-func (p *PDFParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *PDFParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -62,7 +62,7 @@ func (p *DOCXParser) Supports(mimeType string) bool {
 		strings.Contains(mimeType, "wordprocessingml")
 }
 
-func (p *DOCXParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *DOCXParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

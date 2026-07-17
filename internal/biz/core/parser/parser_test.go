@@ -22,7 +22,7 @@ func TestPDFParserExtractsText(t *testing.T) {
 		t.Fatalf("create pdf: %v", err)
 	}
 
-	parsed, err := (&PDFParser{}).Parse(context.Background(), buf.Bytes(), "application/pdf")
+	parsed, err := (&PDFParser{}).Parse(context.Background(), buf.Bytes(), "application/pdf", nil)
 	if err != nil {
 		t.Fatalf("parse pdf: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestDOCXParserExtractsDocumentText(t *testing.T) {
 </w:document>`,
 	})
 
-	parsed, err := (&DOCXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	parsed, err := (&DOCXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", nil)
 	if err != nil {
 		t.Fatalf("parse docx: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestDOCXParserExtractsDocumentText(t *testing.T) {
 }
 
 func TestCSVParserProducesTableBlock(t *testing.T) {
-	parsed, err := (&CSVParser{}).Parse(context.Background(), []byte("能力,说明\n权益查询,\"查看等级, 权益\"\n积分查询,查看积分"), "text/csv")
+	parsed, err := (&CSVParser{}).Parse(context.Background(), []byte("能力,说明\n权益查询,\"查看等级, 权益\"\n积分查询,查看积分"), "text/csv", nil)
 	if err != nil {
 		t.Fatalf("parse csv: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestXLSXParserProducesTableBlock(t *testing.T) {
 </worksheet>`,
 	})
 
-	parsed, err := (&XLSXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	parsed, err := (&XLSXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil)
 	if err != nil {
 		t.Fatalf("parse xlsx: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestXLSXParserProducesTableBlock(t *testing.T) {
 
 func TestMarkdownParserProducesStructuredBlocks(t *testing.T) {
 	md := "# 会员 Agent\n\n- 权益查询\n- 积分查询\n\n| 能力 | 说明 |\n| --- | --- |\n| 错误排查 | 支持 |\n"
-	parsed, err := (&MarkdownParser{}).Parse(context.Background(), []byte(md), "text/markdown")
+	parsed, err := (&MarkdownParser{}).Parse(context.Background(), []byte(md), "text/markdown", nil)
 	if err != nil {
 		t.Fatalf("parse markdown: %v", err)
 	}
@@ -124,6 +124,76 @@ func TestDefaultRegistryRegistersConcreteParsers(t *testing.T) {
 	if !reg.Supports("text/csv") || !reg.Supports("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
 		t.Fatalf("default registry should support csv and xlsx")
 	}
+}
+
+func TestImageParserParsesImageWithDescriptionAndAsset(t *testing.T) {
+	vlmSvc := &fakeVLMService{desc: "这是一张会员能力说明图片"}
+	uploader := &fakeUploader{url: "https://assets.example.com/image.png"}
+	p := NewImageParser(vlmSvc, uploader)
+
+	parsed, err := p.Parse(context.Background(), []byte("fake-image"), "image/png", map[string]string{
+		"sourceFile": "会员能力.png",
+		"documentId": "doc-1",
+	})
+	if err != nil {
+		t.Fatalf("parse image: %v", err)
+	}
+	if len(parsed.Blocks) != 1 || parsed.Blocks[0].Type != rag.BlockImage {
+		t.Fatalf("expected one image block, got %+v", parsed.Blocks)
+	}
+	if got := parsed.Blocks[0].Description; got != "这是一张会员能力说明图片" {
+		t.Fatalf("unexpected description: %q", got)
+	}
+	if got := parsed.Blocks[0].Asset.PublicURL; got != uploader.url {
+		t.Fatalf("unexpected asset url: %q", got)
+	}
+	if vlmSvc.calls != 1 {
+		t.Fatalf("expected one VLM call, got %d", vlmSvc.calls)
+	}
+	if uploader.calls != 1 {
+		t.Fatalf("expected one upload call, got %d", uploader.calls)
+	}
+}
+
+func TestMinerUResultUnpackerRewritesImageLinks(t *testing.T) {
+	data := zipBytes(t, map[string]string{
+		"result.md":       "## 标题\n\n![图 1](images/fig1.png)\n\n正文说明",
+		"images/fig1.png": "png-bytes",
+	})
+	uploader := &fakeUploader{url: "https://assets.example.com/fig1.png"}
+	unpacker := NewMinerUResultUnpacker(uploader)
+
+	parsed, err := unpacker.Unpack(context.Background(), data, "会员能力说明.md", "doc-1")
+	if err != nil {
+		t.Fatalf("unpack mineru zip: %v", err)
+	}
+	text := rag.RenderBlocks(parsed.Blocks)
+	if !strings.Contains(text, uploader.url) {
+		t.Fatalf("expected rewritten image url, got %q", text)
+	}
+	if parsed.Metadata["imagesUploaded"] != "1" {
+		t.Fatalf("expected one uploaded image, got %+v", parsed.Metadata)
+	}
+}
+
+type fakeVLMService struct {
+	desc  string
+	calls int
+}
+
+func (f *fakeVLMService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string) (string, error) {
+	f.calls++
+	return f.desc, nil
+}
+
+type fakeUploader struct {
+	url   string
+	calls int
+}
+
+func (f *fakeUploader) Upload(ctx context.Context, key string, data []byte, contentType string) (string, error) {
+	f.calls++
+	return f.url, nil
 }
 
 func zipBytes(t *testing.T, files map[string]string) []byte {

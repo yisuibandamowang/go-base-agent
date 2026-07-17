@@ -19,7 +19,7 @@ func (p *CSVParser) Supports(mimeType string) bool {
 	return mimeType == "text/csv" || mimeType == "application/csv"
 }
 
-func (p *CSVParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *CSVParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

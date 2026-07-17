@@ -35,7 +35,7 @@ func (p *TikaParser) Supports(mimeType string) bool {
 	return true
 }
 
-func (p *TikaParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *TikaParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, p.url+"/tika", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tika request: %w", err)

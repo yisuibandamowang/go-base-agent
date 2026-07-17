@@ -20,6 +20,7 @@ import (
 	conversationHandler "go-base-agent/internal/biz/conversation/handler"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
+	coreparser "go-base-agent/internal/biz/core/parser"
 	"go-base-agent/internal/biz/crawler"
 	ingestionHandler "go-base-agent/internal/biz/ingestion/handler"
 	ingestionRepo "go-base-agent/internal/biz/ingestion/repo"
@@ -45,6 +46,8 @@ import (
 	"go-base-agent/internal/infra/embedding"
 	"go-base-agent/internal/infra/model"
 	"go-base-agent/internal/infra/rerank"
+	"go-base-agent/internal/infra/storage"
+	"go-base-agent/internal/infra/vlm"
 
 	"github.com/gin-gonic/gin"
 )
@@ -105,7 +108,7 @@ func main() {
 		documentUploadMaxWait = time.Second
 	}
 
-	llmService, embService, rerankService := setupAI(cfg, logger)
+	llmService, embService, rerankService, vlmService, hasVLM := setupAI(cfg, logger)
 	mqProducer, mqConsumer, shutdownMQ := setupMQ(cfg.RocketMQ)
 	defer shutdownMQ()
 	_ = mqProducer
@@ -132,6 +135,9 @@ func main() {
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, rag.NewPgVectorStore(gormDB), fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)
+	if parserRegistry := buildDocumentParserRegistry(cfg, vlmService, hasVLM, fileStore); parserRegistry != nil {
+		docSvc.SetParserRegistry(parserRegistry)
+	}
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
 
@@ -532,6 +538,15 @@ func splitCSV(value string) []string {
 	return out
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func registerStatusRoutes(r *gin.Engine) {
 	healthHandler := func(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Success("ok"))
@@ -552,7 +567,7 @@ func registerStatusRoutes(r *gin.Engine) {
 	})
 }
 
-func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service, rerank.Service) {
+func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service, rerank.Service, vlm.Service, bool) {
 	aiCfg := cfg.AI
 
 	health := model.NewHealthStore(aiCfg.Selection)
@@ -577,13 +592,17 @@ func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embeddin
 	rerankClients := buildRerankClients(aiCfg)
 	rerankService := rerank.NewRoutingRerankService(executor, selector, rerankClients)
 
+	vlmClients := buildVlmClients(aiCfg)
+	vlmService := vlm.NewRoutingService(selector, executor, vlmClients)
+
 	logger.Info("ai infra wired",
 		"chat_providers", len(chatClients),
 		"embed_providers", len(embClients),
 		"rerank_providers", len(rerankClients),
+		"vlm_providers", len(vlmClients),
 	)
 
-	return llmService, embService, rerankService
+	return llmService, embService, rerankService, vlmService, len(vlmClients) > 0
 }
 
 func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
@@ -628,6 +647,58 @@ func buildRerankClients(aiCfg config.AIConfig) []rerank.Client {
 	}
 	clients = append(clients, &rerank.NoopClient{})
 	return clients
+}
+
+func buildVlmClients(aiCfg config.AIConfig) []vlm.Client {
+	var clients []vlm.Client
+	for name, provider := range aiCfg.Providers {
+		switch provider.Protocol {
+		case "openai-compatible":
+			clients = append(clients, vlm.NewOpenAICompatibleClient(name, nil))
+		case "noop":
+		default:
+			slog.Warn("unknown vlm protocol, skipping", "provider", name, "protocol", provider.Protocol)
+		}
+	}
+	return clients
+}
+
+func buildDocumentParserRegistry(cfg *config.Config, vlmService vlm.Service, hasVLM bool, fileStore *knowledgeHandler.FileStore) *coreparser.Registry {
+	reg := coreparser.NewRegistry(nil)
+	assetUploader, err := storage.NewRustFSUploader(context.Background(), cfg.RustFS, cfg.RustFS.AssetBucket)
+	if strings.TrimSpace(cfg.MinerU.APIKey) != "" {
+		minerUClient := coreparser.NewMinerUClient(firstNonEmpty(cfg.MinerU.APIURL, "https://mineru.net/api/v4"), cfg.MinerU.APIKey, nil)
+		var uploader storage.Uploader
+		if assetUploader != nil {
+			uploader = assetUploader
+		}
+		unpacker := coreparser.NewMinerUResultUnpacker(uploader)
+		opts := coreparser.MinerUOptions{
+			PollInterval:     time.Duration(cfg.MinerU.PollIntervalSecs) * time.Second,
+			Timeout:          time.Duration(cfg.MinerU.TimeoutSecs) * time.Second,
+			EnableTable:      cfg.MinerU.EnableTable,
+			EnableFormula:    cfg.MinerU.EnableFormula,
+			OCR:              cfg.MinerU.OCR,
+			Language:         firstNonEmpty(cfg.MinerU.Language, "ch"),
+			ConcurrencyLimit: cfg.MinerU.ConcurrencyLimit,
+		}
+		reg.Register(coreparser.NewMinerUParser(minerUClient, unpacker, opts))
+	}
+	if err == nil && vlmService != nil && hasVLM {
+		reg.Register(coreparser.NewImageParser(vlmService, assetUploader))
+	} else if err != nil {
+		slog.Warn("asset uploader unavailable, image parser disabled", "err", err)
+	}
+
+	reg.Register(&coreparser.MarkdownParser{})
+	reg.Register(&coreparser.CSVParser{})
+	reg.Register(&coreparser.XLSXParser{})
+	reg.Register(&coreparser.PDFParser{})
+	reg.Register(&coreparser.DOCXParser{})
+	reg.Register(&coreparser.PlainTextParser{})
+
+	_ = fileStore
+	return reg
 }
 
 func embeddingDimension(aiCfg config.AIConfig) int {

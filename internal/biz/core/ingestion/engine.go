@@ -36,7 +36,7 @@ func (e *DefaultEngine) Run(ctx context.Context, taskID, collectionName, docID s
 	start := time.Now()
 	slog.Info("ingestion pipeline started", "taskID", taskID, "docID", docID, "mime", mimeType, "size", len(data))
 
-	parsed, err := e.registry.Parse(ctx, data, mimeType)
+	parsed, err := e.registry.Parse(ctx, data, mimeType, map[string]string{})
 	if err != nil {
 		return nil, fmt.Errorf("parse failed: %w", err)
 	}

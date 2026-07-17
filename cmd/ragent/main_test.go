@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -281,6 +283,78 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	if aiCfg["chat"].(map[string]any)["defaultModel"].(string) != "qwen3-max" {
 		t.Fatalf("unexpected chat config: %#v", aiCfg["chat"])
 	}
+}
+
+func TestBuildDocumentParserRegistryPrefersMinerUForPdf(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file-urls/batch":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"batch_id":"batch-1","file_urls":["` + server.URL + `/upload-1"]}}`))
+		case "/extract-results/batch/batch-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"extract_result":[{"state":"SUCCEEDED","full_zip_url":"` + server.URL + `/zip-1","err_msg":""}]}}`))
+		case "/upload-1":
+			w.WriteHeader(http.StatusOK)
+		case "/zip-1":
+			_, _ = w.Write(testMinerUZipBytes(t))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		MinerU: config.MinerUConfig{
+			APIURL:           server.URL,
+			APIKey:           "token",
+			PollIntervalSecs: 1,
+			TimeoutSecs:      5,
+			EnableTable:      true,
+			EnableFormula:    true,
+			Language:         "ch",
+		},
+		RustFS: config.RustFSConfig{
+			URL:             "http://localhost:9000",
+			AccessKeyID:     "key",
+			SecretAccessKey: "secret",
+			KBBucket:        "kb",
+			AssetBucket:     "assets",
+		},
+	}
+
+	reg := buildDocumentParserRegistry(cfg, nil, false, nil)
+	parsed, err := reg.Parse(context.Background(), []byte("pdf-bytes"), "application/pdf", map[string]string{
+		"sourceFile": "会员能力.pdf",
+		"documentId": "doc-1",
+	})
+	if err != nil {
+		t.Fatalf("parse pdf via registry: %v", err)
+	}
+	if parsed.Metadata["parser"] != string(rag.ParserMinerU) {
+		t.Fatalf("expected mineru parser, got %+v", parsed.Metadata)
+	}
+	if !strings.Contains(rag.RenderBlocks(parsed.Blocks), "MinerU 解析成功") {
+		t.Fatalf("expected mineru markdown content, got %+v", parsed.Blocks)
+	}
+}
+
+func testMinerUZipBytes(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("result.md")
+	if err != nil {
+		t.Fatalf("zip create: %v", err)
+	}
+	if _, err := w.Write([]byte("# MinerU\n\nMinerU 解析成功")); err != nil {
+		t.Fatalf("zip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func TestDemoRoutes(t *testing.T) {

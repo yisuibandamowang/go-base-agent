@@ -23,7 +23,7 @@ func (p *XLSXParser) Supports(mimeType string) bool {
 		strings.Contains(mimeType, "spreadsheetml")
 }
 
-func (p *XLSXParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *XLSXParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

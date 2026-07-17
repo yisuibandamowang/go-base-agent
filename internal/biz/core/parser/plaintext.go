@@ -19,7 +19,7 @@ func (p *PlainTextParser) Supports(mimeType string) bool {
 	return false
 }
 
-func (p *PlainTextParser) Parse(ctx context.Context, data []byte, mimeType string) (*rag.ParsedDocument, error) {
+func (p *PlainTextParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	return &rag.ParsedDocument{
 		Blocks:   []rag.Block{{Type: rag.BlockParagraph, Content: string(data)}},
 		Metadata: map[string]string{"mime": mimeType},
