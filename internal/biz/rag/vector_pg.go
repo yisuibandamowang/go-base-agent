@@ -28,6 +28,8 @@ type PgVectorStore struct {
 	db *gorm.DB
 }
 
+var _ VectorStore = (*PgVectorStore)(nil)
+
 // NewPgVectorStore 创建 PgVectorStore。
 func NewPgVectorStore(db *gorm.DB) *PgVectorStore {
 	return &PgVectorStore{db: db}
@@ -90,15 +92,39 @@ func (s *PgVectorStore) DeleteChunksByIDs(ctx context.Context, collectionName st
 		Delete(&pgVectorRow{}).Error
 }
 
+// EnsureVectorSpace keeps pgvector compatible with the VectorStore admin API.
+func (s *PgVectorStore) EnsureVectorSpace(ctx context.Context, spec VectorSpaceSpec) error {
+	return nil
+}
+
+// VectorSpaceExists returns true for pgvector logical collections.
+func (s *PgVectorStore) VectorSpaceExists(ctx context.Context, spaceID VectorSpaceID) (bool, error) {
+	return true, nil
+}
+
+// DropVectorSpace deletes all vectors under one logical pgvector collection.
+func (s *PgVectorStore) DropVectorSpace(ctx context.Context, collectionName string) error {
+	if collectionName == "" {
+		return nil
+	}
+	return s.db.WithContext(ctx).
+		Where("collection_name = ?", collectionName).
+		Delete(&pgVectorRow{}).Error
+}
+
 // Search 向量相似度搜索。
 func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec []float32, topK int) ([]VectorChunk, error) {
-	var rows []pgVectorRow
+	type searchRow struct {
+		pgVectorRow
+		Score float64 `gorm:"column:score"`
+	}
+	var rows []searchRow
 	err := s.db.WithContext(ctx).Raw(
-		`SELECT * FROM t_knowledge_vector 
+		`SELECT *, 1 - (embedding <=> ?) AS score FROM t_knowledge_vector 
 		 WHERE collection_name = ? 
 		 ORDER BY embedding <=> ? 
 		 LIMIT ?`,
-		collectionName, vecToString(vec), topK,
+		vecToString(vec), collectionName, vecToString(vec), topK,
 	).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
@@ -109,6 +135,7 @@ func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec [
 			ChunkID:   r.ID,
 			Content:   r.Content,
 			Embedding: stringToVec(r.Embedding),
+			Score:     r.Score,
 			Metadata:  parseVectorMetadata(r.Metadata),
 		})
 	}

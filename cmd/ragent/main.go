@@ -127,12 +127,17 @@ func main() {
 	docRepo := knowledgeRepo.NewKnowledgeDocumentRepo(gormDB)
 	chunkRepo := knowledgeRepo.NewKnowledgeChunkRepo(gormDB)
 	scheduleRepo := knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gormDB)
+	vecStore, err := rag.NewVectorStore(context.Background(), cfg.RAG.Vector.Type, cfg.Milvus.URI, gormDB, cfg.RAG.Default.Dimension, cfg.RAG.Default.MetricType)
+	if err != nil {
+		slog.Error("failed to initialize vector store", "err", err)
+		os.Exit(1)
+	}
 	fileStore, err := knowledgeHandler.NewConfiguredFileStore(cfg.RustFS)
 	if err != nil {
 		slog.Warn("rustfs file store unavailable, fallback to memory", "err", err)
 		fileStore = knowledgeHandler.NewFileStore()
 	}
-	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, rag.NewPgVectorStore(gormDB), fileStore)
+	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, vecStore, fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)
 	if parserRegistry := buildDocumentParserRegistry(cfg, vlmService, hasVLM, fileStore); parserRegistry != nil {
@@ -212,7 +217,7 @@ func main() {
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
 	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
 
-	pgRetriever := rag.NewPgRetriever(gormDB, embService, kbRepo, 10)
+	vectorRetriever := rag.NewPgRetriever(vecStore, embService, kbRepo, 10)
 	searchChannels := make([]rag.SearchChannel, 0, 4)
 	if cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault() {
 		searchChannels = append(searchChannels, rag.NewPgIntentDirectedSearchChannel(gormDB, 1))
@@ -221,7 +226,7 @@ func main() {
 		searchChannels = append(searchChannels, rag.NewPgKeywordSearchChannel(gormDB, kbRepo, 5))
 	}
 	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
-		searchChannels = append(searchChannels, rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, pgRetriever))
+		searchChannels = append(searchChannels, rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, vectorRetriever))
 	}
 	webSearchCfg := cfg.RAG.Search.Channels.WebSearch
 	searchChannels = append(searchChannels, rag.NewYouComWebSearchChannel(
@@ -376,7 +381,7 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
-		api.GET("/rag/eval", ragEval(pgRetriever))
+		api.GET("/rag/eval", ragEval(vectorRetriever))
 		registerDemoRoutes(r, api, newDemoHandler())
 
 		// Knowledge base

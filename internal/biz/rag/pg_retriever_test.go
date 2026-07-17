@@ -7,9 +7,6 @@ import (
 	"testing"
 
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
-
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
 type recordingEmbeddingService struct {
@@ -50,19 +47,22 @@ func (l fakeKnowledgeBaseLister) List(context.Context, int, int) ([]knowledgeMod
 	return l.kbs, int64(len(l.kbs)), nil
 }
 
-func TestPgRetriever_EmbedsQuestionWithEachKnowledgeBaseModel(t *testing.T) {
-	gdb, err := gorm.Open(postgres.New(postgres.Config{
-		DSN:                  "host=127.0.0.1 user=postgres dbname=ragent sslmode=disable",
-		PreferSimpleProtocol: true,
-	}), &gorm.Config{DryRun: true})
-	if err != nil {
-		t.Fatalf("open dry-run db: %v", err)
-	}
+type recordingVectorSearcher struct {
+	collections []string
+	results     []VectorChunk
+}
 
+func (s *recordingVectorSearcher) Search(_ context.Context, collectionName string, _ []float32, _ int) ([]VectorChunk, error) {
+	s.collections = append(s.collections, collectionName)
+	return s.results, nil
+}
+
+func TestPgRetriever_EmbedsQuestionWithEachKnowledgeBaseModel(t *testing.T) {
 	emb := &recordingEmbeddingService{}
+	searcher := &recordingVectorSearcher{}
 	retriever := &PgRetriever{
-		vectorDB: gdb,
-		emb:      emb,
+		vectorSearch: searcher,
+		emb:          emb,
 		kbRepo: fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{
 			{Name: "kb-1", EmbeddingModel: "emb-1536-a", CollectionName: "collection_a"},
 			{Name: "kb-2", EmbeddingModel: "emb-1536-b", CollectionName: "collection_b"},
@@ -76,25 +76,23 @@ func TestPgRetriever_EmbedsQuestionWithEachKnowledgeBaseModel(t *testing.T) {
 	if !reflect.DeepEqual(emb.modelIDs, want) {
 		t.Fatalf("embedding models mismatch: got %v, want %v", emb.modelIDs, want)
 	}
+
+	wantCollections := []string{"collection_a", "collection_b"}
+	if !reflect.DeepEqual(searcher.collections, wantCollections) {
+		t.Fatalf("collections mismatch: got %v, want %v", searcher.collections, wantCollections)
+	}
 }
 
 func TestPgRetriever_SkipsKnowledgeBaseWhenEmbeddingFails(t *testing.T) {
-	gdb, err := gorm.Open(postgres.New(postgres.Config{
-		DSN:                  "host=127.0.0.1 user=postgres dbname=ragent sslmode=disable",
-		PreferSimpleProtocol: true,
-	}), &gorm.Config{DryRun: true})
-	if err != nil {
-		t.Fatalf("open dry-run db: %v", err)
-	}
-
 	emb := &recordingEmbeddingService{
 		failures: map[string]error{
 			"bad-emb": errors.New("embedding HTTP 401: invalid token"),
 		},
 	}
+	searcher := &recordingVectorSearcher{}
 	retriever := &PgRetriever{
-		vectorDB: gdb,
-		emb:      emb,
+		vectorSearch: searcher,
+		emb:          emb,
 		kbRepo: fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{
 			{Name: "bad-kb", EmbeddingModel: "bad-emb", CollectionName: "collection_bad"},
 			{Name: "good-kb", EmbeddingModel: "good-emb", CollectionName: "collection_good"},
@@ -102,7 +100,7 @@ func TestPgRetriever_SkipsKnowledgeBaseWhenEmbeddingFails(t *testing.T) {
 		topK: 10,
 	}
 
-	_, err = retriever.Retrieve(context.Background(), "question", 2)
+	_, err := retriever.Retrieve(context.Background(), "question", 2)
 	if err != nil {
 		t.Fatalf("expected retriever to skip failed knowledge base, got %v", err)
 	}
@@ -110,6 +108,52 @@ func TestPgRetriever_SkipsKnowledgeBaseWhenEmbeddingFails(t *testing.T) {
 	want := []string{"bad-emb", "good-emb"}
 	if !reflect.DeepEqual(emb.modelIDs, want) {
 		t.Fatalf("embedding models mismatch: got %v, want %v", emb.modelIDs, want)
+	}
+
+	wantCollections := []string{"collection_good"}
+	if !reflect.DeepEqual(searcher.collections, wantCollections) {
+		t.Fatalf("collections mismatch: got %v, want %v", searcher.collections, wantCollections)
+	}
+}
+
+func TestPgRetriever_AddsKnowledgeBaseMetadataFromVectorSearch(t *testing.T) {
+	emb := &recordingEmbeddingService{}
+	searcher := &recordingVectorSearcher{
+		results: []VectorChunk{
+			{
+				ChunkID: "chunk-1",
+				Content: "当前会员Agent支持错误排查能力",
+				Metadata: map[string]string{
+					"doc_id":     "doc-1",
+					"doc_name":   "会员Agent说明.md",
+					"source_url": "https://example.com/member-agent.md",
+				},
+			},
+		},
+	}
+	kb := knowledgeModel.KnowledgeBase{
+		Name:           "会员知识库",
+		EmbeddingModel: "emb-1536",
+		CollectionName: "member_agent",
+	}
+	kb.ID = "kb-1"
+	retriever := &PgRetriever{
+		vectorSearch: searcher,
+		emb:          emb,
+		kbRepo:       fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{kb}},
+		topK:         10,
+	}
+
+	chunks, err := retriever.Retrieve(context.Background(), "会员Agent能力", 2)
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected one chunk, got %+v", chunks)
+	}
+	meta := chunks[0].Metadata
+	if meta["kb_name"] != "会员知识库" || meta["doc_name"] != "会员Agent说明.md" || meta["source_url"] != "https://example.com/member-agent.md" {
+		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 }
 

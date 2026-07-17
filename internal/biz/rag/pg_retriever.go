@@ -9,18 +9,16 @@ import (
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/infra/embedding"
-
-	"gorm.io/gorm"
 )
 
 // PgRetriever implements Retriever using pgvector similarity search against
 // all enabled knowledge bases.
 // Replaces NoopRetriever.
 type PgRetriever struct {
-	vectorDB *gorm.DB
-	emb      embedding.Service
-	kbRepo   knowledgeBaseLister
-	topK     int
+	vectorSearch VectorSearchService
+	emb          embedding.Service
+	kbRepo       knowledgeBaseLister
+	topK         int
 }
 
 type knowledgeBaseLister interface {
@@ -29,7 +27,7 @@ type knowledgeBaseLister interface {
 
 // NewPgRetriever creates a PgRetriever.
 func NewPgRetriever(
-	vectorDB *gorm.DB,
+	vectorSearch VectorSearchService,
 	emb embedding.Service,
 	kbRepo *repo.KnowledgeBaseRepo,
 	topK int,
@@ -38,10 +36,10 @@ func NewPgRetriever(
 		topK = 10
 	}
 	return &PgRetriever{
-		vectorDB: vectorDB,
-		emb:      emb,
-		kbRepo:   kbRepo,
-		topK:     topK,
+		vectorSearch: vectorSearch,
+		emb:          emb,
+		kbRepo:       kbRepo,
+		topK:         topK,
 	}
 }
 
@@ -50,22 +48,15 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 	if topK <= 0 {
 		topK = r.topK
 	}
+	if r.vectorSearch == nil {
+		return nil, fmt.Errorf("vector search service not configured")
+	}
 	kbs, _, err := r.kbRepo.List(ctx, 1, 100)
 	if err != nil {
 		return nil, fmt.Errorf("list knowledge bases: %w", err)
 	}
 	if len(kbs) == 0 {
 		return nil, nil
-	}
-
-	type row struct {
-		ID             string  `gorm:"column:id"`
-		Content        string  `gorm:"column:content"`
-		Metadata       string  `gorm:"column:metadata"`
-		DocName        string  `gorm:"column:doc_name"`
-		SourceLocation string  `gorm:"column:source_location"`
-		FileURL        string  `gorm:"column:file_url"`
-		Score          float64 `gorm:"column:score"`
 	}
 	var allChunks []RetrievedChunk
 	var embeddingErrors []error
@@ -79,34 +70,21 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 			continue
 		}
 		embeddingSucceeded = true
-		vecStr := vecToString(vec)
-		var rows []row
-		err = r.vectorDB.WithContext(ctx).Raw(
-			`SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url,
-			        1 - (v.embedding <=> ?) AS score
-			 FROM t_knowledge_vector v
-			 LEFT JOIN t_knowledge_document d
-			   ON d.id = v.metadata::jsonb->>'doc_id'
-			  AND d.deleted = 0
-			 WHERE v.collection_name = ?
-			 ORDER BY v.embedding <=> ?
-			 LIMIT ?`,
-			vecStr, kb.CollectionName, vecStr, topK,
-		).Scan(&rows).Error
+		chunks, err := r.vectorSearch.Search(ctx, kb.CollectionName, vec, topK)
 		if err != nil {
 			slog.Warn("pg retriever: vector search failed", "kb", kb.Name, "err", err)
 			continue
 		}
-		if len(rows) == 0 {
+		if len(chunks) == 0 {
 			slog.Warn("pg retriever: no chunks found in knowledge base", "kb", kb.Name, "collection", kb.CollectionName)
 			continue
 		}
-		for _, row := range rows {
+		for _, chunk := range chunks {
 			allChunks = append(allChunks, RetrievedChunk{
-				ID:       row.ID,
-				Text:     row.Content,
-				Score:    row.Score,
-				Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), kb, row.DocName, row.SourceLocation, row.FileURL),
+				ID:       chunk.ChunkID,
+				Text:     chunk.Content,
+				Score:    chunk.Score,
+				Metadata: metadataWithKnowledgeBase(chunk.Metadata, kb),
 			})
 		}
 	}

@@ -10,6 +10,7 @@ type VectorChunk struct {
 	Content       string
 	EmbeddingText string
 	Embedding     []float32
+	Score         float64
 	Index         int
 	Metadata      map[string]string
 }
@@ -22,6 +23,11 @@ type VectorStoreService interface {
 	DeleteDocumentVectors(ctx context.Context, collectionName, docID string) error
 	DeleteChunkByID(ctx context.Context, collectionName, chunkID string) error
 	DeleteChunksByIDs(ctx context.Context, collectionName string, chunkIDs []string) error
+}
+
+// VectorSearchService provides vector similarity search operations.
+type VectorSearchService interface {
+	Search(ctx context.Context, collectionName string, vec []float32, topK int) ([]VectorChunk, error)
 }
 
 // VectorSpaceID uniquely identifies a vector space.
@@ -45,6 +51,13 @@ type VectorStoreAdmin interface {
 	DropVectorSpace(ctx context.Context, collectionName string) error
 }
 
+// VectorStore combines CRUD, search and admin responsibilities.
+type VectorStore interface {
+	VectorStoreService
+	VectorSearchService
+	VectorStoreAdmin
+}
+
 // NoopVectorStore implements both VectorStoreService and VectorStoreAdmin as no-ops.
 type NoopVectorStore struct{}
 
@@ -62,6 +75,9 @@ func (n *NoopVectorStore) DeleteChunkByID(ctx context.Context, collectionName, c
 }
 func (n *NoopVectorStore) DeleteChunksByIDs(ctx context.Context, collectionName string, chunkIDs []string) error {
 	return nil
+}
+func (n *NoopVectorStore) Search(ctx context.Context, collectionName string, vec []float32, topK int) ([]VectorChunk, error) {
+	return nil, nil
 }
 func (n *NoopVectorStore) EnsureVectorSpace(ctx context.Context, spec VectorSpaceSpec) error {
 	return nil

@@ -65,7 +65,7 @@ func NewDocumentService(
 	kbRepo *repo.KnowledgeBaseRepo,
 	db *gorm.DB,
 	emb embedding.Service,
-	vecStore *rag.PgVectorStore,
+	vecStore vectorStore,
 	fileStore FileReader,
 ) *DocumentService {
 	return &DocumentService{
