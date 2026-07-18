@@ -41,12 +41,13 @@ func RegisterTools(
 	docRepo *repo.KnowledgeDocumentRepo,
 	chunkRepo *repo.KnowledgeChunkRepo,
 ) []*Tool {
-	return []*Tool{
+	tools := []*Tool{
 		searchKBTool(vectorDB, emb, kbRepo),
 		searchDocsTool(docRepo),
 		listKBsTool(kbRepo),
 		listChunksTool(chunkRepo),
 	}
+	return append(tools, builtinTools()...)
 }
 
 // search_knowledge_base: vector search across knowledge bases.

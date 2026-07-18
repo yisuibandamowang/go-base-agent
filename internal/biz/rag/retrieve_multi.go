@@ -2,6 +2,8 @@ package rag
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"time"
 )
@@ -100,7 +102,7 @@ func NewMultiChannelRetrievalEngine(channels []SearchChannel, postProcessors []S
 // Retrieve runs enabled channels in parallel, then applies post-processors.
 func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
 	type result struct {
-		chunks []RetrievedChunk
+		result SearchChannelResult
 		err    error
 	}
 	results := make([]result, len(e.channels))
@@ -116,15 +118,15 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 			continue
 		}
 		r.LatencyMs = time.Since(start).Milliseconds()
-		results[i].chunks = r.Chunks
+		results[i].result = r
 	}
 
 	var allChunks []RetrievedChunk
 	var allResults []SearchChannelResult
 	for _, r := range results {
-		if r.err == nil && len(r.chunks) > 0 {
-			allChunks = append(allChunks, r.chunks...)
-			allResults = append(allResults, SearchChannelResult{Chunks: r.chunks})
+		if r.err == nil && len(r.result.Chunks) > 0 {
+			allChunks = append(allChunks, r.result.Chunks...)
+			allResults = append(allResults, r.result)
 		}
 	}
 
@@ -145,11 +147,66 @@ func (d *DedupPostProcessor) Process(chunks []RetrievedChunk, results []SearchCh
 	seen := make(map[string]bool)
 	deduped := make([]RetrievedChunk, 0, len(chunks))
 	for _, c := range chunks {
-		if seen[c.ID] {
+		key := chunkKey(c)
+		if seen[key] {
 			continue
 		}
-		seen[c.ID] = true
+		seen[key] = true
 		deduped = append(deduped, c)
 	}
 	return deduped
+}
+
+// FusionPostProcessor applies reciprocal rank fusion across channel results.
+// Aligns with the Java FusionPostProcessor capability.
+type FusionPostProcessor struct {
+	rrfK int
+}
+
+// NewFusionPostProcessor creates an RRF post-processor.
+func NewFusionPostProcessor(rrfK int) *FusionPostProcessor {
+	if rrfK <= 0 {
+		rrfK = 60
+	}
+	return &FusionPostProcessor{rrfK: rrfK}
+}
+
+func (f *FusionPostProcessor) Name() string { return "fusion" }
+func (f *FusionPostProcessor) Order() int   { return 5 }
+
+func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchChannelResult) []RetrievedChunk {
+	if len(chunks) == 0 || len(results) == 0 {
+		return chunks
+	}
+
+	scores := make(map[string]float64)
+	for _, result := range results {
+		for rank, chunk := range result.Chunks {
+			scores[chunkKey(chunk)] += 1.0 / float64(f.rrfK+rank+1)
+		}
+	}
+
+	fused := make([]RetrievedChunk, len(chunks))
+	copy(fused, chunks)
+	for i := range fused {
+		if score, ok := scores[chunkKey(fused[i])]; ok {
+			fused[i].Score = score
+		}
+	}
+
+	sort.SliceStable(fused, func(i, j int) bool {
+		if fused[i].Score == fused[j].Score {
+			return i < j
+		}
+		return fused[i].Score > fused[j].Score
+	})
+	return fused
+}
+
+func chunkKey(chunk RetrievedChunk) string {
+	if chunk.ID != "" {
+		return chunk.ID
+	}
+	sum := sha256.Sum256([]byte(chunk.Text))
+	return hex.EncodeToString(sum[:])
 }

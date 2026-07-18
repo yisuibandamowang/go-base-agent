@@ -79,6 +79,43 @@ func TestDedupPostProcessor(t *testing.T) {
 	}
 }
 
+func TestDedupPostProcessorUsesTextFallback(t *testing.T) {
+	d := &DedupPostProcessor{}
+	chunks := []RetrievedChunk{
+		{Text: "same text"},
+		{Text: "same text"},
+	}
+
+	result := d.Process(chunks, nil)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 after dedup fallback, got %d", len(result))
+	}
+}
+
+func TestFusionPostProcessor_RRFReordersByCrossChannelHits(t *testing.T) {
+	pp := NewFusionPostProcessor(60)
+	chunks := []RetrievedChunk{
+		{ID: "a", Text: "alpha"},
+		{ID: "b", Text: "beta"},
+		{ID: "c", Text: "gamma"},
+	}
+	results := []SearchChannelResult{
+		{Chunks: []RetrievedChunk{{ID: "a", Text: "alpha"}, {ID: "b", Text: "beta"}}},
+		{Chunks: []RetrievedChunk{{ID: "b", Text: "beta"}, {ID: "c", Text: "gamma"}}},
+	}
+
+	result := pp.Process(chunks, results)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(result))
+	}
+	if result[0].ID != "b" || result[1].ID != "a" || result[2].ID != "c" {
+		t.Fatalf("unexpected RRF order: %+v", result)
+	}
+	if !(result[0].Score > result[1].Score && result[1].Score > result[2].Score) {
+		t.Fatalf("unexpected RRF scores: %+v", result)
+	}
+}
+
 func TestMultiChannelRetrieverImplementsRetriever(t *testing.T) {
 	channels := []SearchChannel{
 		&testChannel{name: "vector", priority: 1, enabled: true, typ: ChannelVectorGlobal, chunks: []RetrievedChunk{
@@ -98,5 +135,34 @@ func TestMultiChannelRetrieverImplementsRetriever(t *testing.T) {
 	}
 	if len(chunks) != 2 {
 		t.Fatalf("expected two chunks, got %+v", chunks)
+	}
+}
+
+func TestMultiChannelRetrievalEngine_UsesFusionPostProcessor(t *testing.T) {
+	channels := []SearchChannel{
+		&testChannel{name: "keyword", priority: 1, enabled: true, typ: ChannelKeyword, chunks: []RetrievedChunk{
+			{ID: "a", Text: "alpha"},
+			{ID: "b", Text: "beta"},
+		}},
+		&testChannel{name: "vector", priority: 2, enabled: true, typ: ChannelVectorGlobal, chunks: []RetrievedChunk{
+			{ID: "b", Text: "beta"},
+			{ID: "c", Text: "gamma"},
+		}},
+	}
+
+	engine := NewMultiChannelRetrievalEngine(channels, []SearchResultPostProcessor{
+		&DedupPostProcessor{},
+		NewFusionPostProcessor(60),
+	})
+
+	chunks, err := engine.Retrieve(context.Background(), SearchContext{OriginalQuestion: "test", TopK: 10})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %+v", chunks)
+	}
+	if chunks[0].ID != "b" || chunks[1].ID != "a" || chunks[2].ID != "c" {
+		t.Fatalf("expected fused order b,a,c, got %+v", chunks)
 	}
 }

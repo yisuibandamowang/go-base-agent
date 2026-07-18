@@ -236,7 +236,10 @@ func main() {
 		webSearchCfg.TimeoutSeconds,
 		webSearchCfg.Enabled,
 	))
-	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, []rag.SearchResultPostProcessor{&rag.DedupPostProcessor{}}))
+	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, []rag.SearchResultPostProcessor{
+		&rag.DedupPostProcessor{},
+		rag.NewFusionPostProcessor(60),
+	}))
 	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
 	llmRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
