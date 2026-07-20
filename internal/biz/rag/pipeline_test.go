@@ -93,12 +93,14 @@ func (r *recordingRetriever) Retrieve(ctx context.Context, question string, topK
 
 type recordingRewriter struct {
 	history      []chat.Message
+	lastQuestion string
 	result       string
 	subQuestions []string
 }
 
 func (r *recordingRewriter) Rewrite(ctx context.Context, question string, history []chat.Message) (*RewriteResult, error) {
 	r.history = append([]chat.Message(nil), history...)
+	r.lastQuestion = question
 	return &RewriteResult{RewrittenQuestion: r.result, SubQuestions: r.subQuestions}, nil
 }
 
