@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/infra/vlm"
 
 	"github.com/gin-gonic/gin"
 )
@@ -18,10 +22,19 @@ const (
 	demoImageDataURI               = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXv0AAAAASUVORK5CYII="
 )
 
-type demoHandler struct{}
+type demoHandler struct {
+	vlmService  vlm.Service
+	imageClient *http.Client
+}
 
 func newDemoHandler() *demoHandler {
-	return &demoHandler{}
+	return &demoHandler{imageClient: &http.Client{Timeout: 10 * time.Second}}
+}
+
+func newDemoHandlerWithVLM(vlmService vlm.Service) *demoHandler {
+	h := newDemoHandler()
+	h.vlmService = vlmService
+	return h
 }
 
 func registerDemoRoutes(root *gin.Engine, api *gin.RouterGroup, h *demoHandler) {
@@ -111,6 +124,26 @@ func (h *demoHandler) ImageAnalysis(c *gin.Context) {
 	if imageURL == "" {
 		imageURL = demoImageDataURI
 	}
+	if h.vlmService != nil {
+		image, mimeType, err := h.loadImage(c.Request.Context(), imageURL)
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("A000001", "读取图片失败: "+err.Error()))
+			return
+		}
+		analysis, err := h.vlmService.DescribeImage(c.Request.Context(), image, mimeType, prompt)
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", "图片分析失败: "+err.Error()))
+			return
+		}
+		c.JSON(http.StatusOK, convention.Success(map[string]any{
+			"mode":      "vlm",
+			"imageUrl":  imageURL,
+			"prompt":    prompt,
+			"analysis":  analysis,
+			"generated": false,
+		}))
+		return
+	}
 	c.JSON(http.StatusOK, convention.Success(map[string]any{
 		"mode":      "demo",
 		"imageUrl":  imageURL,
@@ -118,6 +151,69 @@ func (h *demoHandler) ImageAnalysis(c *gin.Context) {
 		"analysis":  fmt.Sprintf("demo 分析：已收到图片地址 %s，当前未接入真实 VLM，返回占位分析结果。", shortenForDemo(imageURL, 80)),
 		"generated": false,
 	}))
+}
+
+func (h *demoHandler) loadImage(ctx context.Context, imageURL string) ([]byte, string, error) {
+	if strings.HasPrefix(imageURL, "data:") {
+		return parseDemoDataURL(imageURL)
+	}
+	if !strings.HasPrefix(imageURL, "http://") && !strings.HasPrefix(imageURL, "https://") {
+		return nil, "", fmt.Errorf("仅支持 data URL 或 http/https 图片地址")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("创建图片请求失败: %w", err)
+	}
+	client := h.imageClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("下载图片失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("图片地址返回 HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, demoUploadMaxFileSize+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("读取图片内容失败: %w", err)
+	}
+	if int64(len(data)) > demoUploadMaxFileSize {
+		return nil, "", fmt.Errorf("图片超过大小限制")
+	}
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	return data, mimeType, nil
+}
+
+func parseDemoDataURL(value string) ([]byte, string, error) {
+	header, payload, ok := strings.Cut(value, ",")
+	if !ok {
+		return nil, "", fmt.Errorf("data URL 缺少内容")
+	}
+	mimeType := "image/png"
+	if strings.HasPrefix(header, "data:") {
+		meta := strings.TrimPrefix(header, "data:")
+		if idx := strings.Index(meta, ";"); idx >= 0 {
+			if meta[:idx] != "" {
+				mimeType = meta[:idx]
+			}
+		} else if meta != "" {
+			mimeType = meta
+		}
+	}
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("解析 base64 图片失败: %w", err)
+	}
+	if int64(len(data)) > demoUploadMaxFileSize {
+		return nil, "", fmt.Errorf("图片超过大小限制")
+	}
+	return data, mimeType, nil
 }
 
 func firstDemoNonEmpty(values ...string) string {

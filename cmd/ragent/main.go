@@ -371,7 +371,11 @@ func main() {
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
 		api.GET("/rag/eval", ragEval(vectorRetriever))
-		registerDemoRoutes(r, api, newDemoHandler())
+		demoH := newDemoHandler()
+		if hasVLM {
+			demoH = newDemoHandlerWithVLM(vlmService)
+		}
+		registerDemoRoutes(r, api, demoH)
 
 		// Knowledge base
 		kb := api.Group("/knowledge-base")

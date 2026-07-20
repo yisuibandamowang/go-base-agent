@@ -43,6 +43,27 @@ func TestDefaultMemoryService_LoadHistory(t *testing.T) {
 	}
 }
 
+func TestDefaultMemoryService_LoadHistory_PreservesSummaryWhenTruncating(t *testing.T) {
+	messages := []chat.Message{chat.NewSystemMessage("历史摘要：用户已经咨询过会员能力")}
+	for range 6 {
+		messages = append(messages, chat.NewUserMessage("hi"))
+	}
+
+	store := &testMemoryStore{messages: messages}
+	svc := NewDefaultMemoryService(store, 2)
+
+	history, err := svc.LoadHistory(context.Background(), "conv-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(history) != 5 {
+		t.Fatalf("expected summary plus 4 recent messages, got %d", len(history))
+	}
+	if history[0].Role != chat.RoleSystem || history[0].Content != "历史摘要：用户已经咨询过会员能力" {
+		t.Fatalf("summary should be preserved as first message, got %+v", history[0])
+	}
+}
+
 func TestDefaultMemoryService_LoadHistory_UnderLimit(t *testing.T) {
 	messages := []chat.Message{chat.NewUserMessage("hi")}
 	store := &testMemoryStore{messages: messages}

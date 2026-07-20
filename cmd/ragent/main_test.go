@@ -458,6 +458,43 @@ func TestDemoRoutes(t *testing.T) {
 	})
 }
 
+func TestDemoImageAnalysisUsesVLMWhenConfigured(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	api := r.Group("/api/ragent")
+	vlmSvc := &fakeDemoVLMService{description: "图片里是一张会员权益说明图"}
+	registerDemoRoutes(r, api, newDemoHandlerWithVLM(vlmSvc))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/test/langchain4j/image-analysis", strings.NewReader(`{"imageUrl":"`+demoImageDataURI+`","prompt":"看看这张图"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `"mode":"vlm"`) || !strings.Contains(body, "会员权益说明图") {
+		t.Fatalf("unexpected vlm image analysis response: %d %s", w.Code, body)
+	}
+	if vlmSvc.calls != 1 {
+		t.Fatalf("expected one vlm call, got %d", vlmSvc.calls)
+	}
+	if vlmSvc.mimeType != "image/png" {
+		t.Fatalf("expected image/png, got %q", vlmSvc.mimeType)
+	}
+}
+
+type fakeDemoVLMService struct {
+	calls       int
+	description string
+	mimeType    string
+}
+
+func (f *fakeDemoVLMService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string) (string, error) {
+	f.calls++
+	f.mimeType = mimeType
+	return f.description, nil
+}
+
 type fakeEvalRetriever struct{}
 
 func (f *fakeEvalRetriever) Retrieve(ctx context.Context, question string, topK int) ([]rag.RetrievedChunk, error) {

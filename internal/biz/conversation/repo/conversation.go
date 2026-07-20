@@ -129,6 +129,63 @@ func (r *MessageRepo) LoadHistorySince(ctx context.Context, conversationID, user
 	return msgs, nil
 }
 
+// ListLatestUserOnlyMessages 查询指定会话最新用户消息，按创建时间倒序。
+func (r *MessageRepo) ListLatestUserOnlyMessages(ctx context.Context, conversationID, userID string, limit int) ([]model.Message, error) {
+	if conversationID == "" || userID == "" || limit <= 0 {
+		return []model.Message{}, nil
+	}
+	var msgs []model.Message
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("conversation_id = ? AND user_id = ? AND role = ?", conversationID, userID, "user").
+		Order("create_time DESC").
+		Limit(limit).
+		Find(&msgs).Error
+	if err != nil {
+		return nil, fmt.Errorf("list latest user messages: %w", err)
+	}
+	return msgs, nil
+}
+
+// ListMessagesBetweenIDs 查询指定消息 ID 区间内的用户与助手消息。
+func (r *MessageRepo) ListMessagesBetweenIDs(ctx context.Context, conversationID, userID, afterID, beforeID string) ([]model.Message, error) {
+	if conversationID == "" || userID == "" {
+		return []model.Message{}, nil
+	}
+	query := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("conversation_id = ? AND user_id = ? AND role IN ?", conversationID, userID, []string{"user", "assistant"})
+	if afterID != "" {
+		query = query.Where("id > ?", afterID)
+	}
+	if beforeID != "" {
+		query = query.Where("id < ?", beforeID)
+	}
+	var msgs []model.Message
+	err := query.Order("id ASC").Find(&msgs).Error
+	if err != nil {
+		return nil, fmt.Errorf("list messages between ids: %w", err)
+	}
+	return msgs, nil
+}
+
+// FindMaxMessageIDAtOrBefore 查询指定时间点之前或当时的最大消息 ID。
+func (r *MessageRepo) FindMaxMessageIDAtOrBefore(ctx context.Context, conversationID, userID string, at time.Time) (string, error) {
+	if conversationID == "" || userID == "" || at.IsZero() {
+		return "", nil
+	}
+	var msg model.Message
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("conversation_id = ? AND user_id = ? AND create_time <= ?", conversationID, userID, at).
+		Order("id DESC").
+		First(&msg).Error
+	if err == gorm.ErrRecordNotFound {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find max message id at or before: %w", err)
+	}
+	return msg.ID, nil
+}
+
 // CountUserMessages 统计会话中的用户消息数量。
 func (r *MessageRepo) CountUserMessages(ctx context.Context, conversationID, userID string) (int64, error) {
 	var count int64
@@ -209,7 +266,7 @@ func (r *ConversationSummaryRepo) FindLatestByConversationID(ctx context.Context
 	var summary model.ConversationSummary
 	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
-		Order("create_time DESC").
+		Order("id DESC").
 		First(&summary).Error
 	if err != nil {
 		return nil, fmt.Errorf("find latest summary: %w", err)

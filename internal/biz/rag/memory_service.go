@@ -63,6 +63,14 @@ func (s *DefaultMemoryService) LoadHistory(ctx context.Context, conversationID s
 
 	limit := s.historyKeepTurns * 2
 	if len(history) > limit {
+		if history[0].Role == chat.RoleSystem {
+			recent := history[1:]
+			if len(recent) > limit {
+				recent = recent[len(recent)-limit:]
+			}
+			history = append([]chat.Message{history[0]}, recent...)
+			return history, nil
+		}
 		history = history[len(history)-limit:]
 	}
 	return history, nil
