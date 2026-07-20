@@ -120,11 +120,27 @@ func searchDocsTool(docRepo *repo.KnowledgeDocumentRepo) *Tool {
 				return errorContent("缺少参数: keyword"), nil
 			}
 			kbID, _ := args["kb_id"].(string)
-			docs, _, err := docRepo.SearchDocs(ctx, keyword, 1, 20)
+			var (
+				docs []model.KnowledgeDocument
+				err  error
+			)
+			if strings.TrimSpace(kbID) != "" {
+				docs, _, err = docRepo.ListByKB(ctx, kbID, 1, 100)
+				if err == nil {
+					filtered := docs[:0]
+					for _, doc := range docs {
+						if strings.Contains(strings.ToLower(doc.DocName), strings.ToLower(keyword)) {
+							filtered = append(filtered, doc)
+						}
+					}
+					docs = filtered
+				}
+			} else {
+				docs, _, err = docRepo.SearchDocs(ctx, keyword, 1, 20)
+			}
 			if err != nil {
 				return errorContent(fmt.Sprintf("搜索文档失败: %v", err)), nil
 			}
-			_ = kbID // not yet used in search filter
 			if len(docs) == 0 {
 				return []toolContent{{Type: "text", Text: "未找到匹配的文档。"}}, nil
 			}

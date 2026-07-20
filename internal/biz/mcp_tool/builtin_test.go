@@ -7,6 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"go-base-agent/internal/biz/knowledge/model"
+	"go-base-agent/internal/biz/knowledge/repo"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestRegisterToolsIncludesBuiltinMcpTools(t *testing.T) {
@@ -95,5 +100,35 @@ func TestYouComSearchTool_FormatsResults(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected search text to contain %q, got %q", want, text)
 		}
+	}
+}
+
+func TestSearchDocumentsTool_FiltersByKBID(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate docs: %v", err)
+	}
+	docRepo := repo.NewKnowledgeDocumentRepo(gdb)
+	if err := gdb.Create(&model.KnowledgeDocument{KbID: "kb-1", DocName: "会员权益说明.md", FileType: "md"}).Error; err != nil {
+		t.Fatalf("seed doc1: %v", err)
+	}
+	if err := gdb.Create(&model.KnowledgeDocument{KbID: "kb-2", DocName: "退款说明.md", FileType: "md"}).Error; err != nil {
+		t.Fatalf("seed doc2: %v", err)
+	}
+
+	tool := searchDocsTool(docRepo)
+	content, err := tool.Execute(context.Background(), map[string]interface{}{
+		"keyword": "会员",
+		"kb_id":   "kb-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := content[0].Text
+	if !strings.Contains(text, "会员权益说明.md") || strings.Contains(text, "退款说明.md") {
+		t.Fatalf("expected only kb-1 doc in result, got %q", text)
 	}
 }

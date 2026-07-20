@@ -245,6 +245,7 @@ func main() {
 	baseRewriter := rag.NewLLMRewriter(llmService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
 		cfg.RAG.QueryRewrite.MaxHistoryChars,
+		cfg.RAG.QueryRewrite.Enabled,
 	)
 	llmRewriter := rag.NewNormalizingRewriter(queryNormalizer, baseRewriter)
 
