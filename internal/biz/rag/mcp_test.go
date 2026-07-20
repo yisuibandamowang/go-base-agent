@@ -10,10 +10,12 @@ type testMcpExecutor struct {
 	tool   ToolDefinition
 	params map[string]interface{}
 	result map[string]interface{}
+	calls  int
 }
 
 func (e *testMcpExecutor) GetToolDefinition() ToolDefinition { return e.tool }
 func (e *testMcpExecutor) Execute(ctx context.Context, params map[string]interface{}) (map[string]interface{}, error) {
+	e.calls++
 	e.params = params
 	if e.result != nil {
 		return e.result, nil
@@ -117,4 +119,44 @@ func TestDefaultMcpContextProvider_BuildContextExecutesRegisteredTools(t *testin
 			t.Fatalf("expected MCP context to contain %q, got %q", want, contextText)
 		}
 	}
+}
+
+func TestDefaultMcpContextProvider_SelectsRelevantTools(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	memberExec := &testMcpExecutor{
+		tool:   ToolDefinition{Name: "member_profile", Description: "查询会员画像"},
+		result: map[string]interface{}{"level": "gold"},
+	}
+	weatherExec := &testMcpExecutor{
+		tool:   ToolDefinition{Name: "weather_query", Description: "查询天气"},
+		result: map[string]interface{}{"city": "北京"},
+	}
+	registry.Register(memberExec)
+	registry.Register(weatherExec)
+
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{
+		params: map[string]interface{}{"userId": "u-1"},
+	}, &testMcpSelector{selected: []string{"member_profile"}})
+
+	contextText, err := provider.BuildContext(context.Background(), "帮我查会员等级")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if memberExec.calls != 1 {
+		t.Fatalf("expected selected tool to be executed once, got %d", memberExec.calls)
+	}
+	if weatherExec.calls != 0 {
+		t.Fatalf("expected unselected tool to be skipped, got %d", weatherExec.calls)
+	}
+	if !strings.Contains(contextText, "member_profile") || strings.Contains(contextText, "weather_query") {
+		t.Fatalf("unexpected selected context: %q", contextText)
+	}
+}
+
+type testMcpSelector struct {
+	selected []string
+}
+
+func (s *testMcpSelector) SelectTools(ctx context.Context, question string, tools []ToolDefinition) ([]string, error) {
+	return s.selected, nil
 }

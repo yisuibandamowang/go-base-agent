@@ -53,8 +53,10 @@ type remoteToolInputSchema struct {
 }
 
 type remoteToolParamSchema struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	Type         string        `json:"type"`
+	Description  string        `json:"description"`
+	DefaultValue interface{}   `json:"default,omitempty"`
+	Enum         []interface{} `json:"enum,omitempty"`
 }
 
 type remoteCallToolResult struct {
@@ -151,10 +153,12 @@ func toToolDefinition(tool remoteToolDefinition) ToolDefinition {
 	for _, name := range keys {
 		schema := tool.InputSchema.Properties[name]
 		params = append(params, ToolParam{
-			Name:        name,
-			Type:        schema.Type,
-			Description: schema.Description,
-			Required:    required[name],
+			Name:         name,
+			Type:         schema.Type,
+			Description:  schema.Description,
+			Required:     required[name],
+			DefaultValue: schema.DefaultValue,
+			Enum:         convertEnumValues(schema.Enum),
 		})
 	}
 	return ToolDefinition{
@@ -322,7 +326,10 @@ func (e *LLMMcpParameterExtractor) ExtractParameters(ctx context.Context, questi
 	params := make(map[string]interface{}, len(tool.Parameters))
 	for _, param := range tool.Parameters {
 		value, ok := parsed[param.Name]
-		if !ok {
+		if !ok || value == nil {
+			if param.DefaultValue != nil {
+				params[param.Name] = coerceMcpValue(param.DefaultValue, param.Type)
+			}
 			continue
 		}
 		params[param.Name] = coerceMcpValue(value, param.Type)
@@ -349,6 +356,21 @@ func buildMcpParameterPrompt(question string, tool ToolDefinition) string {
 		if strings.TrimSpace(param.Description) != "" {
 			b.WriteString(": ")
 			b.WriteString(param.Description)
+		}
+		if param.DefaultValue != nil {
+			b.WriteString(" [默认值: ")
+			b.WriteString(fmt.Sprint(param.DefaultValue))
+			b.WriteString("]")
+		}
+		if len(param.Enum) > 0 {
+			b.WriteString(" [可选值: ")
+			for i, item := range param.Enum {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(item)
+			}
+			b.WriteString("]")
 		}
 		b.WriteString("\n")
 	}
@@ -452,4 +474,15 @@ func coerceMcpValue(value interface{}, typ string) interface{} {
 
 func floatPtr(v float64) *float64 {
 	return &v
+}
+
+func convertEnumValues(values []interface{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	converted := make([]string, 0, len(values))
+	for _, value := range values {
+		converted = append(converted, fmt.Sprint(value))
+	}
+	return converted
 }

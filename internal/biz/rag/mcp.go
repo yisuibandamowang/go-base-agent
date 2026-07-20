@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -10,10 +11,12 @@ import (
 
 // ToolParam describes a parameter of an MCP tool.
 type ToolParam struct {
-	Name        string
-	Type        string
-	Description string
-	Required    bool
+	Name         string
+	Type         string
+	Description  string
+	Required     bool
+	DefaultValue interface{}
+	Enum         []string
 }
 
 // ToolDefinition describes an MCP tool's schema.
@@ -105,6 +108,11 @@ type McpParameterExtractor interface {
 	ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error)
 }
 
+// McpToolSelector selects relevant tools for a user question.
+type McpToolSelector interface {
+	SelectTools(ctx context.Context, question string, tools []ToolDefinition) ([]string, error)
+}
+
 // McpContextProvider builds MCP execution context for chat prompts.
 type McpContextProvider interface {
 	BuildContext(ctx context.Context, question string) (string, error)
@@ -114,11 +122,16 @@ type McpContextProvider interface {
 type DefaultMcpContextProvider struct {
 	registry  McpToolRegistry
 	extractor McpParameterExtractor
+	selector  McpToolSelector
 }
 
 // NewDefaultMcpContextProvider creates a provider backed by a tool registry.
-func NewDefaultMcpContextProvider(registry McpToolRegistry, extractor McpParameterExtractor) *DefaultMcpContextProvider {
-	return &DefaultMcpContextProvider{registry: registry, extractor: extractor}
+func NewDefaultMcpContextProvider(registry McpToolRegistry, extractor McpParameterExtractor, selectors ...McpToolSelector) *DefaultMcpContextProvider {
+	var selector McpToolSelector
+	if len(selectors) > 0 {
+		selector = selectors[0]
+	}
+	return &DefaultMcpContextProvider{registry: registry, extractor: extractor, selector: selector}
 }
 
 // BuildContext executes registered MCP tools and returns prompt-ready context text.
@@ -127,8 +140,13 @@ func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question s
 		return "", nil
 	}
 
+	executors := p.selectExecutors(ctx, question)
+	if len(executors) == 0 {
+		return "", nil
+	}
+
 	var b strings.Builder
-	for i, executor := range p.registry.ListAllExecutors() {
+	for i, executor := range executors {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -165,6 +183,41 @@ func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question s
 		b.WriteString(formatMcpResult(result))
 	}
 	return b.String(), nil
+}
+
+func (p *DefaultMcpContextProvider) selectExecutors(ctx context.Context, question string) []McpToolExecutor {
+	executors := p.registry.ListAllExecutors()
+	if p.selector == nil || len(executors) <= 1 {
+		return executors
+	}
+
+	tools := make([]ToolDefinition, 0, len(executors))
+	for _, executor := range executors {
+		tools = append(tools, executor.GetToolDefinition())
+	}
+	selected, err := p.selector.SelectTools(ctx, question, tools)
+	if err != nil {
+		slog.Warn("mcp tool selection failed, fallback to all tools", "err", err)
+		return executors
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+
+	selectedSet := make(map[string]bool, len(selected))
+	for _, name := range selected {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			selectedSet[name] = true
+		}
+	}
+	filtered := make([]McpToolExecutor, 0, len(selectedSet))
+	for _, executor := range executors {
+		if selectedSet[executor.GetToolDefinition().Name] {
+			filtered = append(filtered, executor)
+		}
+	}
+	return filtered
 }
 
 func formatMcpResult(result map[string]interface{}) string {

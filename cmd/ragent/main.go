@@ -250,6 +250,7 @@ func main() {
 
 	mcpRegistry := rag.NewMcpToolRegistry()
 	mcpExtractor := rag.NewLLMMcpParameterExtractor(llmService)
+	mcpSelector := rag.NewLLMMcpToolSelector(llmService)
 	if len(cfg.RAG.MCP.Servers) > 0 {
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := rag.RegisterRemoteMcpServers(registerCtx, mcpRegistry, toMcpServerSpecs(cfg.RAG.MCP.Servers), &http.Client{Timeout: 10 * time.Second}); err != nil {
@@ -264,7 +265,7 @@ func main() {
 		retriever,
 		memSvc,
 	)
-	ragPipeline.SetMcpContextProvider(rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor))
+	ragPipeline.SetMcpContextProvider(rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector))
 	if cfg.RAG.Trace.Enabled {
 		ragPipeline.SetTraceRecorder(rag.NewDBTraceRecorder(gormDB, cfg.RAG.Trace.MaxErrorLength))
 	}

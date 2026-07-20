@@ -127,6 +127,41 @@ func TestLLMMcpParameterExtractor_ParsesJsonResponse(t *testing.T) {
 	}
 }
 
+func TestLLMMcpParameterExtractor_FillsDefaultValues(t *testing.T) {
+	extractor := NewLLMMcpParameterExtractor(&testLLMService{
+		reply: `{"city":"北京"}`,
+	})
+	params, err := extractor.ExtractParameters(context.Background(), "帮我看天气", ToolDefinition{
+		Name: "weather_query",
+		Parameters: []ToolParam{
+			{Name: "city", Type: "string", Required: true},
+			{Name: "days", Type: "integer", DefaultValue: 3},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if params["days"].(int) != 3 {
+		t.Fatalf("expected default value to be filled, got %+v", params)
+	}
+}
+
+func TestLLMMcpToolSelector_ParsesJsonArray(t *testing.T) {
+	selector := NewLLMMcpToolSelector(&testLLMService{
+		reply: `["member_profile"]`,
+	})
+	names, err := selector.SelectTools(context.Background(), "帮我查会员等级", []ToolDefinition{
+		{Name: "member_profile", Description: "查询会员画像"},
+		{Name: "weather_query", Description: "查询天气"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(names) != 1 || names[0] != "member_profile" {
+		t.Fatalf("unexpected selected tools: %+v", names)
+	}
+}
+
 type testLLMService struct {
 	reply string
 }
