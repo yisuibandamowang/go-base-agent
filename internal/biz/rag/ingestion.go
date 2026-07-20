@@ -34,6 +34,8 @@ type IngestionContext struct {
 type NodeConfig struct {
 	NodeID     string
 	NodeType   IngestionNodeType
+	Settings   map[string]any
+	Condition  any
 	NextNodeID string
 	Enabled    bool
 }
@@ -62,7 +64,8 @@ type IngestionNode interface {
 // IngestionEngine executes a document ingestion pipeline.
 // Aligns with Java IngestionEngine.
 type IngestionEngine struct {
-	nodes map[IngestionNodeType]IngestionNode
+	nodes              map[IngestionNodeType]IngestionNode
+	conditionEvaluator *ConditionEvaluator
 }
 
 // NewIngestionEngine creates a new ingestion engine.
@@ -71,44 +74,60 @@ func NewIngestionEngine(nodes []IngestionNode) *IngestionEngine {
 	for _, n := range nodes {
 		m[n.NodeType()] = n
 	}
-	return &IngestionEngine{nodes: m}
+	return &IngestionEngine{
+		nodes:              m,
+		conditionEvaluator: NewConditionEvaluator(),
+	}
 }
 
 // Execute runs the pipeline against the given context.
 func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, pipeline PipelineDefinition) error {
 	nodeMap := make(map[string]NodeConfig, len(pipeline.Nodes))
-	var startNode *NodeConfig
+	referenced := make(map[string]struct{}, len(pipeline.Nodes))
 	for _, n := range pipeline.Nodes {
-		nc := n
-		nodeMap[n.NodeID] = nc
-		if startNode == nil {
-			startNode = &nc
+		if _, exists := nodeMap[n.NodeID]; exists {
+			return fmt.Errorf("duplicate pipeline node %s", n.NodeID)
+		}
+		nodeMap[n.NodeID] = n
+		if n.NextNodeID != "" {
+			referenced[n.NextNodeID] = struct{}{}
 		}
 	}
+	startNode := findStartNode(pipeline.Nodes, referenced)
 	if startNode == nil {
 		return fmt.Errorf("pipeline %s has no nodes", pipeline.ID)
 	}
 
 	visited := make(map[string]bool)
-	current := startNode
+	current := *startNode
 
-	for current != nil {
+	for {
 		if visited[current.NodeID] {
 			return fmt.Errorf("circular pipeline at node %s", current.NodeID)
 		}
 		visited[current.NodeID] = true
 
 		if !current.Enabled {
-			if current.NextNodeID != "" {
-				next, ok := nodeMap[current.NextNodeID]
-				if ok {
-					current = &next
-				} else {
-					current = nil
-				}
-			} else {
-				current = nil
+			next, err := nextNode(nodeMap, current)
+			if err != nil {
+				return err
 			}
+			if next == nil {
+				return nil
+			}
+			current = *next
+			continue
+		}
+		if e.conditionEvaluator != nil && !e.conditionEvaluator.Evaluate(ctx2, current.Condition) {
+			slog.Info("ingestion node skipped by condition", "nodeId", current.NodeID, "nodeType", current.NodeType)
+			next, err := nextNode(nodeMap, current)
+			if err != nil {
+				return err
+			}
+			if next == nil {
+				return nil
+			}
+			current = *next
 			continue
 		}
 
@@ -117,7 +136,7 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 			return fmt.Errorf("no implementation for node type %s", current.NodeType)
 		}
 
-		result := node.Execute(ctx, ctx2, *current)
+		result := node.Execute(ctx, ctx2, current)
 		if !result.Success {
 			return fmt.Errorf("node %s failed: %s", current.NodeID, result.ErrorMessage)
 		}
@@ -125,19 +144,15 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 			return nil
 		}
 
-		if current.NextNodeID != "" {
-			next, ok := nodeMap[current.NextNodeID]
-			if ok {
-				current = &next
-			} else {
-				current = nil
-			}
-		} else {
-			current = nil
+		next, err := nextNode(nodeMap, current)
+		if err != nil {
+			return err
 		}
+		if next == nil {
+			return nil
+		}
+		current = *next
 	}
-
-	return nil
 }
 
 // NoopIngestionNode implements all node types as no-ops.
@@ -149,4 +164,24 @@ func (n *NoopIngestionNode) NodeType() IngestionNodeType { return n.typ }
 func (n *NoopIngestionNode) Execute(ctx context.Context, nodeCtx *IngestionContext, config NodeConfig) NodeResult {
 	slog.Info("ingestion noop", "nodeId", config.NodeID, "type", n.typ)
 	return NodeResult{Success: true, ShouldContinue: true}
+}
+
+func findStartNode(nodes []NodeConfig, referenced map[string]struct{}) *NodeConfig {
+	for i := range nodes {
+		if _, ok := referenced[nodes[i].NodeID]; !ok {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
+func nextNode(nodeMap map[string]NodeConfig, current NodeConfig) (*NodeConfig, error) {
+	if current.NextNodeID == "" {
+		return nil, nil
+	}
+	next, ok := nodeMap[current.NextNodeID]
+	if !ok {
+		return nil, fmt.Errorf("missing next node %s referenced by %s", current.NextNodeID, current.NodeID)
+	}
+	return &next, nil
 }

@@ -27,7 +27,7 @@ func TestDBMemoryStore_AppendMessageCreatesConversation(t *testing.T) {
 	convRepo := repo.NewConversationRepo(gdb)
 	msgRepo := repo.NewMessageRepo(gdb)
 	sumRepo := repo.NewConversationSummaryRepo(gdb)
-	store := NewDBMemoryStore(gdb, convRepo, msgRepo, sumRepo, nil, false, 0, 0)
+	store := NewDBMemoryStore(gdb, convRepo, msgRepo, sumRepo, nil, false, 0, 0, 0)
 	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{UserID: "user-1"})
 
 	if _, err := store.AppendMessage(ctx, "conv-1", chat.NewUserMessage("hello world")); err != nil {
@@ -50,6 +50,39 @@ func TestDBMemoryStore_AppendMessageCreatesConversation(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 message, got %d", count)
+	}
+}
+
+func TestDBMemoryStore_AppendMessageUsesTitleGenerator(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+
+	convRepo := repo.NewConversationRepo(gdb)
+	msgRepo := repo.NewMessageRepo(gdb)
+	sumRepo := repo.NewConversationSummaryRepo(gdb)
+	store := NewDBMemoryStore(gdb, convRepo, msgRepo, sumRepo, nil, false, 0, 0, 0)
+	titleGen := &fakeConversationTitleGenerator{output: "LLM标题"}
+	store.SetTitleGenerator(titleGen)
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{UserID: "user-1"})
+
+	if _, err := store.AppendMessage(ctx, "conv-1", chat.NewUserMessage("hello world")); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+	if titleGen.calls != 1 {
+		t.Fatalf("expected title generator to be called once, got %d", titleGen.calls)
+	}
+
+	var conv conversationModel.Conversation
+	if err := gdb.Where("conversation_id = ? AND user_id = ?", "conv-1", "user-1").First(&conv).Error; err != nil {
+		t.Fatalf("conversation should be created: %v", err)
+	}
+	if conv.Title != "LLM标题" {
+		t.Fatalf("expected generated title, got %q", conv.Title)
 	}
 }
 
@@ -89,7 +122,7 @@ func TestDBMemoryStore_AppendsSummaryAndLoadsIt(t *testing.T) {
 	msgRepo := repo.NewMessageRepo(gdb)
 	sumRepo := repo.NewConversationSummaryRepo(gdb)
 	gen := &fakeConversationSummaryGenerator{output: "用户咨询了会员Agent能力（已解答）"}
-	store := NewDBMemoryStore(gdb, convRepo, msgRepo, sumRepo, gen, true, 1, 120)
+	store := NewDBMemoryStore(gdb, convRepo, msgRepo, sumRepo, gen, true, 1, 120, 0)
 	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{UserID: "user-1"})
 
 	if _, err := store.AppendMessage(ctx, "conv-1", chat.NewUserMessage("会员Agent支持哪些能力？")); err != nil {

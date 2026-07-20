@@ -114,6 +114,11 @@ type ConversationSummaryGenerator interface {
 	Generate(ctx context.Context, history []chat.Message, previousSummary string, maxChars int) (string, error)
 }
 
+// ConversationTitleGenerator 生成会话标题。
+type ConversationTitleGenerator interface {
+	Generate(ctx context.Context, question string) (string, error)
+}
+
 // DBMemoryStore 基于数据库的会话记忆存储，实现 rag.MemoryStore 接口。
 type DBMemoryStore struct {
 	db                *gorm.DB
@@ -121,9 +126,11 @@ type DBMemoryStore struct {
 	msgRepo           *repo.MessageRepo
 	summaryRepo       *repo.ConversationSummaryRepo
 	summaryGenerator  ConversationSummaryGenerator
+	titleGenerator    ConversationTitleGenerator
 	summaryEnabled    bool
 	summaryStartTurns int
 	summaryMaxChars   int
+	titleMaxChars     int
 }
 
 // NewDBMemoryStore 创建 DBMemoryStore。
@@ -136,12 +143,16 @@ func NewDBMemoryStore(
 	summaryEnabled bool,
 	summaryStartTurns int,
 	summaryMaxChars int,
+	titleMaxChars int,
 ) *DBMemoryStore {
 	if summaryStartTurns <= 0 {
 		summaryStartTurns = 3
 	}
 	if summaryMaxChars <= 0 {
 		summaryMaxChars = 200
+	}
+	if titleMaxChars <= 0 {
+		titleMaxChars = 30
 	}
 	return &DBMemoryStore{
 		db:                database,
@@ -152,6 +163,15 @@ func NewDBMemoryStore(
 		summaryEnabled:    summaryEnabled,
 		summaryStartTurns: summaryStartTurns,
 		summaryMaxChars:   summaryMaxChars,
+		titleMaxChars:     titleMaxChars,
+	}
+}
+
+// SetTitleGenerator 设置会话标题生成器。
+func (s *DBMemoryStore) SetTitleGenerator(generator ConversationTitleGenerator, maxChars ...int) {
+	s.titleGenerator = generator
+	if len(maxChars) > 0 && maxChars[0] > 0 {
+		s.titleMaxChars = maxChars[0]
 	}
 }
 
@@ -199,7 +219,7 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 		conv = model.Conversation{
 			ConversationID: conversationID,
 			UserID:         user.UserID,
-			Title:          conversationTitle(msg.Content),
+			Title:          s.generateConversationTitle(ctx, msg.Content),
 			LastTime:       now,
 		}
 		conv.CreateTime = now
@@ -225,13 +245,31 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 	return m.ID, nil
 }
 
-func conversationTitle(content string) string {
+func (s *DBMemoryStore) generateConversationTitle(ctx context.Context, content string) string {
+	if s != nil && s.titleGenerator != nil {
+		if title, err := s.titleGenerator.Generate(ctx, content); err == nil && strings.TrimSpace(title) != "" {
+			return strings.TrimSpace(title)
+		} else if err != nil {
+			slog.Warn("generate conversation title failed", "err", err)
+		}
+	}
+	maxChars := 30
+	if s != nil && s.titleMaxChars > 0 {
+		maxChars = s.titleMaxChars
+	}
+	return conversationTitle(content, maxChars)
+}
+
+func conversationTitle(content string, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = 30
+	}
 	runes := []rune(content)
 	if len(runes) == 0 {
 		return "新会话"
 	}
-	if len(runes) > 60 {
-		runes = runes[:60]
+	if len(runes) > maxChars {
+		runes = runes[:maxChars]
 	}
 	return string(runes)
 }

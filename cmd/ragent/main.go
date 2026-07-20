@@ -191,6 +191,11 @@ func main() {
 		cfg.RAG.Memory.SummaryEnabled,
 		cfg.RAG.Memory.SummaryStartTurns,
 		cfg.RAG.Memory.SummaryMaxChars,
+		cfg.RAG.Memory.TitleMaxLength,
+	)
+	dbMemStore.SetTitleGenerator(
+		conversationService.NewLLMTitleGenerator(llmService, "", cfg.RAG.Memory.TitleMaxLength),
+		cfg.RAG.Memory.TitleMaxLength,
 	)
 	memSvc := rag.NewDefaultMemoryService(dbMemStore, cfg.RAG.Memory.HistoryKeepTurns)
 
