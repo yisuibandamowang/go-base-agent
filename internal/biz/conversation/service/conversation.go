@@ -60,6 +60,16 @@ func (s *ConversationService) DeleteConversation(ctx context.Context, conversati
 	if err := s.convRepo.SoftDelete(ctx, conversationID, userID); err != nil {
 		return err
 	}
+	if s.msgRepo != nil {
+		if err := s.msgRepo.SoftDeleteByConversationIDAndUserID(ctx, conversationID, userID); err != nil {
+			return err
+		}
+	}
+	if s.fbRepo != nil {
+		if err := s.fbRepo.SoftDeleteByConversationIDAndUserID(ctx, conversationID, userID); err != nil {
+			return err
+		}
+	}
 	if s.sumRepo != nil {
 		if err := s.sumRepo.DeleteByConversationID(ctx, conversationID, userID); err != nil {
 			return err

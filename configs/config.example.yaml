@@ -111,6 +111,14 @@ rag:
     enabled: true
     max-error-length: 1000
 
+  parser:
+    tika-url: ${TIKA_URL:}
+
+  image-parse:
+    description-prompt: |-
+      请用中文详细描述这张图片的内容；若图中包含文字，请逐字识别并完整列出（OCR）。先给出整体内容描述，再用“图中文字：”另起一段列出识别到的所有文字。
+    max-output-tokens: 4096
+
 ai:
   providers:
     openai:
@@ -231,3 +239,5 @@ auth:
 
 app:
   demo-mode: false
+  eval:
+    enabled: false

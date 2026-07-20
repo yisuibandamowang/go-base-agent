@@ -198,6 +198,13 @@ func (r *MessageRepo) CountUserMessages(ctx context.Context, conversationID, use
 	return count, nil
 }
 
+// SoftDeleteByConversationIDAndUserID 软删除会话下的消息。
+func (r *MessageRepo) SoftDeleteByConversationIDAndUserID(ctx context.Context, conversationID, userID string) error {
+	var msg model.Message
+	return db.SoftDelete(r.db.WithContext(ctx).
+		Where("conversation_id = ? AND user_id = ?", conversationID, userID), &msg)
+}
+
 // FeedbackRepo 消息反馈数据访问层。
 type FeedbackRepo struct {
 	db *gorm.DB
@@ -244,6 +251,13 @@ func (r *FeedbackRepo) DeleteByMessageIDAndUserID(ctx context.Context, messageID
 	var fb model.MessageFeedback
 	return db.SoftDelete(r.db.WithContext(ctx).
 		Where("message_id = ? AND user_id = ?", messageID, userID), &fb)
+}
+
+// SoftDeleteByConversationIDAndUserID 软删除会话下的反馈。
+func (r *FeedbackRepo) SoftDeleteByConversationIDAndUserID(ctx context.Context, conversationID, userID string) error {
+	var fb model.MessageFeedback
+	return db.SoftDelete(r.db.WithContext(ctx).
+		Where("conversation_id = ? AND user_id = ?", conversationID, userID), &fb)
 }
 
 // ConversationSummaryRepo 会话摘要数据访问层。

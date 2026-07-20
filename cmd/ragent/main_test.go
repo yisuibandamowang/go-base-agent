@@ -18,6 +18,7 @@ import (
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/mq"
+	"go-base-agent/internal/infra/chat"
 	infrarerank "go-base-agent/internal/infra/rerank"
 
 	"github.com/gin-gonic/gin"
@@ -70,7 +71,17 @@ func TestRagEvalHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	r := gin.New()
-	r.GET("/api/ragent/rag/eval", ragEval(&fakeEvalRetriever{}))
+	api := r.Group("/api/ragent")
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, false)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected eval route to be disabled by config, got %d %s", w.Code, w.Body.String())
+	}
+
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, true)
 
 	t.Run("missing question returns client error", func(t *testing.T) {
 		w := httptest.NewRecorder()
@@ -86,10 +97,46 @@ func TestRagEvalHandler(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
 		r.ServeHTTP(w, req)
 		body := w.Body.String()
-		if w.Code != http.StatusOK || !strings.Contains(body, `"retrievedChunkIds":["chunk-1"]`) || !strings.Contains(body, `"hasKb":true`) {
+		for _, want := range []string{
+			`"retrievedChunkIds":["chunk-1"]`,
+			`"retrievedDocIds":["doc-1"]`,
+			`"retrievedContextDocIds":["doc-1"]`,
+			`"hasKb":true`,
+			`"hasMcp":false`,
+			`"mcpContext":""`,
+			`"subIntents":["hello","hello follow-up"]`,
+			`"intentLeafIds":[null]`,
+			`"latencyMs":`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("expected eval response to contain %s, got %d %s", want, w.Code, body)
+			}
+		}
+		if w.Code != http.StatusOK {
 			t.Fatalf("expected eval retrieval response, got %d %s", w.Code, body)
 		}
 	})
+}
+
+func TestBuildDocumentParserRegistryRegistersTikaWhenConfigured(t *testing.T) {
+	cfg := &config.Config{
+		RAG: config.RAGConfig{
+			Parser: config.RAGParserConfig{TikaURL: "http://localhost:9998"},
+		},
+	}
+	reg := buildDocumentParserRegistry(cfg, nil, false, nil)
+	if !reg.Supports("application/rtf") {
+		t.Fatal("expected tika parser to be registered for rtf")
+	}
+	foundTika := false
+	for _, typ := range reg.List() {
+		if typ == rag.ParserTika {
+			foundTika = true
+		}
+	}
+	if !foundTika {
+		t.Fatal("expected tika parser type in registry")
+	}
 }
 
 func TestRegisterIntentRoutesIncludesTermMappingDetailCompatibilityPath(t *testing.T) {
@@ -489,10 +536,19 @@ type fakeDemoVLMService struct {
 	mimeType    string
 }
 
-func (f *fakeDemoVLMService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string) (string, error) {
+func (f *fakeDemoVLMService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string, maxOutputTokens ...int) (string, error) {
 	f.calls++
 	f.mimeType = mimeType
 	return f.description, nil
+}
+
+type fakeEvalRewriter struct{}
+
+func (f *fakeEvalRewriter) Rewrite(ctx context.Context, question string, history []chat.Message) (*rag.RewriteResult, error) {
+	return &rag.RewriteResult{
+		RewrittenQuestion: question + " 改写",
+		SubQuestions:      []string{question, question + " follow-up"},
+	}, nil
 }
 
 type fakeEvalRetriever struct{}

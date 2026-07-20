@@ -9,7 +9,7 @@ import (
 
 // Service 提供 VLM 图像描述能力。
 type Service interface {
-	DescribeImage(ctx context.Context, image []byte, mimeType, prompt string) (string, error)
+	DescribeImage(ctx context.Context, image []byte, mimeType, prompt string, maxOutputTokens ...int) (string, error)
 }
 
 // RoutingService 负责按候选模型顺序执行图像描述并回退。
@@ -33,7 +33,7 @@ func NewRoutingService(selector *model.Selector, executor *model.RoutingExecutor
 }
 
 // DescribeImage 按候选顺序调用可用 VLM 模型。
-func (s *RoutingService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string) (string, error) {
+func (s *RoutingService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string, maxOutputTokens ...int) (string, error) {
 	targets := s.selector.SelectVlmCandidates()
 	return model.ExecuteWithFallback(
 		s.executor,
@@ -44,7 +44,7 @@ func (s *RoutingService) DescribeImage(ctx context.Context, image []byte, mimeTy
 			return c, ok
 		},
 		func(client Client, t model.Target) (string, error) {
-			return client.DescribeImage(ctx, image, mimeType, prompt, t)
+			return client.DescribeImage(ctx, image, mimeType, prompt, t, maxOutputTokens...)
 		},
 	)
 }

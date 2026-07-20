@@ -99,6 +99,8 @@ type RAGConfig struct {
 	QueryRewrite RAGQueryRewriteConfig `mapstructure:"query-rewrite"`
 	RateLimit    RAGRateLimitConfig    `mapstructure:"rate-limit"`
 	Memory       RAGMemoryConfig       `mapstructure:"memory"`
+	Parser       RAGParserConfig       `mapstructure:"parser"`
+	ImageParse   RAGImageParseConfig   `mapstructure:"image-parse"`
 	Semaphore    RAGSemaphoreConfig    `mapstructure:"semaphore"`
 	Knowledge    RAGKnowledgeConfig    `mapstructure:"knowledge"`
 	MCP          RAGMCPConfig          `mapstructure:"mcp"`
@@ -141,6 +143,15 @@ type RAGMemoryConfig struct {
 	TTLMinutes        int  `mapstructure:"ttl-minutes"`
 	SummaryMaxChars   int  `mapstructure:"summary-max-chars"`
 	TitleMaxLength    int  `mapstructure:"title-max-length"`
+}
+
+type RAGParserConfig struct {
+	TikaURL string `mapstructure:"tika-url"`
+}
+
+type RAGImageParseConfig struct {
+	DescriptionPrompt string `mapstructure:"description-prompt"`
+	MaxOutputTokens   int    `mapstructure:"max-output-tokens"`
 }
 
 type RAGSemaphoreConfig struct {
@@ -362,7 +373,12 @@ type AuthConfig struct {
 }
 
 type AppConfig struct {
-	DemoMode bool `mapstructure:"demo-mode"`
+	DemoMode bool          `mapstructure:"demo-mode"`
+	Eval     AppEvalConfig `mapstructure:"eval"`
+}
+
+type AppEvalConfig struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // Load 加载配置。

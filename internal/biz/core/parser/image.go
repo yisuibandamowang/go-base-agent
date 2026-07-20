@@ -16,17 +16,25 @@ import (
 
 // ImageParser 解析独立图片文档并产出可检索描述。
 type ImageParser struct {
-	vlmService vlm.Service
-	uploader   storage.Uploader
-	prompt     string
+	vlmService      vlm.Service
+	uploader        storage.Uploader
+	prompt          string
+	maxOutputTokens int
 }
 
 // NewImageParser 创建图片解析器。
-func NewImageParser(vlmService vlm.Service, uploader storage.Uploader) *ImageParser {
+func NewImageParser(vlmService vlm.Service, uploader storage.Uploader, prompt string, maxOutputTokens int) *ImageParser {
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "请用中文准确描述这张图片的内容，优先提取图片中的文字、表格、流程和关键事实，输出适合检索的简洁描述。"
+	}
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = 1024
+	}
 	return &ImageParser{
-		vlmService: vlmService,
-		uploader:   uploader,
-		prompt:     "请用中文准确描述这张图片的内容，优先提取图片中的文字、表格、流程和关键事实，输出适合检索的简洁描述。",
+		vlmService:      vlmService,
+		uploader:        uploader,
+		prompt:          prompt,
+		maxOutputTokens: maxOutputTokens,
 	}
 }
 
@@ -64,7 +72,7 @@ func (p *ImageParser) Parse(ctx context.Context, data []byte, mimeType string, o
 		sourceFile = documentID
 	}
 
-	description, err := p.vlmService.DescribeImage(ctx, data, mimeType, p.prompt)
+	description, err := p.vlmService.DescribeImage(ctx, data, mimeType, p.prompt, p.maxOutputTokens)
 	if err != nil {
 		return nil, fmt.Errorf("describe image failed: %w", err)
 	}

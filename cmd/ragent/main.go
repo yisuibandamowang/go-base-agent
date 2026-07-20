@@ -375,7 +375,7 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
-		api.GET("/rag/eval", ragEval(vectorRetriever))
+		registerRagEvalRoute(api, llmRewriter, vectorRetriever, cfg.App.Eval.Enabled)
 		demoH := newDemoHandler()
 		if hasVLM {
 			demoH = newDemoHandlerWithVLM(vlmService)
@@ -603,6 +603,13 @@ func registerStatusRoutes(r *gin.Engine) {
 	})
 }
 
+func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retriever rag.Retriever, enabled bool) {
+	if !enabled {
+		return
+	}
+	api.GET("/rag/eval", ragEval(rewriter, retriever))
+}
+
 func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service, rerank.Service, vlm.Service, bool) {
 	aiCfg := cfg.AI
 
@@ -700,6 +707,7 @@ func buildVlmClients(aiCfg config.AIConfig) []vlm.Client {
 }
 
 func buildDocumentParserRegistry(cfg *config.Config, vlmService vlm.Service, hasVLM bool, fileStore *knowledgeHandler.FileStore) *coreparser.Registry {
+	coreparser.SetDefaultTikaURL(cfg.RAG.Parser.TikaURL)
 	reg := coreparser.NewRegistry(nil)
 	assetUploader, err := storage.NewRustFSUploader(context.Background(), cfg.RustFS, cfg.RustFS.AssetBucket)
 	if strings.TrimSpace(cfg.MinerU.APIKey) != "" {
@@ -721,9 +729,17 @@ func buildDocumentParserRegistry(cfg *config.Config, vlmService vlm.Service, has
 		reg.Register(coreparser.NewMinerUParser(minerUClient, unpacker, opts))
 	}
 	if err == nil && vlmService != nil && hasVLM {
-		reg.Register(coreparser.NewImageParser(vlmService, assetUploader))
+		reg.Register(coreparser.NewImageParser(
+			vlmService,
+			assetUploader,
+			cfg.RAG.ImageParse.DescriptionPrompt,
+			cfg.RAG.ImageParse.MaxOutputTokens,
+		))
 	} else if err != nil {
 		slog.Warn("asset uploader unavailable, image parser disabled", "err", err)
+	}
+	if tikaURL := strings.TrimSpace(cfg.RAG.Parser.TikaURL); tikaURL != "" {
+		reg.Register(coreparser.NewTikaParser(tikaURL))
 	}
 
 	reg.Register(&coreparser.MarkdownParser{})
@@ -763,14 +779,27 @@ func ragSettings(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func ragEval(retriever rag.Retriever) gin.HandlerFunc {
+func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		question := c.Query("question")
 		if question == "" {
 			c.JSON(http.StatusOK, convention.Failure("A000001", "question不能为空"))
 			return
 		}
-		chunks, err := retriever.Retrieve(c.Request.Context(), question, 10)
+		start := time.Now()
+		subIntents := []string{question}
+		rewrittenQuestion := question
+		if rewriter != nil {
+			if result, err := rewriter.Rewrite(c.Request.Context(), question, nil); err == nil && result != nil {
+				if strings.TrimSpace(result.RewrittenQuestion) != "" {
+					rewrittenQuestion = strings.TrimSpace(result.RewrittenQuestion)
+				}
+				if len(result.SubQuestions) > 0 {
+					subIntents = result.SubQuestions
+				}
+			}
+		}
+		chunks, err := retriever.Retrieve(c.Request.Context(), rewrittenQuestion, 10)
 		if err != nil {
 			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 			return
@@ -802,9 +831,10 @@ func ragEval(retriever rag.Retriever) gin.HandlerFunc {
 			"retrievedContextDocIds": contextDocIDs,
 			"hasKb":                  len(chunks) > 0,
 			"hasMcp":                 false,
-			"mcpContext":             nil,
-			"subIntents":             []any{},
-			"intentLeafIds":          []any{},
+			"mcpContext":             "",
+			"subIntents":             subIntents,
+			"intentLeafIds":          []any{nil},
+			"latencyMs":              time.Since(start).Milliseconds(),
 		}))
 	}
 }

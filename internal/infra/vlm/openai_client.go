@@ -38,7 +38,7 @@ func (c *OpenAICompatibleClient) Provider() string {
 }
 
 // DescribeImage 发送包含文本和图片的多模态请求。
-func (c *OpenAICompatibleClient) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string, target model.Target) (string, error) {
+func (c *OpenAICompatibleClient) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string, target model.Target, maxOutputTokens ...int) (string, error) {
 	url, err := model.ResolveURL(target.Provider, target.Candidate, model.CapabilityVLM)
 	if err != nil {
 		return "", fmt.Errorf("resolve VLM url: %w", err)
@@ -54,6 +54,9 @@ func (c *OpenAICompatibleClient) DescribeImage(ctx context.Context, image []byte
 				},
 			},
 		},
+	}
+	if len(maxOutputTokens) > 0 && maxOutputTokens[0] > 0 {
+		body["max_tokens"] = maxOutputTokens[0]
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {

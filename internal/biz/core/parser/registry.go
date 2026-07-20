@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"go-base-agent/internal/biz/rag"
@@ -13,6 +14,13 @@ type Registry struct {
 	mu       sync.RWMutex
 	parsers  []rag.DocumentParser
 	fallback rag.DocumentParser
+}
+
+var defaultTikaURL string
+
+// SetDefaultTikaURL sets the fallback Tika URL used by DefaultRegistry.
+func SetDefaultTikaURL(url string) {
+	defaultTikaURL = strings.TrimSpace(url)
 }
 
 // NewRegistry 创建解析器注册表。
@@ -79,6 +87,9 @@ func DefaultRegistry() *Registry {
 	reg.Register(&PDFParser{})
 	reg.Register(&DOCXParser{})
 	reg.Register(&PlainTextParser{})
+	if defaultTikaURL != "" {
+		reg.Register(NewTikaParser(defaultTikaURL))
+	}
 	return reg
 }
 

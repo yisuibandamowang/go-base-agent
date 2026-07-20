@@ -129,7 +129,7 @@ func TestDefaultRegistryRegistersConcreteParsers(t *testing.T) {
 func TestImageParserParsesImageWithDescriptionAndAsset(t *testing.T) {
 	vlmSvc := &fakeVLMService{desc: "这是一张会员能力说明图片"}
 	uploader := &fakeUploader{url: "https://assets.example.com/image.png"}
-	p := NewImageParser(vlmSvc, uploader)
+	p := NewImageParser(vlmSvc, uploader, "", 0)
 
 	parsed, err := p.Parse(context.Background(), []byte("fake-image"), "image/png", map[string]string{
 		"sourceFile": "会员能力.png",
@@ -155,6 +155,22 @@ func TestImageParserParsesImageWithDescriptionAndAsset(t *testing.T) {
 	}
 }
 
+func TestImageParserPassesMaxOutputTokensToVLM(t *testing.T) {
+	vlmSvc := &fakeVLMService{desc: "这是一张会员能力说明图片"}
+	p := NewImageParser(vlmSvc, nil, "自定义提示", 2048)
+
+	_, err := p.Parse(context.Background(), []byte("fake-image"), "image/png", map[string]string{
+		"sourceFile": "会员能力.png",
+		"documentId": "doc-1",
+	})
+	if err != nil {
+		t.Fatalf("parse image: %v", err)
+	}
+	if vlmSvc.maxTokens != 2048 {
+		t.Fatalf("expected max tokens to be forwarded, got %d", vlmSvc.maxTokens)
+	}
+}
+
 func TestMinerUResultUnpackerRewritesImageLinks(t *testing.T) {
 	data := zipBytes(t, map[string]string{
 		"result.md":       "## 标题\n\n![图 1](images/fig1.png)\n\n正文说明",
@@ -177,12 +193,16 @@ func TestMinerUResultUnpackerRewritesImageLinks(t *testing.T) {
 }
 
 type fakeVLMService struct {
-	desc  string
-	calls int
+	desc      string
+	calls     int
+	maxTokens int
 }
 
-func (f *fakeVLMService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string) (string, error) {
+func (f *fakeVLMService) DescribeImage(ctx context.Context, image []byte, mimeType, prompt string, maxOutputTokens ...int) (string, error) {
 	f.calls++
+	if len(maxOutputTokens) > 0 {
+		f.maxTokens = maxOutputTokens[0]
+	}
 	return f.desc, nil
 }
 

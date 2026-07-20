@@ -187,6 +187,22 @@ func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed summary: %v", err)
 	}
+	if err := gdb.Create(&conversationModel.Message{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Role:           "user",
+		Content:        "问题",
+	}).Error; err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	if err := gdb.Create(&conversationModel.MessageFeedback{
+		MessageID:      "msg-1",
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Vote:           1,
+	}).Error; err != nil {
+		t.Fatalf("seed feedback: %v", err)
+	}
 
 	convRepo := repo.NewConversationRepo(gdb)
 	msgRepo := repo.NewMessageRepo(gdb)
@@ -208,5 +224,25 @@ func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 	}
 	if activeCount != 0 {
 		t.Fatalf("expected summary to be soft deleted, got %d active rows", activeCount)
+	}
+
+	if err := gdb.Scopes(db.NotDeletedScope()).
+		Model(&conversationModel.Message{}).
+		Where("conversation_id = ? AND user_id = ?", "conv-1", "user-1").
+		Count(&activeCount).Error; err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if activeCount != 0 {
+		t.Fatalf("expected messages to be soft deleted, got %d active rows", activeCount)
+	}
+
+	if err := gdb.Scopes(db.NotDeletedScope()).
+		Model(&conversationModel.MessageFeedback{}).
+		Where("conversation_id = ? AND user_id = ?", "conv-1", "user-1").
+		Count(&activeCount).Error; err != nil {
+		t.Fatalf("count feedback: %v", err)
+	}
+	if activeCount != 0 {
+		t.Fatalf("expected feedback to be soft deleted, got %d active rows", activeCount)
 	}
 }
