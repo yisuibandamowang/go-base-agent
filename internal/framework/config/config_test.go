@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -183,5 +184,78 @@ ai:
 	candidate := cfg.AI.Chat.Candidates[0]
 	if candidate.URL != "https://custom-endpoint.example.com" {
 		t.Fatalf("unexpected URL: %s", candidate.URL)
+	}
+}
+
+func TestLoadRejectsInvalidMemorySummaryWindow(t *testing.T) {
+	yaml := `
+rag:
+  memory:
+    history-keep-turns: 4
+    summary-start-turns: 4
+    summary-enabled: true
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected invalid memory config to fail")
+	}
+	if !strings.Contains(err.Error(), "summary-start-turns") {
+		t.Fatalf("expected memory validation error, got: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidMemoryBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		memory  string
+		wantErr string
+	}{
+		{
+			name: "history keep turns too large",
+			memory: `
+    history-keep-turns: 101
+`,
+			wantErr: "history-keep-turns",
+		},
+		{
+			name: "summary max chars too small",
+			memory: `
+    summary-max-chars: 199
+`,
+			wantErr: "summary-max-chars",
+		},
+		{
+			name: "title max length too small",
+			memory: `
+    title-max-length: 9
+`,
+			wantErr: "title-max-length",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			yaml := "rag:\n  memory:\n" + tt.memory
+			tmpDir := t.TempDir()
+			cfgPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+				t.Fatalf("write temp config: %v", err)
+			}
+
+			_, err := Load(cfgPath)
+			if err == nil {
+				t.Fatal("expected invalid memory bounds to fail")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected %s validation error, got: %v", tt.wantErr, err)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,13 +88,17 @@ func TestDBMemoryStore_AppendMessageUsesTitleGenerator(t *testing.T) {
 }
 
 type fakeConversationSummaryGenerator struct {
-	output string
-	err    error
-	calls  int
+	output            string
+	err               error
+	calls             int
+	histories         [][]chat.Message
+	previousSummaries []string
 }
 
 func (f *fakeConversationSummaryGenerator) Generate(ctx context.Context, history []chat.Message, previousSummary string, maxChars int) (string, error) {
 	f.calls++
+	f.histories = append(f.histories, history)
+	f.previousSummaries = append(f.previousSummaries, previousSummary)
 	return f.output, f.err
 }
 
@@ -157,8 +162,131 @@ func TestDBMemoryStore_AppendsSummaryAndLoadsIt(t *testing.T) {
 	if history[0].Role != chat.RoleSystem {
 		t.Fatalf("expected summary as first system message, got %s", history[0].Role)
 	}
-	if history[0].Content != "历史摘要："+gen.output {
-		t.Fatalf("unexpected summary history content: %q", history[0].Content)
+	if !strings.Contains(history[0].Content, "<conversation-summary>") {
+		t.Fatalf("expected wrapped summary content, got: %q", history[0].Content)
+	}
+	if !strings.Contains(history[0].Content, gen.output) {
+		t.Fatalf("expected summary content to be preserved, got: %q", history[0].Content)
+	}
+}
+
+func TestDBMemoryStore_LoadHistory_NoMessagesReturnsEmptyEvenWithSummary(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.ConversationSummary{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+
+	if err := gdb.Create(&conversationModel.Conversation{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Title:          "初始标题",
+	}).Error; err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := gdb.Create(&conversationModel.ConversationSummary{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		LastMessageID:  "msg-1",
+		Content:        "已有摘要",
+	}).Error; err != nil {
+		t.Fatalf("seed summary: %v", err)
+	}
+
+	store := NewDBMemoryStore(gdb, repo.NewConversationRepo(gdb), repo.NewMessageRepo(gdb), repo.NewConversationSummaryRepo(gdb), nil, true, 1, 120, 0)
+	history, err := store.LoadHistory(context.Background(), "conv-1")
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("expected empty history when there are no messages, got %d", len(history))
+	}
+}
+
+func TestDBMemoryStore_SummaryDoesNotRefreshWhileCoverageStillOverlapsHistoryWindow(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.ConversationSummary{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+
+	seedConversationWithSummaryWindow(t, gdb, "000035", "existing summary")
+
+	gen := &fakeConversationSummaryGenerator{output: "updated summary"}
+	store := NewDBMemoryStore(
+		gdb,
+		repo.NewConversationRepo(gdb),
+		repo.NewMessageRepo(gdb),
+		repo.NewConversationSummaryRepo(gdb),
+		gen,
+		true,
+		5,
+		120,
+		0,
+		4,
+	)
+
+	if _, err := store.AppendMessage(context.Background(), "conv-1", chat.NewAssistantMessage("current answer")); err != nil {
+		t.Fatalf("append assistant message: %v", err)
+	}
+	if gen.calls != 0 {
+		t.Fatalf("expected summary refresh to be skipped while coverage overlaps history window, got %d calls", gen.calls)
+	}
+}
+
+func TestDBMemoryStore_SummaryRefreshesWhenCoverageFallsBehindHistoryWindow(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.ConversationSummary{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+
+	seedConversationWithSummaryWindow(t, gdb, "000015", "existing summary")
+
+	gen := &fakeConversationSummaryGenerator{output: "updated summary"}
+	store := NewDBMemoryStore(
+		gdb,
+		repo.NewConversationRepo(gdb),
+		repo.NewMessageRepo(gdb),
+		repo.NewConversationSummaryRepo(gdb),
+		gen,
+		true,
+		5,
+		120,
+		0,
+		4,
+	)
+
+	if _, err := store.AppendMessage(context.Background(), "conv-1", chat.NewAssistantMessage("current answer")); err != nil {
+		t.Fatalf("append assistant message: %v", err)
+	}
+	if gen.calls != 1 {
+		t.Fatalf("expected summary refresh to run once, got %d calls", gen.calls)
+	}
+	if got := gen.previousSummaries[0]; got != "existing summary" {
+		t.Fatalf("expected previous summary to be merged, got %q", got)
+	}
+	if len(gen.histories[0]) != 4 {
+		t.Fatalf("expected summarized half-window history, got %d messages", len(gen.histories[0]))
+	}
+	if got := gen.histories[0][len(gen.histories[0])-1].Content; got != "assistant-000031" {
+		t.Fatalf("expected summary cutoff before user 000040, got last content %q", got)
+	}
+
+	var summary conversationModel.ConversationSummary
+	if err := gdb.Scopes(db.NotDeletedScope()).
+		Where("conversation_id = ? AND user_id = ? AND content = ?", "conv-1", "user-1", gen.output).
+		First(&summary).Error; err != nil {
+		t.Fatalf("summary should be created: %v", err)
+	}
+	if summary.LastMessageID != "000031" {
+		t.Fatalf("expected summary last message id 000031, got %q", summary.LastMessageID)
 	}
 }
 
@@ -244,5 +372,62 @@ func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 	}
 	if activeCount != 0 {
 		t.Fatalf("expected feedback to be soft deleted, got %d active rows", activeCount)
+	}
+}
+
+func seedConversationWithSummaryWindow(t *testing.T, gdb *gorm.DB, summaryLastMessageID, summaryContent string) {
+	t.Helper()
+
+	if err := gdb.Create(&conversationModel.Conversation{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Title:          "初始标题",
+		LastTime:       time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	base := time.Now().Add(-time.Hour)
+	messages := []struct {
+		id   string
+		role string
+	}{
+		{"000010", "user"},
+		{"000011", "assistant"},
+		{"000020", "user"},
+		{"000021", "assistant"},
+		{"000030", "user"},
+		{"000031", "assistant"},
+		{"000040", "user"},
+		{"000041", "assistant"},
+		{"000050", "user"},
+	}
+	for i, item := range messages {
+		createdAt := base.Add(time.Duration(i) * time.Minute)
+		if err := gdb.Create(&conversationModel.Message{
+			BaseModel: db.BaseModel{
+				ID:         item.id,
+				CreateTime: createdAt,
+				UpdateTime: createdAt,
+			},
+			ConversationID: "conv-1",
+			UserID:         "user-1",
+			Role:           item.role,
+			Content:        item.role + "-" + item.id,
+		}).Error; err != nil {
+			t.Fatalf("seed message %s: %v", item.id, err)
+		}
+	}
+	if err := gdb.Create(&conversationModel.ConversationSummary{
+		BaseModel: db.BaseModel{
+			ID:         "000090",
+			CreateTime: base.Add(90 * time.Minute),
+			UpdateTime: base.Add(90 * time.Minute),
+		},
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		LastMessageID:  summaryLastMessageID,
+		Content:        summaryContent,
+	}).Error; err != nil {
+		t.Fatalf("seed summary: %v", err)
 	}
 }

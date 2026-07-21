@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"go-base-agent/internal/biz/rag"
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/db"
+	redislock "go-base-agent/internal/framework/lock"
 	"go-base-agent/internal/infra/chat"
 
 	"gorm.io/gorm"
@@ -141,6 +143,10 @@ type DBMemoryStore struct {
 	summaryStartTurns int
 	summaryMaxChars   int
 	titleMaxChars     int
+	historyKeepTurns  int
+	summaryLock       *redislock.RedisLock
+	summaryLockTTL    time.Duration
+	summaryTaskRunner func(func())
 }
 
 // NewDBMemoryStore 创建 DBMemoryStore。
@@ -154,6 +160,7 @@ func NewDBMemoryStore(
 	summaryStartTurns int,
 	summaryMaxChars int,
 	titleMaxChars int,
+	historyKeepTurns ...int,
 ) *DBMemoryStore {
 	if summaryStartTurns <= 0 {
 		summaryStartTurns = 3
@@ -163,6 +170,10 @@ func NewDBMemoryStore(
 	}
 	if titleMaxChars <= 0 {
 		titleMaxChars = 30
+	}
+	keepTurns := 0
+	if len(historyKeepTurns) > 0 && historyKeepTurns[0] > 0 {
+		keepTurns = historyKeepTurns[0]
 	}
 	return &DBMemoryStore{
 		db:                database,
@@ -174,7 +185,22 @@ func NewDBMemoryStore(
 		summaryStartTurns: summaryStartTurns,
 		summaryMaxChars:   summaryMaxChars,
 		titleMaxChars:     titleMaxChars,
+		historyKeepTurns:  keepTurns,
+		summaryLockTTL:    30 * time.Second,
 	}
+}
+
+// SetSummaryLock 设置摘要压缩锁。
+func (s *DBMemoryStore) SetSummaryLock(summaryLock *redislock.RedisLock, ttl time.Duration) {
+	s.summaryLock = summaryLock
+	if ttl > 0 {
+		s.summaryLockTTL = ttl
+	}
+}
+
+// SetSummaryTaskRunner 设置摘要压缩执行器。
+func (s *DBMemoryStore) SetSummaryTaskRunner(runner func(func())) {
+	s.summaryTaskRunner = runner
 }
 
 // SetTitleGenerator 设置会话标题生成器。
@@ -197,9 +223,12 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 	if err != nil {
 		return nil, err
 	}
+	if len(msgs) == 0 {
+		return []chat.Message{}, nil
+	}
 	result := make([]chat.Message, 0, len(msgs)+1)
 	if summary := s.loadLatestSummary(ctx, conversationID, conv.UserID); summary != nil && summary.Content != "" {
-		result = append(result, chat.NewSystemMessage("历史摘要："+summary.Content))
+		result = append(result, chat.NewSystemMessage(s.decorateSummary(summary.Content)))
 	}
 	for _, m := range msgs {
 		result = append(result, chat.Message{
@@ -337,8 +366,31 @@ func (s *DBMemoryStore) maybeUpdateSummary(ctx context.Context, conversationID s
 		return
 	}
 
+	taskCtx := context.WithoutCancel(ctx)
+	runner := s.summaryTaskRunner
+	if runner == nil {
+		runner = func(fn func()) {
+			fn()
+		}
+	}
+	runner(func() {
+		if err := s.runSummaryCompression(taskCtx, conversationID, conv); err != nil {
+			slog.Warn("summary compression failed", "conversationId", conversationID, "err", err)
+		}
+	})
+}
+
+func (s *DBMemoryStore) loadHistoryForSummary(ctx context.Context, conversationID string, conv *model.Conversation) ([]model.Message, string, string, bool) {
+	if conv == nil {
+		return nil, "", "", false
+	}
+	if s.historyKeepTurns > 0 {
+		return s.loadWindowedHistoryForSummary(ctx, conversationID, conv.UserID)
+	}
+
 	var previous string
 	var history []model.Message
+	var err error
 	if latest := s.loadLatestSummary(ctx, conversationID, conv.UserID); latest != nil {
 		previous = latest.Content
 		history, err = s.msgRepo.LoadHistorySince(ctx, conversationID, conv.UserID, latest.LastMessageID)
@@ -347,32 +399,152 @@ func (s *DBMemoryStore) maybeUpdateSummary(ctx context.Context, conversationID s
 	}
 	if err != nil {
 		slog.Warn("load conversation history for summary failed", "conversationId", conversationID, "err", err)
-		return
+		return nil, "", "", false
 	}
-	if len(history) == 0 {
-		return
+	lastMessageID := resolveLastMessageID(history)
+	return history, previous, lastMessageID, lastMessageID != ""
+}
+
+func (s *DBMemoryStore) runSummaryCompression(ctx context.Context, conversationID string, conv *model.Conversation) error {
+	if s.summaryLock != nil {
+		lockKey := "ragent:memory:summary:" + strings.TrimSpace(conv.UserID) + ":" + strings.TrimSpace(conversationID)
+		ttl := s.summaryLockTTL
+		if ttl <= 0 {
+			ttl = 30 * time.Second
+		}
+		return s.summaryLock.RunWithLock(ctx, lockKey, ttl, func() error {
+			return s.doSummaryCompression(ctx, conversationID, conv)
+		})
+	}
+	return s.doSummaryCompression(ctx, conversationID, conv)
+}
+
+func (s *DBMemoryStore) doSummaryCompression(ctx context.Context, conversationID string, conv *model.Conversation) error {
+	history, previous, lastMessageID, ok := s.loadHistoryForSummary(ctx, conversationID, conv)
+	if !ok || len(history) == 0 {
+		return nil
 	}
 
 	summary, err := s.summaryGenerator.Generate(ctx, toChatMessages(history), previous, s.summaryMaxChars)
 	if err != nil {
-		slog.Warn("generate conversation summary failed", "conversationId", conversationID, "err", err)
-		return
+		return fmt.Errorf("generate conversation summary: %w", err)
 	}
 	summary = strings.TrimSpace(summary)
 	if summary == "" {
-		return
+		return nil
 	}
 	record := &model.ConversationSummary{
 		ConversationID: conversationID,
 		UserID:         conv.UserID,
-		LastMessageID:  saved.ID,
+		LastMessageID:  lastMessageID,
 		Content:        summary,
 	}
 	record.CreateTime = time.Now()
 	record.UpdateTime = time.Now()
 	if err := s.summaryRepo.Create(ctx, record); err != nil {
-		slog.Warn("save conversation summary failed", "conversationId", conversationID, "err", err)
+		return fmt.Errorf("save conversation summary: %w", err)
 	}
+	return nil
+}
+
+func (s *DBMemoryStore) loadWindowedHistoryForSummary(ctx context.Context, conversationID, userID string) ([]model.Message, string, string, bool) {
+	latest := s.loadLatestSummary(ctx, conversationID, userID)
+	latestUserTurns, err := s.msgRepo.ListLatestUserOnlyMessages(ctx, conversationID, userID, s.historyKeepTurns)
+	if err != nil {
+		slog.Warn("load latest user turns for summary failed", "conversationId", conversationID, "err", err)
+		return nil, "", "", false
+	}
+	if len(latestUserTurns) == 0 {
+		return nil, "", "", false
+	}
+
+	historyStartID := latestUserTurns[len(latestUserTurns)-1].ID
+	if historyStartID == "" {
+		return nil, "", "", false
+	}
+
+	var previous string
+	var afterID string
+	if latest != nil {
+		previous = latest.Content
+		afterID = s.resolveSummaryStartID(ctx, conversationID, userID, latest)
+	}
+	if afterID != "" && compareMessageID(afterID, historyStartID) >= 0 {
+		return nil, previous, "", false
+	}
+
+	summaryCutoffID := latestUserTurns[(len(latestUserTurns)-1)/2].ID
+	if summaryCutoffID == "" {
+		return nil, previous, "", false
+	}
+
+	history, err := s.msgRepo.ListMessagesBetweenIDs(ctx, conversationID, userID, afterID, summaryCutoffID)
+	if err != nil {
+		slog.Warn("load windowed history for summary failed", "conversationId", conversationID, "err", err)
+		return nil, previous, "", false
+	}
+	lastMessageID := resolveLastMessageID(history)
+	return history, previous, lastMessageID, lastMessageID != ""
+}
+
+func (s *DBMemoryStore) resolveSummaryStartID(ctx context.Context, conversationID, userID string, summary *model.ConversationSummary) string {
+	if summary == nil {
+		return ""
+	}
+	if summary.LastMessageID != "" {
+		return summary.LastMessageID
+	}
+	at := summary.UpdateTime
+	if at.IsZero() {
+		at = summary.CreateTime
+	}
+	id, err := s.msgRepo.FindMaxMessageIDAtOrBefore(ctx, conversationID, userID, at)
+	if err != nil {
+		slog.Warn("resolve summary start id failed", "conversationId", conversationID, "err", err)
+		return ""
+	}
+	return id
+}
+
+func resolveLastMessageID(messages []model.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].ID != "" {
+			return messages[i].ID
+		}
+	}
+	return ""
+}
+
+func compareMessageID(left, right string) int {
+	leftNum, leftErr := strconv.ParseInt(left, 10, 64)
+	rightNum, rightErr := strconv.ParseInt(right, 10, 64)
+	if leftErr == nil && rightErr == nil {
+		switch {
+		case leftNum > rightNum:
+			return 1
+		case leftNum < rightNum:
+			return -1
+		default:
+			return 0
+		}
+	}
+	return strings.Compare(left, right)
+}
+
+func (s *DBMemoryStore) decorateSummary(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	loader := rag.NewPromptLoader("")
+	wrapped, err := loader.Render("conversation_summary_wrapper.txt", map[string]any{
+		"Content": content,
+	})
+	if err != nil {
+		slog.Warn("render conversation summary wrapper failed", "err", err)
+		return "历史摘要：" + content
+	}
+	return wrapped
 }
 
 func toChatMessages(msgs []model.Message) []chat.Message {

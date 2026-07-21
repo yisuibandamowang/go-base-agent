@@ -1,0 +1,3 @@
+<conversation-summary>
+{{.Content}}
+</conversation-summary>

@@ -422,8 +422,55 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config %s: %w", path, err)
 	}
+	applyDefaults(&cfg)
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+func applyDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	mem := &cfg.RAG.Memory
+	if mem.HistoryKeepTurns <= 0 {
+		mem.HistoryKeepTurns = 8
+	}
+	if mem.SummaryStartTurns <= 0 {
+		mem.SummaryStartTurns = 9
+	}
+	if mem.SummaryMaxChars <= 0 {
+		mem.SummaryMaxChars = 200
+	}
+	if mem.TitleMaxLength <= 0 {
+		mem.TitleMaxLength = 30
+	}
+}
+
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	mem := cfg.RAG.Memory
+	if mem.HistoryKeepTurns < 1 || mem.HistoryKeepTurns > 100 {
+		return fmt.Errorf("validate rag.memory: history-keep-turns (%d) must be between 1 and 100", mem.HistoryKeepTurns)
+	}
+	if mem.SummaryMaxChars < 200 || mem.SummaryMaxChars > 1000 {
+		return fmt.Errorf("validate rag.memory: summary-max-chars (%d) must be between 200 and 1000", mem.SummaryMaxChars)
+	}
+	if mem.TitleMaxLength < 10 || mem.TitleMaxLength > 100 {
+		return fmt.Errorf("validate rag.memory: title-max-length (%d) must be between 10 and 100", mem.TitleMaxLength)
+	}
+	if mem.SummaryEnabled && mem.SummaryStartTurns <= mem.HistoryKeepTurns {
+		return fmt.Errorf(
+			"validate rag.memory: summary-start-turns (%d) must be greater than history-keep-turns (%d) when summary-enabled=true",
+			mem.SummaryStartTurns,
+			mem.HistoryKeepTurns,
+		)
+	}
+	return nil
 }
 
 // expandEnv 替换字符串中的环境变量占位符。

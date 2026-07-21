@@ -39,6 +39,7 @@ import (
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/framework/idempotent"
+	redislock "go-base-agent/internal/framework/lock"
 	"go-base-agent/internal/framework/middleware"
 	"go-base-agent/internal/framework/mq"
 	"go-base-agent/internal/framework/ratelimit"
@@ -193,7 +194,12 @@ func main() {
 		cfg.RAG.Memory.SummaryStartTurns,
 		cfg.RAG.Memory.SummaryMaxChars,
 		cfg.RAG.Memory.TitleMaxLength,
+		cfg.RAG.Memory.HistoryKeepTurns,
 	)
+	dbMemStore.SetSummaryLock(redislock.New(rdb), 30*time.Second)
+	dbMemStore.SetSummaryTaskRunner(func(fn func()) {
+		go fn()
+	})
 	dbMemStore.SetTitleGenerator(
 		conversationService.NewLLMTitleGenerator(llmService, "", cfg.RAG.Memory.TitleMaxLength),
 		cfg.RAG.Memory.TitleMaxLength,
