@@ -181,6 +181,7 @@ func main() {
 	fbRepo := conversationRepo.NewFeedbackRepo(gormDB)
 	sumRepo := conversationRepo.NewConversationSummaryRepo(gormDB)
 	convSvc := conversationService.NewConversationService(convRepo, msgRepo, fbRepo, sumRepo)
+	convSvc.SetTitleMaxChars(cfg.RAG.Memory.TitleMaxLength)
 	convHandler := conversationHandler.NewConversationHandler(convSvc)
 
 	summaryGenerator := conversationService.NewLLMSummaryGenerator(llmService, "")

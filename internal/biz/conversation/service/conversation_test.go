@@ -375,6 +375,45 @@ func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 	}
 }
 
+func TestConversationService_UpdateTitleValidatesAndTrims(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.ConversationSummary{}, &conversationModel.MessageFeedback{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+	if err := gdb.Create(&conversationModel.Conversation{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Title:          "原始标题",
+		LastTime:       time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	svc := NewConversationService(repo.NewConversationRepo(gdb), repo.NewMessageRepo(gdb), repo.NewFeedbackRepo(gdb), repo.NewConversationSummaryRepo(gdb))
+	svc.SetTitleMaxChars(5)
+
+	if err := svc.UpdateTitle(context.Background(), "conv-1", "user-1", "   "); err == nil {
+		t.Fatal("expected blank title to fail")
+	}
+	if err := svc.UpdateTitle(context.Background(), "conv-1", "user-1", "   这个标题太长了   "); err == nil {
+		t.Fatal("expected too long title to fail")
+	}
+	if err := svc.UpdateTitle(context.Background(), "conv-1", "user-1", "  新标题  "); err != nil {
+		t.Fatalf("update title: %v", err)
+	}
+
+	var conv conversationModel.Conversation
+	if err := gdb.Where("conversation_id = ? AND user_id = ?", "conv-1", "user-1").First(&conv).Error; err != nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	if conv.Title != "新标题" {
+		t.Fatalf("expected trimmed title, got %q", conv.Title)
+	}
+}
+
 func seedConversationWithSummaryWindow(t *testing.T, gdb *gorm.DB, summaryLastMessageID, summaryContent string) {
 	t.Helper()
 

@@ -21,10 +21,11 @@ import (
 
 // ConversationService 会话业务服务。
 type ConversationService struct {
-	convRepo *repo.ConversationRepo
-	msgRepo  *repo.MessageRepo
-	fbRepo   *repo.FeedbackRepo
-	sumRepo  *repo.ConversationSummaryRepo
+	convRepo      *repo.ConversationRepo
+	msgRepo       *repo.MessageRepo
+	fbRepo        *repo.FeedbackRepo
+	sumRepo       *repo.ConversationSummaryRepo
+	titleMaxChars int
 }
 
 // NewConversationService 创建 ConversationService。
@@ -35,10 +36,18 @@ func NewConversationService(
 	sumRepo *repo.ConversationSummaryRepo,
 ) *ConversationService {
 	return &ConversationService{
-		convRepo: convRepo,
-		msgRepo:  msgRepo,
-		fbRepo:   fbRepo,
-		sumRepo:  sumRepo,
+		convRepo:      convRepo,
+		msgRepo:       msgRepo,
+		fbRepo:        fbRepo,
+		sumRepo:       sumRepo,
+		titleMaxChars: 30,
+	}
+}
+
+// SetTitleMaxChars 设置会话标题最大长度。
+func (s *ConversationService) SetTitleMaxChars(maxChars int) {
+	if maxChars > 0 {
+		s.titleMaxChars = maxChars
 	}
 }
 
@@ -54,6 +63,17 @@ func (s *ConversationService) GetConversation(ctx context.Context, conversationI
 
 // UpdateTitle 更新会话标题。
 func (s *ConversationService) UpdateTitle(ctx context.Context, conversationID, userID, title string) error {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fmt.Errorf("会话名称不能为空")
+	}
+	maxChars := s.titleMaxChars
+	if maxChars <= 0 {
+		maxChars = 30
+	}
+	if len([]rune(title)) > maxChars {
+		return fmt.Errorf("会话名称长度不能超过%d个字符", maxChars)
+	}
 	return s.convRepo.UpdateTitle(ctx, conversationID, userID, title)
 }
 
