@@ -57,8 +57,9 @@ func (h *blockingHandle) Wait() {
 }
 
 type recordingMemoryService struct {
-	history []chat.Message
-	saved   []chat.Message
+	history      []chat.Message
+	saved        []chat.Message
+	conversation *Conversation
 }
 
 func (m *recordingMemoryService) LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error) {
@@ -68,6 +69,23 @@ func (m *recordingMemoryService) LoadHistory(ctx context.Context, conversationID
 func (m *recordingMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
 	m.saved = append(m.saved, msg)
 	return nil
+}
+
+func (m *recordingMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	return m.conversation, nil
+}
+
+type titleAwareMemoryService struct {
+	recordingMemoryService
+	conversation      *Conversation
+	missingBeforeSave bool
+}
+
+func (m *titleAwareMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	if m.missingBeforeSave && len(m.saved) == 0 {
+		return nil, errors.New("conversation not found")
+	}
+	return m.conversation, nil
 }
 
 type staticRetriever struct {
@@ -571,6 +589,61 @@ func TestPipeline_StreamChat_SystemOnlyIntentUsesDefaultPromptWhenTemplateMissin
 	}
 	if capturedReq.Messages[len(capturedReq.Messages)-1].Content != "你好" {
 		t.Fatalf("expected original question as user message, got: %s", capturedReq.Messages[len(capturedReq.Messages)-1].Content)
+	}
+}
+
+func TestPipeline_StreamChat_NewConversationFinishEventIncludesConversationTitle(t *testing.T) {
+	done := make(chan struct{})
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("你好")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	mem := &titleAwareMemoryService{
+		conversation:      &Conversation{ID: "conv-1", UserID: "user-1", Title: "会员咨询"},
+		missingBeforeSave: true,
+	}
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
+	p.StreamChat(context.Background(), "会员怎么查？", "conv-1", "task-1", false, s)
+
+	<-done
+	body := w.Body.String()
+	if !strings.Contains(body, `"title":"会员咨询"`) {
+		t.Fatalf("expected finish event to include conversation title, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_ExistingTitledConversationDoesNotResendTitle(t *testing.T) {
+	done := make(chan struct{})
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("继续回答。")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	mem := &titleAwareMemoryService{
+		conversation: &Conversation{ID: "conv-1", UserID: "user-1", Title: "已有标题"},
+	}
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
+	p.StreamChat(context.Background(), "继续", "conv-1", "task-1", false, s)
+
+	<-done
+	body := w.Body.String()
+	if strings.Contains(body, `"title"`) {
+		t.Fatalf("expected existing titled conversation not to resend title, got: %s", body)
 	}
 }
 

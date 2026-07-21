@@ -11,6 +11,7 @@ import (
 type MemoryService interface {
 	LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error)
 	SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error
+	LoadConversation(ctx context.Context, conversationID string) (*Conversation, error)
 }
 
 // NoopMemoryService returns empty history and discards saves.
@@ -21,4 +22,8 @@ func (n *NoopMemoryService) LoadHistory(ctx context.Context, conversationID stri
 }
 func (n *NoopMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
 	return nil
+}
+
+func (n *NoopMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	return nil, nil
 }

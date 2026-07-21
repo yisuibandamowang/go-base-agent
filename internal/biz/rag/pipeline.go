@@ -138,9 +138,10 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	if p.guidance != nil {
 		decision := p.guidance.DetectAmbiguity(q, resolvedSubIntents)
 		if decision.Action == GuidanceActionPrompt && strings.TrimSpace(decision.Prompt) != "" {
+			sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
 			_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
 			sender.SendMessage(MsgTypeResponse, decision.Prompt)
-			sender.SendFinish("", "")
+			sender.SendFinish("", resolveConversationTitle(ctx, p.memory, conversationID, sendTitleOnComplete))
 			sender.SendDone()
 			sender.Close()
 			finishTraceRun(traceStatusSuccess, nil)
@@ -184,6 +185,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		v := true
 		thinkingVal = &v
 	}
+	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
 
 	req := p.prompt.Build(PromptContext{
 		Question:     q,
@@ -199,14 +201,15 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	cb := &pipelineCallback{
-		ctx:            ctx,
-		conversationID: conversationID,
-		memory:         p.memory,
-		sender:         sender,
-		citations:      formatCitations(chunks),
-		task:           task,
-		traceRecorder:  p.trace,
-		traceRun:       traceRun,
+		ctx:                 ctx,
+		conversationID:      conversationID,
+		memory:              p.memory,
+		sender:              sender,
+		citations:           formatCitations(chunks),
+		task:                task,
+		traceRecorder:       p.trace,
+		traceRun:            traceRun,
+		sendTitleOnComplete: sendTitleOnComplete,
 	}
 	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)
 	cb.traceSpan = llmSpan
@@ -328,6 +331,7 @@ func deduplicateChunks(chunks []RetrievedChunk) []RetrievedChunk {
 }
 
 func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, task *streamTask, reason string) {
+	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
 	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
 	}
@@ -344,12 +348,13 @@ func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, 
 		},
 	}
 	cb := &pipelineCallback{
-		ctx:            ctx,
-		conversationID: conversationID,
-		memory:         p.memory,
-		sender:         sender,
-		answerPrefix:   prefix,
-		task:           task,
+		ctx:                 ctx,
+		conversationID:      conversationID,
+		memory:              p.memory,
+		sender:              sender,
+		answerPrefix:        prefix,
+		task:                task,
+		sendTitleOnComplete: sendTitleOnComplete,
 	}
 	handle, err := p.llm.StreamChat(ctx, req, cb)
 	if err != nil {
@@ -371,18 +376,19 @@ func (p *Pipeline) StopTask(taskID string) {
 
 // pipelineCallback converts LLM StreamCallback events to SSE events.
 type pipelineCallback struct {
-	ctx            context.Context
-	conversationID string
-	memory         MemoryService
-	sender         *SSESender
-	answer         strings.Builder
-	answerPrefix   string
-	citations      string
-	task           *streamTask
-	traceRecorder  TraceRecorder
-	traceRun       *TraceRunRecord
-	traceSpan      *traceSpan
-	firstPacket    bool
+	ctx                 context.Context
+	conversationID      string
+	memory              MemoryService
+	sender              *SSESender
+	answer              strings.Builder
+	answerPrefix        string
+	citations           string
+	task                *streamTask
+	traceRecorder       TraceRecorder
+	traceRun            *TraceRunRecord
+	traceSpan           *traceSpan
+	sendTitleOnComplete bool
+	firstPacket         bool
 }
 
 func (c *pipelineCallback) OnContent(content string) {
@@ -419,10 +425,11 @@ func (c *pipelineCallback) OnComplete() {
 			}
 		}
 	}
+	title := c.resolveConversationTitle()
 	if c.citations != "" {
 		_ = c.sender.SendMessage(MsgTypeResponse, c.citations)
 	}
-	c.sender.SendFinish("", "")
+	c.sender.SendFinish("", title)
 	c.sender.SendDone()
 	c.sender.Close()
 }
@@ -453,6 +460,43 @@ func (c *pipelineCallback) recordFirstPacket() {
 	if err := c.traceRecorder.FinishNode(c.ctx, c.traceRun.TraceID, node.NodeID, traceStatusSuccess, nil); err != nil {
 		slog.Warn("rag trace: finish first packet node failed", "traceId", c.traceRun.TraceID, "err", err)
 	}
+}
+
+func (c *pipelineCallback) resolveConversationTitle() string {
+	const fallbackTitle = "新对话"
+	if c == nil || c.memory == nil {
+		return fallbackTitle
+	}
+	return resolveConversationTitle(c.ctx, c.memory, c.conversationID, c.sendTitleOnComplete)
+}
+
+func shouldSendTitleOnComplete(ctx context.Context, memory MemoryService, conversationID string) bool {
+	if memory == nil {
+		return true
+	}
+	conv, err := memory.LoadConversation(ctx, conversationID)
+	if err != nil || conv == nil || strings.TrimSpace(conv.Title) == "" {
+		return true
+	}
+	return false
+}
+
+func resolveConversationTitle(ctx context.Context, memory MemoryService, conversationID string, sendTitleOnComplete bool) string {
+	const fallbackTitle = "新对话"
+	if !sendTitleOnComplete {
+		return ""
+	}
+	if memory == nil {
+		return fallbackTitle
+	}
+	conv, err := memory.LoadConversation(ctx, conversationID)
+	if err != nil || conv == nil {
+		return fallbackTitle
+	}
+	if title := strings.TrimSpace(conv.Title); title != "" {
+		return title
+	}
+	return fallbackTitle
 }
 
 func (p *Pipeline) systemOnlyPrompt(subIntents []SubQuestionIntent) (string, bool) {

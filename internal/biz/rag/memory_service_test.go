@@ -8,7 +8,8 @@ import (
 )
 
 type testMemoryStore struct {
-	messages []chat.Message
+	messages     []chat.Message
+	conversation *Conversation
 }
 
 func (s *testMemoryStore) LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error) {
@@ -19,7 +20,7 @@ func (s *testMemoryStore) AppendMessage(ctx context.Context, conversationID stri
 	return "msg-1", nil
 }
 func (s *testMemoryStore) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
-	return nil, nil
+	return s.conversation, nil
 }
 func (s *testMemoryStore) UpdateTitle(ctx context.Context, conversationID, title string) error {
 	return nil
@@ -88,5 +89,18 @@ func TestDefaultMemoryService_SaveMessage(t *testing.T) {
 	}
 	if len(store.messages) != 1 {
 		t.Fatal("message should be saved")
+	}
+}
+
+func TestDefaultMemoryService_LoadConversation(t *testing.T) {
+	store := &testMemoryStore{conversation: &Conversation{ID: "conv-1", Title: "会员咨询"}}
+	svc := NewDefaultMemoryService(store, 2)
+
+	conv, err := svc.LoadConversation(context.Background(), "conv-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conv == nil || conv.Title != "会员咨询" {
+		t.Fatalf("unexpected conversation: %+v", conv)
 	}
 }

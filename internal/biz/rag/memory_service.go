@@ -81,3 +81,8 @@ func (s *DefaultMemoryService) SaveMessage(ctx context.Context, conversationID s
 	_, err := s.store.AppendMessage(ctx, conversationID, msg)
 	return err
 }
+
+// LoadConversation loads the conversation metadata for title resolution.
+func (s *DefaultMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	return s.store.LoadConversation(ctx, conversationID)
+}
