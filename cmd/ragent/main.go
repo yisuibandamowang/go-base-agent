@@ -289,7 +289,13 @@ func main() {
 	if cfg.RAG.Trace.Enabled {
 		ragPipeline.SetTraceRecorder(rag.NewDBTraceRecorder(gormDB, cfg.RAG.Trace.MaxErrorLength))
 	}
-	ragCtl := rag.NewController(ragPipeline)
+	ragChatService := rag.NewQueuedChatService(
+		ragPipeline,
+		queueLimiter,
+		memSvc,
+		time.Duration(cfg.RAG.RateLimit.Global.MaxWaitSeconds)*time.Second,
+	)
+	ragCtl := rag.NewController(ragChatService)
 	ragCtl.SetIdempotentGuard(idempotentGuard)
 
 	gin.SetMode(gin.ReleaseMode)
