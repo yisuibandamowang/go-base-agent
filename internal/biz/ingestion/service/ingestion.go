@@ -546,7 +546,13 @@ func normalizeNodeType(nodeType string) string {
 
 func normalizeSourceType(sourceType string) string {
 	v := strings.TrimSpace(strings.ToLower(sourceType))
-	return strings.ReplaceAll(v, "-", "_")
+	v = strings.ReplaceAll(v, "-", "_")
+	switch v {
+	case "localfile", "local_file":
+		return "file"
+	default:
+		return v
+	}
 }
 
 func normalizeStatus(status string) string {

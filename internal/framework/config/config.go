@@ -105,6 +105,7 @@ type RAGConfig struct {
 	Knowledge    RAGKnowledgeConfig    `mapstructure:"knowledge"`
 	MCP          RAGMCPConfig          `mapstructure:"mcp"`
 	Search       RAGSearchConfig       `mapstructure:"search"`
+	Guidance     RAGGuidanceConfig     `mapstructure:"guidance"`
 	Trace        RAGTraceConfig        `mapstructure:"trace"`
 }
 
@@ -218,6 +219,13 @@ type RAGSearchChannelConfig struct {
 	ConfidenceThreshold float64 `mapstructure:"confidence-threshold"`
 	TopKMultiplier      int     `mapstructure:"top-k-multiplier"`
 	MinIntentScore      float64 `mapstructure:"min-intent-score"`
+}
+
+type RAGGuidanceConfig struct {
+	Enabled             bool    `mapstructure:"enabled"`
+	AmbiguityScoreRatio float64 `mapstructure:"ambiguity-score-ratio"`
+	AmbiguityMargin     float64 `mapstructure:"ambiguity-margin"`
+	MaxOptions          int     `mapstructure:"max-options"`
 }
 
 func (c RAGSearchChannelConfig) IsEnabledByDefault() bool {

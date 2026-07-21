@@ -49,7 +49,7 @@ func NewMinerUParser(client *MinerUClient, unpacker *MinerUResultUnpacker, opts 
 func (p *MinerUParser) Type() rag.ParserType { return rag.ParserMinerU }
 
 func (p *MinerUParser) Supports(mimeType string) bool {
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	switch normalizeMIMEType(mimeType) {
 	case "application/pdf",
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		"application/msword",
@@ -186,7 +186,7 @@ func resolveMinerUFileName(sourceFile, mimeType, documentID string) string {
 }
 
 func extFromMime(mimeType string) string {
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	switch normalizeMIMEType(mimeType) {
 	case "application/pdf":
 		return ".pdf"
 	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":

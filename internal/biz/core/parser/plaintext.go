@@ -12,8 +12,8 @@ type PlainTextParser struct{}
 func (p *PlainTextParser) Type() rag.ParserType { return "TEXT" }
 
 func (p *PlainTextParser) Supports(mimeType string) bool {
-	switch mimeType {
-	case "text/plain", "text/csv", "text/html", "text/xml", "application/json":
+	switch normalizeMIMEType(mimeType) {
+	case "text/plain", "text/csv", "application/json":
 		return true
 	}
 	return false

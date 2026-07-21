@@ -332,7 +332,7 @@ func sha256Hex(data []byte) string {
 }
 
 func fileTypeFromMimeOrName(mimeType, fileName string) string {
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	switch normalizeMIMEType(mimeType) {
 	case "text/markdown":
 		return "md"
 	case "text/html":
@@ -343,8 +343,22 @@ func fileTypeFromMimeOrName(mimeType, fileName string) string {
 		return "pdf"
 	case "application/json":
 		return "json"
+	case "application/xml", "text/xml":
+		return "xml"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return "pptx"
+	case "application/vnd.ms-powerpoint":
+		return "ppt"
 	}
 	return strings.TrimPrefix(strings.ToLower(filepath.Ext(fileName)), ".")
+}
+
+func normalizeMIMEType(mimeType string) string {
+	lower := strings.ToLower(strings.TrimSpace(mimeType))
+	if idx := strings.Index(lower, ";"); idx >= 0 {
+		lower = strings.TrimSpace(lower[:idx])
+	}
+	return lower
 }
 
 func truncateString(value string, maxLen int) string {

@@ -1,6 +1,10 @@
 package rag
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 // ParserType enumerates supported document parser types.
 // Aligns with Java ParserType.
@@ -34,11 +38,20 @@ type AssetRef struct {
 	SourceBlockID string
 }
 
+// Provenance describes where a parsed block came from.
+// Aligns with Java Provenance.
+type Provenance struct {
+	SourceFile string
+	SheetName  string
+}
+
 // Block represents a parsed document block element.
 // Aligns with Java Block (sealed interface) + subtypes.
 type Block struct {
-	Type    BlockType
-	Content string
+	ID         string
+	Type       BlockType
+	Content    string
+	Provenance Provenance
 	// for HeadingBlock
 	Level int
 	// for TableBlock
@@ -84,58 +97,61 @@ func (n *NoopParser) Parse(ctx context.Context, data []byte, mimeType string, op
 // RenderBlocks converts a list of blocks to plain text.
 // Aligns with Java BlockTextRenderer.
 func RenderBlocks(blocks []Block) string {
-	var result string
+	var sb strings.Builder
 	for _, b := range blocks {
-		if result != "" {
-			result += "\n"
-		}
 		switch b.Type {
 		case BlockHeading:
-			for i := 0; i < b.Level; i++ {
-				result += "#"
+			level := b.Level
+			if level < 1 {
+				level = 1
 			}
-			result += " " + b.Content
+			sb.WriteString(strings.Repeat("#", level))
+			sb.WriteByte(' ')
+			sb.WriteString(b.Content)
+			sb.WriteString("\n\n")
 		case BlockParagraph:
-			result += b.Content
+			sb.WriteString(b.Content)
+			sb.WriteString("\n\n")
 		case BlockCode:
-			result += "```" + b.Language + "\n" + b.Content + "\n```"
+			sb.WriteString("```")
+			sb.WriteString(b.Language)
+			sb.WriteByte('\n')
+			sb.WriteString(b.Content)
+			sb.WriteString("\n```\n\n")
 		case BlockList:
 			for i, item := range b.Items {
-				if i > 0 {
-					result += "\n"
-				}
 				if b.Ordered {
-					result += "- " + item
+					sb.WriteString(fmt.Sprintf("%d. ", i+1))
 				} else {
-					result += "- " + item
+					sb.WriteString("- ")
 				}
+				sb.WriteString(item)
+				sb.WriteByte('\n')
+			}
+			if len(b.Items) > 0 {
+				sb.WriteByte('\n')
 			}
 		case BlockTable:
 			if len(b.Headers) > 0 {
-				for j, cell := range b.Headers {
-					if j > 0 {
-						result += " | "
-					}
-					result += cell
-				}
-				result += "\n"
+				sb.WriteString(strings.Join(b.Headers, " | "))
+				sb.WriteByte('\n')
 			}
 			for _, row := range b.Rows {
-				for j, cell := range row {
-					if j > 0 {
-						result += " | "
-					}
-					result += cell
-				}
-				result += "\n"
+				sb.WriteString(strings.Join(row, " | "))
+				sb.WriteByte('\n')
 			}
+			sb.WriteByte('\n')
 		case BlockImage:
-			if b.Description != "" {
-				result += "[Image: " + b.Description + "]"
-			} else if b.AltText != "" {
-				result += "[Image: " + b.AltText + "]"
+			if desc := strings.TrimSpace(b.Description); desc != "" {
+				sb.WriteString(desc)
+				sb.WriteString("\n\n")
 			}
+			sb.WriteString("![")
+			sb.WriteString(b.Caption)
+			sb.WriteString("](")
+			sb.WriteString(b.Asset.PublicURL)
+			sb.WriteString(")\n\n")
 		}
 	}
-	return result
+	return strings.TrimSpace(sb.String())
 }

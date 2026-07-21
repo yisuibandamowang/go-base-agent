@@ -301,6 +301,132 @@ func TestFormatCitationSourceDoesNotExposeDocumentIDAsName(t *testing.T) {
 	}
 }
 
+func TestWithChunkSourcesGroupsByDocumentAndOrdersWithinDocByIndex(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{
+			ID:   "a3",
+			Text: "A-idx3正文",
+			Metadata: map[string]string{
+				"doc_id":      "docA",
+				"doc_name":    "员工手册.pdf",
+				"chunk_index": "3",
+			},
+		},
+		{
+			ID:   "b0",
+			Text: "B-idx0正文",
+			Metadata: map[string]string{
+				"doc_id":      "docB",
+				"doc_name":    "报销政策.md",
+				"chunk_index": "0",
+			},
+		},
+		{
+			ID:   "a1",
+			Text: "A-idx1正文",
+			Metadata: map[string]string{
+				"doc_id":      "docA",
+				"doc_name":    "员工手册旧标题.md",
+				"chunk_index": "1",
+			},
+		},
+		{
+			ID:   "a-no-index",
+			Text: "A-无索引正文",
+			Metadata: map[string]string{
+				"doc_id":   "docA",
+				"doc_name": "员工手册无索引标题.md",
+			},
+		},
+		{ID: "x0", Text: "孤块正文"},
+	}
+
+	result := withChunkSources(chunks, "fallback")
+
+	if strings.Index(result, "A-idx1正文") > strings.Index(result, "A-idx3正文") {
+		t.Fatalf("expected chunks in the same document to be ordered by chunk_index, got: %s", result)
+	}
+	if strings.Index(result, "A-idx3正文") > strings.Index(result, "A-无索引正文") {
+		t.Fatalf("expected chunks without chunk_index to be ordered after indexed chunks, got: %s", result)
+	}
+	if strings.Index(result, "A-idx3正文") > strings.Index(result, "B-idx0正文") {
+		t.Fatalf("expected document groups to keep first-hit relevance order, got: %s", result)
+	}
+	if strings.Index(result, "B-idx0正文") > strings.Index(result, "孤块正文") {
+		t.Fatalf("expected chunks without doc_id to remain as their own late group, got: %s", result)
+	}
+	if !strings.Contains(result, `source="员工手册"`) || !strings.Contains(result, `source="报销政策"`) {
+		t.Fatalf("expected source anchors without extensions, got: %s", result)
+	}
+	if strings.Contains(result, "员工手册.pdf") {
+		t.Fatalf("expected source title to strip extension, got: %s", result)
+	}
+	if strings.Contains(result, "员工手册旧标题") {
+		t.Fatalf("expected source title to come from first-hit chunk before index sorting, got: %s", result)
+	}
+	if !strings.Contains(result, "<content>\n孤块正文\n</content>") {
+		t.Fatalf("expected chunk without doc_id to render without source, got: %s", result)
+	}
+}
+
+func TestWithChunkSourcesJoinsSameDocumentChunksWithSingleNewline(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{
+			ID:   "c1",
+			Text: "第一块正文",
+			Metadata: map[string]string{
+				"doc_id":      "docC",
+				"doc_name":    "说明.txt",
+				"chunk_index": "1",
+			},
+		},
+		{
+			ID:   "c2",
+			Text: "第二块正文",
+			Metadata: map[string]string{
+				"doc_id":      "docC",
+				"doc_name":    "说明.txt",
+				"chunk_index": "2",
+			},
+		},
+	}
+
+	result := withChunkSources(chunks, "fallback")
+
+	if !strings.Contains(result, "第一块正文\n第二块正文") {
+		t.Fatalf("expected same-document chunks to be joined with a single newline, got: %s", result)
+	}
+}
+
+func TestWithChunkSourcesPreservesChunkTrailingNewlines(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{
+			ID:   "c1",
+			Text: "第一块正文\n",
+			Metadata: map[string]string{
+				"doc_id":      "docC",
+				"doc_name":    "说明.txt",
+				"chunk_index": "1",
+			},
+		},
+		{
+			ID:   "c2",
+			Text: "第二块正文",
+			Metadata: map[string]string{
+				"doc_id":      "docC",
+				"doc_name":    "说明.txt",
+				"chunk_index": "2",
+			},
+		},
+	}
+
+	result := withChunkSources(chunks, "fallback")
+
+	if !strings.Contains(result, "第一块正文\n\n第二块正文") {
+		t.Fatalf("expected chunk body newlines to be preserved before joining, got: %s", result)
+	}
+}
+
 func TestPipeline_StreamChat_NoRetrievedChunksPrefixesReasonThenGuidesWithLLM(t *testing.T) {
 	llm := &fakeLLMService{
 		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {

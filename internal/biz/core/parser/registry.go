@@ -86,6 +86,9 @@ func DefaultRegistry() *Registry {
 	reg.Register(&XLSXParser{})
 	reg.Register(&PDFParser{})
 	reg.Register(&DOCXParser{})
+	reg.Register(&PPTXParser{})
+	reg.Register(&HTMLParser{})
+	reg.Register(&XMLParser{})
 	reg.Register(&PlainTextParser{})
 	if defaultTikaURL != "" {
 		reg.Register(NewTikaParser(defaultTikaURL))

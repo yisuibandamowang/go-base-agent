@@ -32,14 +32,15 @@ func TestNoopParser(t *testing.T) {
 
 func TestRenderBlocks(t *testing.T) {
 	blocks := []Block{
-		{Type: BlockHeading, Level: 1, Content: "Title"},
+		{Type: BlockHeading, Level: 0, Content: "Title"},
 		{Type: BlockParagraph, Content: "Some text"},
 		{Type: BlockCode, Language: "go", Content: "fmt.Println()"},
-		{Type: BlockImage, Description: "a chart"},
+		{Type: BlockList, Ordered: true, Items: []string{"First", "Second"}},
+		{Type: BlockImage, Caption: "图1", Description: "a chart", Asset: AssetRef{PublicURL: "https://example.com/chart.png"}},
 	}
 	result := RenderBlocks(blocks)
 
-	if !strings.Contains(result, "# Title") {
+	if !strings.HasPrefix(result, "# Title") {
 		t.Fatal("missing heading")
 	}
 	if !strings.Contains(result, "Some text") {
@@ -48,8 +49,17 @@ func TestRenderBlocks(t *testing.T) {
 	if !strings.Contains(result, "```go") {
 		t.Fatal("missing code block")
 	}
+	if !strings.Contains(result, "1. First") || !strings.Contains(result, "2. Second") {
+		t.Fatal("missing ordered list")
+	}
 	if !strings.Contains(result, "a chart") {
 		t.Fatal("missing image description")
+	}
+	if !strings.Contains(result, "![图1](https://example.com/chart.png)") {
+		t.Fatal("missing image markdown")
+	}
+	if strings.Contains(result, "- First") {
+		t.Fatal("ordered list should not use bullet dash")
 	}
 }
 

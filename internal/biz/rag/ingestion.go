@@ -2,8 +2,11 @@ package rag
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 )
 
 // IngestionNodeType enumerates pipeline node types.
@@ -11,23 +14,85 @@ import (
 type IngestionNodeType string
 
 const (
-	NodeFetcher  IngestionNodeType = "FETCHER"
-	NodeParser   IngestionNodeType = "PARSER"
-	NodeEnhancer IngestionNodeType = "ENHANCER"
-	NodeChunker  IngestionNodeType = "CHUNKER"
-	NodeEnricher IngestionNodeType = "ENRICHER"
-	NodeIndexer  IngestionNodeType = "INDEXER"
+	NodeFetcher  IngestionNodeType = "fetcher"
+	NodeParser   IngestionNodeType = "parser"
+	NodeEnhancer IngestionNodeType = "enhancer"
+	NodeChunker  IngestionNodeType = "chunker"
+	NodeEnricher IngestionNodeType = "enricher"
+	NodeIndexer  IngestionNodeType = "indexer"
 )
+
+// NormalizeIngestionNodeType normalizes Java-compatible node type values.
+func NormalizeIngestionNodeType(value IngestionNodeType) IngestionNodeType {
+	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(string(value))), "-", "_")
+	switch normalized {
+	case "fetcher":
+		return NodeFetcher
+	case "parser":
+		return NodeParser
+	case "enhancer":
+		return NodeEnhancer
+	case "chunker":
+		return NodeChunker
+	case "enricher":
+		return NodeEnricher
+	case "indexer":
+		return NodeIndexer
+	default:
+		return IngestionNodeType(normalized)
+	}
+}
 
 // IngestionContext carries the state through the ingestion pipeline.
 // Aligns with Java IngestionContext.
 type IngestionContext struct {
-	RawBytes []byte
-	MimeType string
-	RawText  string
-	Document *ParsedDocument
-	Chunks   []VectorChunk
-	Metadata map[string]string
+	TaskID           string
+	PipelineID       string
+	Source           *DocumentSource
+	RawBytes         []byte
+	MimeType         string
+	RawText          string
+	Document         *ParsedDocument
+	Chunks           []VectorChunk
+	EnhancedText     string
+	Keywords         []string
+	Questions        []string
+	Metadata         map[string]any
+	VectorSpaceID    string
+	Status           IngestionStatus
+	Logs             []NodeLog
+	ErrorMessage     string
+	SkipIndexerWrite bool
+	Assets           []AssetRef
+}
+
+// DocumentSource describes the source document flowing through ingestion.
+type DocumentSource struct {
+	Type        string
+	Location    string
+	FileName    string
+	Credentials map[string]string
+}
+
+// IngestionStatus describes the current pipeline execution status.
+type IngestionStatus string
+
+const (
+	IngestionStatusPending   IngestionStatus = "pending"
+	IngestionStatusRunning   IngestionStatus = "running"
+	IngestionStatusCompleted IngestionStatus = "completed"
+	IngestionStatusFailed    IngestionStatus = "failed"
+)
+
+// NodeLog captures one ingestion node execution log.
+type NodeLog struct {
+	NodeID       string
+	NodeType     IngestionNodeType
+	Message      string
+	DurationMs   int64
+	Success      bool
+	ErrorMessage string
+	Output       map[string]any
 }
 
 // NodeConfig defines a pipeline node's configuration.
@@ -72,7 +137,7 @@ type IngestionEngine struct {
 func NewIngestionEngine(nodes []IngestionNode) *IngestionEngine {
 	m := make(map[IngestionNodeType]IngestionNode, len(nodes))
 	for _, n := range nodes {
-		m[n.NodeType()] = n
+		m[NormalizeIngestionNodeType(n.NodeType())] = n
 	}
 	return &IngestionEngine{
 		nodes:              m,
@@ -82,6 +147,15 @@ func NewIngestionEngine(nodes []IngestionNode) *IngestionEngine {
 
 // Execute runs the pipeline against the given context.
 func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, pipeline PipelineDefinition) error {
+	if ctx2 == nil {
+		return fmt.Errorf("ingestion context is nil")
+	}
+	if ctx2.Logs == nil {
+		ctx2.Logs = make([]NodeLog, 0, len(pipeline.Nodes))
+	}
+	ctx2.PipelineID = pipeline.ID
+	ctx2.Status = IngestionStatusRunning
+
 	nodeMap := make(map[string]NodeConfig, len(pipeline.Nodes))
 	referenced := make(map[string]struct{}, len(pipeline.Nodes))
 	for _, n := range pipeline.Nodes {
@@ -108,11 +182,14 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 		visited[current.NodeID] = true
 
 		if !current.Enabled {
+			ctx2.appendNodeLog(current, NodeResult{Success: true, ShouldContinue: true, ErrorMessage: "DISABLED"}, 0)
 			next, err := nextNode(nodeMap, current)
 			if err != nil {
+				ctx2.fail(err)
 				return err
 			}
 			if next == nil {
+				ctx2.Status = IngestionStatusCompleted
 				return nil
 			}
 			current = *next
@@ -120,38 +197,136 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 		}
 		if e.conditionEvaluator != nil && !e.conditionEvaluator.Evaluate(ctx2, current.Condition) {
 			slog.Info("ingestion node skipped by condition", "nodeId", current.NodeID, "nodeType", current.NodeType)
+			ctx2.appendNodeLog(current, NodeResult{Success: true, ShouldContinue: true, ErrorMessage: "条件未满足"}, 0)
 			next, err := nextNode(nodeMap, current)
 			if err != nil {
+				ctx2.fail(err)
 				return err
 			}
 			if next == nil {
+				ctx2.Status = IngestionStatusCompleted
 				return nil
 			}
 			current = *next
 			continue
 		}
 
-		node, ok := e.nodes[current.NodeType]
+		nodeType := NormalizeIngestionNodeType(current.NodeType)
+		node, ok := e.nodes[nodeType]
 		if !ok {
-			return fmt.Errorf("no implementation for node type %s", current.NodeType)
+			err := fmt.Errorf("no implementation for node type %s", current.NodeType)
+			ctx2.fail(err)
+			return err
 		}
 
+		start := time.Now()
 		result := node.Execute(ctx, ctx2, current)
+		ctx2.appendNodeLog(current, result, time.Since(start).Milliseconds())
 		if !result.Success {
-			return fmt.Errorf("node %s failed: %s", current.NodeID, result.ErrorMessage)
+			err := fmt.Errorf("node %s failed: %s", current.NodeID, result.ErrorMessage)
+			ctx2.fail(err)
+			return err
 		}
 		if !result.ShouldContinue {
+			ctx2.Status = IngestionStatusCompleted
 			return nil
 		}
 
 		next, err := nextNode(nodeMap, current)
 		if err != nil {
+			ctx2.fail(err)
 			return err
 		}
 		if next == nil {
+			ctx2.Status = IngestionStatusCompleted
 			return nil
 		}
 		current = *next
+	}
+}
+
+func (c *IngestionContext) appendNodeLog(config NodeConfig, result NodeResult, durationMs int64) {
+	if c == nil {
+		return
+	}
+	message := result.ErrorMessage
+	if message == "" {
+		message = "OK"
+	}
+	c.Logs = append(c.Logs, NodeLog{
+		NodeID:       config.NodeID,
+		NodeType:     NormalizeIngestionNodeType(config.NodeType),
+		Message:      message,
+		DurationMs:   durationMs,
+		Success:      result.Success,
+		ErrorMessage: result.ErrorMessage,
+		Output:       extractIngestionNodeOutput(c, config),
+	})
+}
+
+func (c *IngestionContext) fail(err error) {
+	if c == nil || err == nil {
+		return
+	}
+	c.Status = IngestionStatusFailed
+	c.ErrorMessage = err.Error()
+}
+
+func extractIngestionNodeOutput(ctx *IngestionContext, config NodeConfig) map[string]any {
+	if ctx == nil {
+		return map[string]any{}
+	}
+	switch NormalizeIngestionNodeType(config.NodeType) {
+	case NodeFetcher:
+		output := map[string]any{
+			"mimeType":       ctx.MimeType,
+			"rawBytesLength": len(ctx.RawBytes),
+		}
+		if len(ctx.RawBytes) > 0 {
+			output["rawBytesBase64"] = base64.StdEncoding.EncodeToString(ctx.RawBytes)
+		}
+		if ctx.Source != nil {
+			output["source"] = map[string]any{
+				"type":     ctx.Source.Type,
+				"location": ctx.Source.Location,
+				"fileName": ctx.Source.FileName,
+			}
+		}
+		return output
+	case NodeParser:
+		return map[string]any{
+			"mimeType": ctx.MimeType,
+			"rawText":  ctx.RawText,
+			"document": ctx.Document,
+		}
+	case NodeEnhancer:
+		return map[string]any{
+			"enhancedText": ctx.EnhancedText,
+			"keywords":     ctx.Keywords,
+			"questions":    ctx.Questions,
+			"metadata":     ctx.Metadata,
+		}
+	case NodeChunker, NodeEnricher:
+		return map[string]any{
+			"chunkCount": len(ctx.Chunks),
+			"chunks":     ctx.Chunks,
+		}
+	case NodeIndexer:
+		return map[string]any{
+			"settings":   config.Settings,
+			"chunkCount": len(ctx.Chunks),
+			"chunks":     ctx.Chunks,
+		}
+	default:
+		return map[string]any{
+			"mimeType":     ctx.MimeType,
+			"rawText":      ctx.RawText,
+			"enhancedText": ctx.EnhancedText,
+			"keywords":     ctx.Keywords,
+			"questions":    ctx.Questions,
+			"metadata":     ctx.Metadata,
+			"chunks":       ctx.Chunks,
+		}
 	}
 }
 

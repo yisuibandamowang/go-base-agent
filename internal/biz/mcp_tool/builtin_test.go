@@ -23,7 +23,7 @@ func TestRegisterToolsIncludesBuiltinMcpTools(t *testing.T) {
 		names[tool.Name] = true
 	}
 
-	for _, want := range []string{"sales_query", "weather_query", "youcom_search"} {
+	for _, want := range []string{"sales_query", "ticket_query", "weather_query", "youcom_search"} {
 		if !names[want] {
 			t.Fatalf("expected tool %q to be registered, got %+v", want, names)
 		}
@@ -65,6 +65,23 @@ func TestWeatherQueryTool_Forecast(t *testing.T) {
 	for _, want := range []string{"北京", "未来2天天气预报", "今天", "明天"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected forecast text to contain %q, got %q", want, text)
+		}
+	}
+}
+
+func TestTicketQueryTool_Summary(t *testing.T) {
+	tool := newTicketQueryTool()
+	content, err := tool.Execute(context.Background(), map[string]interface{}{
+		"region":    "华东",
+		"queryType": "summary",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := content[0].Text
+	for _, want := range []string{"客户工单汇总概览", "工单总数", "状态分布"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected summary text to contain %q, got %q", want, text)
 		}
 	}
 }

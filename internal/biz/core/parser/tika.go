@@ -32,7 +32,20 @@ func NewTikaParser(url string) *TikaParser {
 func (p *TikaParser) Type() rag.ParserType { return rag.ParserTika }
 
 func (p *TikaParser) Supports(mimeType string) bool {
-	return true
+	lower := normalizeMIMEType(mimeType)
+	if lower == "" || lower == "text/markdown" || lower == "text/x-markdown" ||
+		lower == "text/csv" || lower == "application/csv" || lower == "text/comma-separated-values" {
+		return false
+	}
+	if strings.HasPrefix(lower, "text/") {
+		return true
+	}
+	switch lower {
+	case "application/json", "application/xml", "application/xhtml+xml", "application/rtf":
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *TikaParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {

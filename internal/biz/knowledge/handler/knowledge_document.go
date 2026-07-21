@@ -461,6 +461,10 @@ func detectMIME(name string) string {
 	switch ext {
 	case ".pdf":
 		return "application/pdf"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case ".ppt":
+		return "application/vnd.ms-powerpoint"
 	case ".png":
 		return "image/png"
 	case ".jpg", ".jpeg":
@@ -475,6 +479,8 @@ func detectMIME(name string) string {
 		return "text/html; charset=utf-8"
 	case ".md", ".markdown":
 		return "text/markdown; charset=utf-8"
+	case ".xml":
+		return "application/xml; charset=utf-8"
 	case ".txt", ".csv", ".json":
 		return "text/plain; charset=utf-8"
 	default:

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	auditService "go-base-agent/internal/biz/audit/service"
+	coreingestion "go-base-agent/internal/biz/core/ingestion"
 	"go-base-agent/internal/biz/core/parser"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
 	ingestionModel "go-base-agent/internal/biz/ingestion/model"
@@ -21,6 +22,7 @@ import (
 	"go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/db"
+	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
 
 	"gorm.io/gorm"
@@ -39,6 +41,7 @@ type DocumentService struct {
 	ingestion      ingestionTaskStarter
 	auditRecorder  *auditService.BizChangeLogService
 	parserRegistry *parser.Registry
+	llm            chat.LLMService
 }
 
 type knowledgeBaseFinder interface {
@@ -103,6 +106,11 @@ func (s *DocumentService) SetParserRegistry(registry *parser.Registry) {
 	s.parserRegistry = registry
 }
 
+// SetLLMService 设置 pipeline 增强节点使用的大模型服务。
+func (s *DocumentService) SetLLMService(llm chat.LLMService) {
+	s.llm = llm
+}
+
 // CreateDocument 创建文档记录，状态为 pending。
 func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req dto.CreateDocumentReq, userID string) (*dto.DocumentResp, error) {
 	if _, err := s.kbRepo.FindByID(ctx, kbID); err != nil {
@@ -114,7 +122,7 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		FileURL:        req.FileURL,
 		FileType:       req.FileType,
 		FileSize:       req.FileSize,
-		SourceType:     req.SourceType,
+		SourceType:     normalizeKnowledgeSourceType(req.SourceType),
 		Status:         "pending",
 		CreatedBy:      userID,
 		SourceLocation: req.SourceLocation,
@@ -305,7 +313,7 @@ func (s *DocumentService) runPipelineProcess(ctx context.Context, doc *model.Kno
 	result, err := s.ingestion.Create(ctx, ingestionDto.CreateTaskReq{
 		PipelineID: doc.PipelineID,
 		Source: ingestionDto.DocumentSourceReq{
-			Type:     firstNonEmpty(doc.SourceType, doc.FileType, "file"),
+			Type:     firstNonEmpty(normalizeKnowledgeSourceType(doc.SourceType), doc.FileType, "file"),
 			Location: firstNonEmpty(documentSourceURL(doc), doc.SourceLocation, doc.FileURL),
 			FileName: doc.DocName,
 		},
@@ -358,20 +366,160 @@ func (s *DocumentService) ExecuteIngestionPipelineTask(ctx context.Context, req 
 	if err != nil {
 		return ingestionService.TaskExecutionResult{}, fmt.Errorf("document not found: %w", err)
 	}
-	start := time.Now()
-	_, _, _, chunks, err := s.runChunkProcess(ctx, doc)
+	kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+	if err != nil {
+		return ingestionService.TaskExecutionResult{}, fmt.Errorf("知识库不存在: %w", err)
+	}
+	pipeline, err := documentPipelineDefinitionFromNodes(req.PipelineID, nodes)
 	if err != nil {
 		return ingestionService.TaskExecutionResult{}, err
 	}
-	savedCount, err := s.persistChunksAndVectors(ctx, doc, chunks)
+	ingestionCtx, err := s.newDocumentIngestionContext(ctx, req, doc, kb)
 	if err != nil {
 		return ingestionService.TaskExecutionResult{}, err
 	}
-	durationMs := time.Since(start).Milliseconds()
+	engine := rag.NewIngestionEngine(s.documentIngestionNodes())
+	if err := engine.Execute(ctx, ingestionCtx, pipeline); err != nil {
+		return ingestionService.TaskExecutionResult{}, err
+	}
+	if len(ingestionCtx.Chunks) == 0 {
+		return ingestionService.TaskExecutionResult{}, fmt.Errorf("pipeline produced no chunks")
+	}
+	savedCount, err := s.persistChunksAndVectors(ctx, doc, ingestionCtx.Chunks)
+	if err != nil {
+		return ingestionService.TaskExecutionResult{}, err
+	}
 	return ingestionService.TaskExecutionResult{
 		ChunkCount: savedCount,
-		Nodes:      buildDocumentPipelineNodeResults(nodes, savedCount, durationMs),
+		Nodes:      documentTaskNodeResultsFromLogs(ingestionCtx.Logs),
 	}, nil
+}
+
+func (s *DocumentService) documentIngestionNodes() []rag.IngestionNode {
+	registry := s.parserRegistry
+	if registry == nil {
+		registry = parser.DefaultRegistry()
+	}
+	return []rag.IngestionNode{
+		coreingestion.NewFetcherNode(nil),
+		coreingestion.NewParserNode(registry),
+		coreingestion.NewEnhancerNode(s.llm),
+		coreingestion.NewChunkerNode(),
+		coreingestion.NewEnricherNode(s.llm),
+		coreingestion.NewIndexerNode(s.emb, s.vecStore),
+	}
+}
+
+func (s *DocumentService) newDocumentIngestionContext(ctx context.Context, req ingestionDto.CreateTaskReq, doc *model.KnowledgeDocument, kb *model.KnowledgeBase) (*rag.IngestionContext, error) {
+	var rawBytes []byte
+	if s.fileStore != nil {
+		data, err := s.fileStore.Read(doc.ID)
+		if err != nil {
+			return nil, fmt.Errorf("读取文件内容失败: %w", err)
+		}
+		rawBytes = data
+	}
+	source := &rag.DocumentSource{
+		Type:        firstNonEmpty(normalizeKnowledgeSourceType(req.Source.Type), normalizeKnowledgeSourceType(doc.SourceType), doc.FileType, "file"),
+		Location:    firstNonEmpty(req.Source.Location, documentSourceURL(doc), doc.SourceLocation, doc.FileURL),
+		FileName:    firstNonEmpty(req.Source.FileName, doc.DocName),
+		Credentials: req.Source.Credentials,
+	}
+	if len(rawBytes) == 0 && strings.TrimSpace(source.Location) == "" {
+		return nil, fmt.Errorf("文件内容为空")
+	}
+	metadata := map[string]any{
+		"docId":   doc.ID,
+		"kbId":    doc.KbID,
+		"docName": doc.DocName,
+	}
+	for k, v := range req.Metadata {
+		metadata[k] = v
+	}
+	return &rag.IngestionContext{
+		TaskID:           doc.ID,
+		PipelineID:       req.PipelineID,
+		Source:           source,
+		RawBytes:         rawBytes,
+		MimeType:         detectDocumentMIME(doc),
+		Metadata:         metadata,
+		VectorSpaceID:    firstNonEmpty(vectorSpaceIDString(req.VectorSpaceID), kb.CollectionName),
+		SkipIndexerWrite: true,
+	}, nil
+}
+
+func documentPipelineDefinitionFromNodes(pipelineID string, nodes []ingestionModel.IngestionPipelineNode) (rag.PipelineDefinition, error) {
+	definition := rag.PipelineDefinition{
+		ID:    pipelineID,
+		Nodes: make([]rag.NodeConfig, 0, len(nodes)),
+	}
+	for _, node := range nodes {
+		settings, err := readPipelineNodeJSONMap(node.SettingsJSON)
+		if err != nil {
+			return rag.PipelineDefinition{}, fmt.Errorf("parse node %s settings: %w", node.NodeID, err)
+		}
+		condition, err := readPipelineNodeJSONMap(node.ConditionJSON)
+		if err != nil {
+			return rag.PipelineDefinition{}, fmt.Errorf("parse node %s condition: %w", node.NodeID, err)
+		}
+		var conditionValue any
+		if len(condition) > 0 {
+			conditionValue = condition
+		}
+		definition.Nodes = append(definition.Nodes, rag.NodeConfig{
+			NodeID:     node.NodeID,
+			NodeType:   rag.NormalizeIngestionNodeType(rag.IngestionNodeType(node.NodeType)),
+			Settings:   settings,
+			Condition:  conditionValue,
+			NextNodeID: node.NextNodeID,
+			Enabled:    true,
+		})
+	}
+	return definition, nil
+}
+
+func readPipelineNodeJSONMap(raw string) (map[string]any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func documentTaskNodeResultsFromLogs(logs []rag.NodeLog) []ingestionService.TaskNodeExecutionResult {
+	results := make([]ingestionService.TaskNodeExecutionResult, 0, len(logs))
+	for _, log := range logs {
+		status := "success"
+		if !log.Success {
+			status = "failed"
+		}
+		results = append(results, ingestionService.TaskNodeExecutionResult{
+			NodeID:       log.NodeID,
+			NodeType:     string(log.NodeType),
+			Status:       status,
+			DurationMs:   log.DurationMs,
+			Message:      log.Message,
+			ErrorMessage: log.ErrorMessage,
+			Output:       log.Output,
+		})
+	}
+	return results
+}
+
+func vectorSpaceIDString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	case nil:
+		return ""
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }
 
 // runChunkProcess 执行分块处理：Extract → Chunk → Embed
@@ -536,6 +684,10 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 		return "application/pdf"
 	case "docx":
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case "pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case "ppt":
+		return "application/vnd.ms-powerpoint"
 	case "xlsx":
 		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	case "csv":
@@ -548,6 +700,8 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 		return "text/plain"
 	case "json":
 		return "application/json"
+	case "xml":
+		return "application/xml"
 	case "png":
 		return "image/png"
 	case "jpg", "jpeg":
@@ -561,6 +715,10 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 			return "application/pdf"
 		case ".docx":
 			return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		case ".pptx":
+			return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+		case ".ppt":
+			return "application/vnd.ms-powerpoint"
 		case ".xlsx":
 			return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 		case ".csv":
@@ -571,6 +729,8 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 			return "text/html"
 		case ".json":
 			return "application/json"
+		case ".xml":
+			return "application/xml"
 		case ".png":
 			return "image/png"
 		case ".jpg", ".jpeg":
@@ -1317,6 +1477,17 @@ func normalizeDocumentSchedule(doc *model.KnowledgeDocument, enabled int16, cron
 		return 0, ""
 	}
 	return 1, cronExpr
+}
+
+func normalizeKnowledgeSourceType(sourceType string) string {
+	v := strings.TrimSpace(strings.ToLower(sourceType))
+	v = strings.ReplaceAll(v, "-", "_")
+	switch v {
+	case "localfile", "local_file":
+		return "file"
+	default:
+		return v
+	}
 }
 
 func (s *DocumentService) recordAudit(ctx context.Context, req auditService.RecordReq) {

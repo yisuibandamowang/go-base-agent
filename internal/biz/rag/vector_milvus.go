@@ -267,13 +267,15 @@ func milvusResultSetsToChunks(resultSets []milvusclient.ResultSet) []VectorChunk
 			if docID != "" {
 				metadata["doc_id"] = docID
 			}
-			chunks = append(chunks, VectorChunk{
+			chunk := VectorChunk{
 				ChunkID:  chunkID,
 				DocID:    docID,
 				Content:  milvusColumnString(contentColumn, i),
 				Score:    milvusScore(resultSet.Scores, i),
 				Metadata: metadata,
-			})
+			}
+			applyStructuredMetadata(&chunk)
+			chunks = append(chunks, chunk)
 		}
 	}
 	return chunks

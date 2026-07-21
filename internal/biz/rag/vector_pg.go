@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -131,13 +132,15 @@ func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec [
 	}
 	chunks := make([]VectorChunk, 0, len(rows))
 	for _, r := range rows {
-		chunks = append(chunks, VectorChunk{
+		chunk := VectorChunk{
 			ChunkID:   r.ID,
 			Content:   r.Content,
 			Embedding: stringToVec(r.Embedding),
 			Score:     r.Score,
 			Metadata:  parseVectorMetadata(r.Metadata),
-		})
+		}
+		applyStructuredMetadata(&chunk)
+		chunks = append(chunks, chunk)
 	}
 	return chunks, nil
 }
@@ -149,11 +152,72 @@ func buildVectorMetadata(docID string, chunk VectorChunk) string {
 	for k, v := range chunk.Metadata {
 		meta[k] = v
 	}
-	data, err := json.Marshal(meta)
+	if strings.TrimSpace(chunk.BlockType) != "" {
+		meta["block_type"] = chunk.BlockType
+	}
+	if len(chunk.OutlinePath) > 0 {
+		meta["outline_path"] = outlinePathString(chunk.OutlinePath)
+	}
+	if strings.TrimSpace(chunk.SectionContext) != "" {
+		meta["section_context"] = chunk.SectionContext
+	}
+	if strings.TrimSpace(chunk.Provenance.SourceFile) != "" {
+		meta["source_file"] = chunk.Provenance.SourceFile
+	}
+	if strings.TrimSpace(chunk.Provenance.SheetName) != "" {
+		meta["sheet_name"] = chunk.Provenance.SheetName
+	}
+	if len(chunk.SourceBlockIDs) > 0 {
+		meta["source_block_ids"] = strings.Join(appendUniqueStrings(nil, chunk.SourceBlockIDs...), ",")
+	}
+	if urls := assetURLs(chunk.Assets); len(urls) > 0 {
+		meta["asset_urls"] = strings.Join(urls, ",")
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(meta)
 	if err != nil {
 		return fmt.Sprintf(`{"doc_id":"%s","index":%d}`, docID, chunk.Index)
 	}
-	return string(data)
+	return strings.TrimSpace(buf.String())
+}
+
+func applyStructuredMetadata(chunk *VectorChunk) {
+	if chunk == nil || chunk.Metadata == nil {
+		return
+	}
+	if chunk.BlockType == "" {
+		chunk.BlockType = chunk.Metadata["block_type"]
+	}
+	if len(chunk.OutlinePath) == 0 {
+		chunk.OutlinePath = splitOutlinePath(chunk.Metadata["outline_path"])
+	}
+	if chunk.SectionContext == "" {
+		chunk.SectionContext = chunk.Metadata["section_context"]
+	}
+	if strings.TrimSpace(chunk.Provenance.SourceFile) == "" {
+		chunk.Provenance.SourceFile = chunk.Metadata["source_file"]
+	}
+	if strings.TrimSpace(chunk.Provenance.SheetName) == "" {
+		chunk.Provenance.SheetName = chunk.Metadata["sheet_name"]
+	}
+	if len(chunk.SourceBlockIDs) == 0 {
+		chunk.SourceBlockIDs = splitCSVMetadata(chunk.Metadata["source_block_ids"])
+	}
+}
+
+func assetURLs(assets []AssetRef) []string {
+	if len(assets) == 0 {
+		return nil
+	}
+	urls := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		if strings.TrimSpace(asset.PublicURL) != "" {
+			urls = appendUniqueStrings(urls, asset.PublicURL)
+		}
+	}
+	return urls
 }
 
 func parseVectorMetadata(raw string) map[string]string {

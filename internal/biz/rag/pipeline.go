@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,14 +15,16 @@ import (
 // Pipeline orchestrates the RAG chat flow.
 // Aligns with Java StreamChatPipeline.
 type Pipeline struct {
-	llm      chat.LLMService
-	prompt   PromptBuilder
-	rewrite  QueryRewriter
-	retrieve Retriever
-	memory   MemoryService
-	mcp      McpContextProvider
-	trace    TraceRecorder
-	tasks    *streamTaskManager
+	llm            chat.LLMService
+	prompt         PromptBuilder
+	rewrite        QueryRewriter
+	retrieve       Retriever
+	memory         MemoryService
+	mcp            McpContextProvider
+	intentResolver IntentResolutionService
+	guidance       *IntentGuidanceService
+	trace          TraceRecorder
+	tasks          *streamTaskManager
 }
 
 // NewPipeline creates a new RAG pipeline.
@@ -32,6 +35,16 @@ func NewPipeline(llm chat.LLMService, prompt PromptBuilder, rewrite QueryRewrite
 // SetMcpContextProvider sets an optional MCP context provider for chat prompts.
 func (p *Pipeline) SetMcpContextProvider(provider McpContextProvider) {
 	p.mcp = provider
+}
+
+// SetIntentResolver sets an optional intent resolver for intent-aware retrieval and guidance.
+func (p *Pipeline) SetIntentResolver(resolver IntentResolutionService) {
+	p.intentResolver = resolver
+}
+
+// SetIntentGuidanceService sets an optional ambiguity guidance service.
+func (p *Pipeline) SetIntentGuidanceService(guidance *IntentGuidanceService) {
+	p.guidance = guidance
 }
 
 // SetTraceRecorder sets an optional recorder for RAG trace runs and nodes.
@@ -102,6 +115,37 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	} else {
 		rewriteSpan.finish(traceStatusSuccess, nil)
+	}
+
+	var resolvedSubIntents []SubQuestionIntent
+	if p.intentResolver != nil {
+		intentSpan := p.startTraceNode(ctx, traceRun, "", "intent-resolve", "INTENT", 0)
+		intentQuestions := subQuestions
+		if len(intentQuestions) == 0 {
+			intentQuestions = []string{q}
+		}
+		resolvedSubIntents, err = p.intentResolver.ResolveQuestions(ctx, intentQuestions)
+		if err != nil {
+			slog.Warn("rag: intent resolve failed", "err", err)
+			if intentSpan != nil {
+				intentSpan.finish(traceStatusError, err)
+			}
+		} else if intentSpan != nil {
+			intentSpan.finish(traceStatusSuccess, nil)
+		}
+	}
+
+	if p.guidance != nil {
+		decision := p.guidance.DetectAmbiguity(q, resolvedSubIntents)
+		if decision.Action == GuidanceActionPrompt && strings.TrimSpace(decision.Prompt) != "" {
+			_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
+			sender.SendMessage(MsgTypeResponse, decision.Prompt)
+			sender.SendFinish("", "")
+			sender.SendDone()
+			sender.Close()
+			finishTraceRun(traceStatusSuccess, nil)
+			return
+		}
 	}
 
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
@@ -414,22 +458,120 @@ func withChunkSources(chunks []RetrievedChunk, fallback string) string {
 	if len(chunks) == 0 {
 		return fallback
 	}
+	groups := groupChunksByDocument(chunks)
 	var b strings.Builder
-	for i, chunk := range chunks {
+	for i, group := range groups {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString("[片段")
-		b.WriteString(strconv.Itoa(i + 1))
-		if source := formatCitationSource(chunk.Metadata); source != "" {
-			b.WriteString("，来源：")
-			b.WriteString(source)
+		title := sanitizeContextSource(group.title)
+		if title != "" {
+			b.WriteString(`<content source="`)
+			b.WriteString(title)
+			b.WriteString(`">`)
+			b.WriteString("\n")
+		} else {
+			b.WriteString("<content>\n")
 		}
-		b.WriteString("]\n")
-		b.WriteString(chunk.Text)
-		b.WriteString("\n")
+		b.WriteString(joinContextChunkText(group.chunks))
+		b.WriteString("\n</content>")
 	}
 	return b.String()
+}
+
+type contextChunkGroup struct {
+	title  string
+	chunks []RetrievedChunk
+}
+
+func groupChunksByDocument(chunks []RetrievedChunk) []contextChunkGroup {
+	groups := make([]contextChunkGroup, 0, len(chunks))
+	groupByDocID := make(map[string]int)
+	for _, chunk := range chunks {
+		docID := strings.TrimSpace(chunk.Metadata["doc_id"])
+		if docID == "" {
+			groups = append(groups, contextChunkGroup{
+				title:  resolveContextSourceTitle([]RetrievedChunk{chunk}),
+				chunks: []RetrievedChunk{chunk},
+			})
+			continue
+		}
+		index, ok := groupByDocID[docID]
+		if !ok {
+			groupByDocID[docID] = len(groups)
+			groups = append(groups, contextChunkGroup{})
+			index = len(groups) - 1
+		}
+		if groups[index].title == "" {
+			groups[index].title = resolveContextSourceTitle([]RetrievedChunk{chunk})
+		}
+		groups[index].chunks = append(groups[index].chunks, chunk)
+	}
+	for i := range groups {
+		sort.SliceStable(groups[i].chunks, func(a, b int) bool {
+			left, leftOK := contextChunkIndex(groups[i].chunks[a])
+			right, rightOK := contextChunkIndex(groups[i].chunks[b])
+			if leftOK != rightOK {
+				return leftOK
+			}
+			return left < right
+		})
+	}
+	return groups
+}
+
+func contextChunkIndex(chunk RetrievedChunk) (int, bool) {
+	if len(chunk.Metadata) == 0 {
+		return 0, false
+	}
+	value := strings.TrimSpace(firstNonEmpty(chunk.Metadata["chunk_index"], chunk.Metadata["index"]))
+	if value == "" {
+		return 0, false
+	}
+	index, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return index, true
+}
+
+func joinContextChunkText(chunks []RetrievedChunk) string {
+	texts := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		text := chunk.Text
+		if text == "" {
+			continue
+		}
+		texts = append(texts, text)
+	}
+	return strings.Join(texts, "\n")
+}
+
+func resolveContextSourceTitle(chunks []RetrievedChunk) string {
+	for _, chunk := range chunks {
+		if len(chunk.Metadata) == 0 {
+			continue
+		}
+		name := strings.TrimSpace(chunk.Metadata["doc_name"])
+		if name == "" {
+			continue
+		}
+		return stripContextSourceExtension(name)
+	}
+	return ""
+}
+
+func stripContextSourceExtension(name string) string {
+	dot := strings.LastIndex(name, ".")
+	if dot > 0 && dot < len(name)-1 {
+		return name[:dot]
+	}
+	return name
+}
+
+func sanitizeContextSource(source string) string {
+	source = strings.NewReplacer(`"`, "", "<", "", ">", "").Replace(source)
+	return strings.TrimSpace(source)
 }
 
 func formatCitations(chunks []RetrievedChunk) string {

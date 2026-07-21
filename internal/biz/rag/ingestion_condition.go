@@ -27,13 +27,62 @@ func (e *ConditionEvaluator) Evaluate(ctx *IngestionContext, condition any) bool
 	case bool:
 		return c
 	case string:
-		v, err := strconv.ParseBool(strings.TrimSpace(c))
-		return err == nil && v
+		return e.evaluateString(ctx, c)
 	case map[string]any:
 		return e.evaluateObject(ctx, c)
 	default:
 		return true
 	}
+}
+
+func (e *ConditionEvaluator) evaluateString(ctx *IngestionContext, condition string) bool {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return true
+	}
+	if v, err := strconv.ParseBool(condition); err == nil {
+		return v
+	}
+	if strings.HasPrefix(condition, "!") {
+		return !e.evaluateString(ctx, strings.TrimSpace(strings.TrimPrefix(condition, "!")))
+	}
+	if parts := splitConditionExpression(condition, "||"); len(parts) > 1 {
+		for _, part := range parts {
+			if e.evaluateString(ctx, part) {
+				return true
+			}
+		}
+		return false
+	}
+	if parts := splitConditionExpression(condition, "&&"); len(parts) > 1 {
+		for _, part := range parts {
+			if !e.evaluateString(ctx, part) {
+				return false
+			}
+		}
+		return true
+	}
+	if field, arg, ok := parseConditionMethod(condition, ".contains("); ok {
+		return conditionContains(readConditionField(ctx, normalizeConditionField(field)), arg)
+	}
+	if field, arg, ok := parseConditionMethod(condition, ".matches("); ok {
+		return compareConditionValue(readConditionField(ctx, normalizeConditionField(field)), arg, "regex")
+	}
+	for _, op := range []string{"!=", "==", ">=", "<=", ">", "<"} {
+		if left, right, ok := splitConditionComparison(condition, op); ok {
+			operator := mapConditionOperator(op)
+			if strings.EqualFold(right, "null") {
+				if op == "!=" {
+					return readConditionField(ctx, normalizeConditionField(left)) != nil
+				}
+				if op == "==" {
+					return readConditionField(ctx, normalizeConditionField(left)) == nil
+				}
+			}
+			return compareConditionValue(readConditionField(ctx, normalizeConditionField(left)), parseConditionLiteral(right), operator)
+		}
+	}
+	return false
 }
 
 func (e *ConditionEvaluator) evaluateObject(ctx *IngestionContext, condition map[string]any) bool {
@@ -105,7 +154,7 @@ func compareConditionValue(left any, right any, operator string) bool {
 
 func readConditionField(ctx *IngestionContext, path string) any {
 	var current any = ctx
-	for _, part := range strings.Split(path, ".") {
+	for _, part := range splitConditionPath(path) {
 		part = strings.TrimSpace(part)
 		if part == "" || current == nil {
 			return nil
@@ -149,6 +198,122 @@ func readConditionPart(current any, part string) any {
 		}
 	}
 	return nil
+}
+
+func splitConditionExpression(expr, sep string) []string {
+	parts := make([]string, 0, 2)
+	start := 0
+	quote := rune(0)
+	for i := 0; i+len(sep) <= len(expr); i++ {
+		ch := rune(expr[i])
+		if (ch == '\'' || ch == '"') && (i == 0 || expr[i-1] != '\\') {
+			if quote == 0 {
+				quote = ch
+			} else if quote == ch {
+				quote = 0
+			}
+			continue
+		}
+		if quote == 0 && strings.HasPrefix(expr[i:], sep) {
+			parts = append(parts, strings.TrimSpace(expr[start:i]))
+			start = i + len(sep)
+			i += len(sep) - 1
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	parts = append(parts, strings.TrimSpace(expr[start:]))
+	return parts
+}
+
+func parseConditionMethod(expr, method string) (string, any, bool) {
+	idx := strings.Index(expr, method)
+	if idx < 0 || !strings.HasSuffix(expr, ")") {
+		return "", nil, false
+	}
+	field := strings.TrimSpace(expr[:idx])
+	rawArg := strings.TrimSpace(expr[idx+len(method) : len(expr)-1])
+	return field, parseConditionLiteral(rawArg), true
+}
+
+func splitConditionComparison(expr, op string) (string, string, bool) {
+	idx := strings.Index(expr, op)
+	if idx <= 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(expr[:idx]), strings.TrimSpace(expr[idx+len(op):]), true
+}
+
+func mapConditionOperator(op string) string {
+	switch op {
+	case "!=":
+		return "ne"
+	case ">":
+		return "gt"
+	case ">=":
+		return "gte"
+	case "<":
+		return "lt"
+	case "<=":
+		return "lte"
+	default:
+		return "eq"
+	}
+}
+
+func normalizeConditionField(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.TrimPrefix(path, "#ctx.")
+	path = strings.TrimPrefix(path, "ctx.")
+	return path
+}
+
+func parseConditionLiteral(raw string) any {
+	raw = strings.TrimSpace(raw)
+	if len(raw) >= 2 {
+		quote := raw[0]
+		if (quote == '\'' || quote == '"') && raw[len(raw)-1] == quote {
+			return strings.ReplaceAll(raw[1:len(raw)-1], `\`+string(quote), string(quote))
+		}
+	}
+	if strings.EqualFold(raw, "null") {
+		return nil
+	}
+	if v, err := strconv.ParseBool(raw); err == nil {
+		return v
+	}
+	if v, err := strconv.ParseFloat(raw, 64); err == nil {
+		return v
+	}
+	return raw
+}
+
+func splitConditionPath(path string) []string {
+	parts := make([]string, 0)
+	for _, part := range strings.Split(path, ".") {
+		part = strings.TrimSpace(part)
+		for {
+			open := strings.Index(part, "[")
+			if open < 0 || !strings.HasSuffix(part, "]") {
+				break
+			}
+			if open > 0 {
+				parts = append(parts, part[:open])
+			}
+			key := strings.TrimSpace(part[open+1 : len(part)-1])
+			if len(key) >= 2 && (key[0] == '\'' || key[0] == '"') && key[len(key)-1] == key[0] {
+				key = key[1 : len(key)-1]
+			}
+			parts = append(parts, key)
+			part = ""
+			break
+		}
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
 }
 
 func conditionEqual(left any, right any) bool {

@@ -140,6 +140,7 @@ func main() {
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, vecStore, fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)
+	docSvc.SetLLMService(llmService)
 	if parserRegistry := buildDocumentParserRegistry(cfg, vlmService, hasVLM, fileStore); parserRegistry != nil {
 		docSvc.SetParserRegistry(parserRegistry)
 	}
@@ -204,6 +205,16 @@ func main() {
 	intentSvc := intentService.NewIntentService(intentTreeRepo, termMappingRepo, gormDB)
 	intentSvc.SetAuditRecorder(auditSvc)
 	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
+	intentResolverSvc := rag.NewIntentResolver(intentTreeRepo, rag.IntentResolverOptions{
+		MinScore:   cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
+		MaxIntents: 5,
+	})
+	intentGuidanceSvc := rag.NewIntentGuidanceService(rag.GuidanceOptions{
+		Enabled:             cfg.RAG.Guidance.Enabled,
+		AmbiguityScoreRatio: cfg.RAG.Guidance.AmbiguityScoreRatio,
+		AmbiguityMargin:     cfg.RAG.Guidance.AmbiguityMargin,
+		MaxOptions:          cfg.RAG.Guidance.MaxOptions,
+	})
 
 	adminRepoObj := adminRepo.NewAdminRepo(gormDB)
 	sampleQRepo := adminRepo.NewSampleQuestionRepo(gormDB)
@@ -272,6 +283,8 @@ func main() {
 		memSvc,
 	)
 	ragPipeline.SetMcpContextProvider(rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector))
+	ragPipeline.SetIntentResolver(intentResolverSvc)
+	ragPipeline.SetIntentGuidanceService(intentGuidanceSvc)
 	if cfg.RAG.Trace.Enabled {
 		ragPipeline.SetTraceRecorder(rag.NewDBTraceRecorder(gormDB, cfg.RAG.Trace.MaxErrorLength))
 	}
@@ -375,7 +388,7 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
-		registerRagEvalRoute(api, llmRewriter, vectorRetriever, cfg.App.Eval.Enabled)
+		registerRagEvalRoute(api, llmRewriter, vectorRetriever, cfg.App.Eval.Enabled, intentResolverSvc)
 		demoH := newDemoHandler()
 		if hasVLM {
 			demoH = newDemoHandlerWithVLM(vlmService)
@@ -603,11 +616,15 @@ func registerStatusRoutes(r *gin.Engine) {
 	})
 }
 
-func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retriever rag.Retriever, enabled bool) {
+func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retriever rag.Retriever, enabled bool, resolvers ...rag.IntentResolutionService) {
 	if !enabled {
 		return
 	}
-	api.GET("/rag/eval", ragEval(rewriter, retriever))
+	var resolver rag.IntentResolutionService
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
+	api.GET("/rag/eval", ragEval(rewriter, retriever, resolver))
 }
 
 func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service, rerank.Service, vlm.Service, bool) {
@@ -738,16 +755,18 @@ func buildDocumentParserRegistry(cfg *config.Config, vlmService vlm.Service, has
 	} else if err != nil {
 		slog.Warn("asset uploader unavailable, image parser disabled", "err", err)
 	}
-	if tikaURL := strings.TrimSpace(cfg.RAG.Parser.TikaURL); tikaURL != "" {
-		reg.Register(coreparser.NewTikaParser(tikaURL))
-	}
-
 	reg.Register(&coreparser.MarkdownParser{})
 	reg.Register(&coreparser.CSVParser{})
 	reg.Register(&coreparser.XLSXParser{})
 	reg.Register(&coreparser.PDFParser{})
 	reg.Register(&coreparser.DOCXParser{})
+	reg.Register(&coreparser.PPTXParser{})
+	reg.Register(&coreparser.HTMLParser{})
+	reg.Register(&coreparser.XMLParser{})
 	reg.Register(&coreparser.PlainTextParser{})
+	if tikaURL := strings.TrimSpace(cfg.RAG.Parser.TikaURL); tikaURL != "" {
+		reg.Register(coreparser.NewTikaParser(tikaURL))
+	}
 
 	_ = fileStore
 	return reg
@@ -779,7 +798,7 @@ func ragSettings(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever) gin.HandlerFunc {
+func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.IntentResolutionService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		question := c.Query("question")
 		if question == "" {
@@ -787,7 +806,7 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever) gin.HandlerFun
 			return
 		}
 		start := time.Now()
-		subIntents := []string{question}
+		subQuestions := []string{question}
 		rewrittenQuestion := question
 		if rewriter != nil {
 			if result, err := rewriter.Rewrite(c.Request.Context(), question, nil); err == nil && result != nil {
@@ -795,8 +814,14 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever) gin.HandlerFun
 					rewrittenQuestion = strings.TrimSpace(result.RewrittenQuestion)
 				}
 				if len(result.SubQuestions) > 0 {
-					subIntents = result.SubQuestions
+					subQuestions = result.SubQuestions
 				}
+			}
+		}
+		intentLeafIDs := nullableIntentLeafIDs(subQuestions)
+		if resolver != nil {
+			if resolved, err := resolver.ResolveQuestions(c.Request.Context(), evalIntentQuestions(rewrittenQuestion, subQuestions)); err == nil && len(resolved) > 0 {
+				intentLeafIDs = rag.IntentLeafIDs(resolved)
 			}
 		}
 		chunks, err := retriever.Retrieve(c.Request.Context(), rewrittenQuestion, 10)
@@ -832,9 +857,27 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever) gin.HandlerFun
 			"hasKb":                  len(chunks) > 0,
 			"hasMcp":                 false,
 			"mcpContext":             "",
-			"subIntents":             subIntents,
-			"intentLeafIds":          []any{nil},
+			"subIntents":             subQuestions,
+			"intentLeafIds":          intentLeafIDs,
 			"latencyMs":              time.Since(start).Milliseconds(),
 		}))
 	}
+}
+
+func evalIntentQuestions(rewrittenQuestion string, subQuestions []string) []string {
+	if len(subQuestions) > 0 {
+		return subQuestions
+	}
+	if strings.TrimSpace(rewrittenQuestion) == "" {
+		return nil
+	}
+	return []string{rewrittenQuestion}
+}
+
+func nullableIntentLeafIDs(subQuestions []string) []*string {
+	ids := make([]*string, 0, len(subQuestions))
+	for range subQuestions {
+		ids = append(ids, nil)
+	}
+	return ids
 }

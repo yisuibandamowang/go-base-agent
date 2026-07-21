@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	auditRepo "go-base-agent/internal/biz/audit/repo"
 	auditService "go-base-agent/internal/biz/audit/service"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
+	ingestionModel "go-base-agent/internal/biz/ingestion/model"
+	ingestionService "go-base-agent/internal/biz/ingestion/service"
 	knowledgeDto "go-base-agent/internal/biz/knowledge/dto"
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
@@ -227,6 +230,7 @@ func TestDocumentService_CreateDocumentStoresPipelineMode(t *testing.T) {
 		DocName:       "会员Agent说明.md",
 		FileURL:       "upload://会员Agent说明.md",
 		FileType:      "md",
+		SourceType:    "local_file",
 		ChunkStrategy: "pipeline",
 		ChunkConfig:   `{"pipelineId":"pipe-1"}`,
 	}, "user-1")
@@ -235,6 +239,9 @@ func TestDocumentService_CreateDocumentStoresPipelineMode(t *testing.T) {
 	}
 	if resp.ProcessMode != "pipeline" || resp.PipelineID != "pipe-1" {
 		t.Fatalf("expected pipeline mode and id, got %+v", resp)
+	}
+	if resp.SourceType != "file" {
+		t.Fatalf("expected local_file source type to normalize to file, got %+v", resp)
 	}
 }
 
@@ -291,6 +298,103 @@ func TestDocumentService_ExecuteIngestionTaskPersistsChunksAndVectors(t *testing
 	if updated.Status != "success" || updated.ChunkCount != 1 {
 		t.Fatalf("expected completed doc, got status=%s chunks=%d", updated.Status, updated.ChunkCount)
 	}
+}
+
+func TestDocumentService_ExecuteIngestionPipelineTaskRunsCoreNodes(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent说明.md",
+		FileType:   "md",
+		Status:     "running",
+		CreatedBy:  "user-1",
+		SourceType: "file",
+	}
+	doc.ID = "doc-1"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:        gdb,
+		kbRepo:    fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{EmbeddingModel: "emb-1", CollectionName: "collection_a"}},
+		emb:       pipelineEmbeddingService{},
+		vecStore:  vecStore,
+		fileStore: fakeFileReader{data: []byte("# 会员 Agent\n支持权益查询。\n支持积分查询。")},
+	}
+
+	result, err := svc.ExecuteIngestionPipelineTask(context.Background(), ingestionDto.CreateTaskReq{
+		PipelineID: "pipe-1",
+		Source: ingestionDto.DocumentSourceReq{
+			Type:     "file",
+			FileName: "会员Agent说明.md",
+		},
+		Metadata: map[string]any{"docId": "doc-1"},
+	}, []ingestionModel.IngestionPipelineNode{
+		{PipelineID: "pipe-1", NodeID: "parser", NodeType: "parser", NextNodeID: "chunker"},
+		{PipelineID: "pipe-1", NodeID: "chunker", NodeType: "chunker", NextNodeID: "indexer", SettingsJSON: `{"chunkSize":128}`},
+		{PipelineID: "pipe-1", NodeID: "indexer", NodeType: "indexer"},
+	})
+	if err != nil {
+		t.Fatalf("execute pipeline task: %v", err)
+	}
+	if result.ChunkCount == 0 {
+		t.Fatalf("expected chunks to be persisted, got %+v", result)
+	}
+	nodeByID := make(map[string]ingestionService.TaskNodeExecutionResult, len(result.Nodes))
+	for _, node := range result.Nodes {
+		nodeByID[node.NodeID] = node
+	}
+	parserNode := nodeByID["parser"]
+	if parserNode.Output["rawText"] == nil || !strings.Contains(fmt.Sprint(parserNode.Output["rawText"]), "会员 Agent") {
+		t.Fatalf("expected parser output to contain raw text, got %+v", parserNode.Output)
+	}
+	chunkerNode := nodeByID["chunker"]
+	if chunkerNode.Output["chunkCount"] == nil || fmt.Sprint(chunkerNode.Output["chunkCount"]) == "0" {
+		t.Fatalf("expected chunker output to contain chunk count, got %+v", chunkerNode.Output)
+	}
+	indexerNode := nodeByID["indexer"]
+	if indexerNode.Output["chunks"] == nil {
+		t.Fatalf("expected indexer output to include embedded chunks, got %+v", indexerNode.Output)
+	}
+	if len(vecStore.indexedChunks) != result.ChunkCount {
+		t.Fatalf("expected vectors persisted after pipeline execution, got %d vectors for %d chunks", len(vecStore.indexedChunks), result.ChunkCount)
+	}
+}
+
+type pipelineEmbeddingService struct{}
+
+func (pipelineEmbeddingService) Embed(context.Context, string) ([]float32, error) {
+	return []float32{0.1, 0.2}, nil
+}
+
+func (pipelineEmbeddingService) EmbedWithModel(context.Context, string, string) ([]float32, error) {
+	return []float32{0.1, 0.2}, nil
+}
+
+func (pipelineEmbeddingService) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, 0, len(texts))
+	for i := range texts {
+		vectors = append(vectors, []float32{float32(i) + 0.1, 0.2})
+	}
+	return vectors, nil
+}
+
+func (pipelineEmbeddingService) EmbedBatchWithModel(ctx context.Context, texts []string, modelID string) ([][]float32, error) {
+	return pipelineEmbeddingService{}.EmbedBatch(ctx, texts)
+}
+
+func (pipelineEmbeddingService) Dimension() int {
+	return 2
 }
 
 func TestDocumentService_RecordsAuditLogs(t *testing.T) {

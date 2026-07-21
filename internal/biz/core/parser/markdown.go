@@ -13,6 +13,7 @@ type MarkdownParser struct{}
 func (p *MarkdownParser) Type() rag.ParserType { return rag.ParserMarkdown }
 
 func (p *MarkdownParser) Supports(mimeType string) bool {
+	mimeType = normalizeMIMEType(mimeType)
 	return mimeType == "text/markdown" || mimeType == "text/x-markdown" ||
 		strings.HasSuffix(mimeType, "/markdown")
 }

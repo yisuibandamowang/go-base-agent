@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 type testChannel struct {
@@ -11,6 +12,7 @@ type testChannel struct {
 	enabled  bool
 	typ      SearchChannelType
 	chunks   []RetrievedChunk
+	delay    time.Duration
 }
 
 func (c *testChannel) Name() string                     { return c.name }
@@ -18,6 +20,9 @@ func (c *testChannel) Priority() int                    { return c.priority }
 func (c *testChannel) IsEnabled(ctx SearchContext) bool { return c.enabled }
 func (c *testChannel) Type() SearchChannelType          { return c.typ }
 func (c *testChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
 	return SearchChannelResult{
 		ChannelType: c.typ,
 		ChannelName: c.name,
@@ -164,5 +169,39 @@ func TestMultiChannelRetrievalEngine_UsesFusionPostProcessor(t *testing.T) {
 	}
 	if chunks[0].ID != "b" || chunks[1].ID != "a" || chunks[2].ID != "c" {
 		t.Fatalf("expected fused order b,a,c, got %+v", chunks)
+	}
+}
+
+func TestMultiChannelRetrievalEngine_RunsChannelsConcurrently(t *testing.T) {
+	channels := []SearchChannel{
+		&testChannel{
+			name:     "slow-1",
+			priority: 1,
+			enabled:  true,
+			typ:      ChannelKeyword,
+			chunks:   []RetrievedChunk{{ID: "a", Text: "alpha"}},
+			delay:    120 * time.Millisecond,
+		},
+		&testChannel{
+			name:     "slow-2",
+			priority: 2,
+			enabled:  true,
+			typ:      ChannelVectorGlobal,
+			chunks:   []RetrievedChunk{{ID: "b", Text: "beta"}},
+			delay:    120 * time.Millisecond,
+		},
+	}
+
+	start := time.Now()
+	engine := NewMultiChannelRetrievalEngine(channels, nil)
+	chunks, err := engine.Retrieve(context.Background(), SearchContext{OriginalQuestion: "test", TopK: 10})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %+v", chunks)
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("expected concurrent retrieval to finish quickly, got %s", elapsed)
 	}
 }

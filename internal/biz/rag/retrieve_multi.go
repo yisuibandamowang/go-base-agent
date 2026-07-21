@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -106,20 +107,25 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 		err    error
 	}
 	results := make([]result, len(e.channels))
-
+	var wg sync.WaitGroup
 	for i, ch := range e.channels {
 		if !ch.IsEnabled(sc) {
 			continue
 		}
-		start := time.Now()
-		r, err := ch.Search(ctx, sc)
-		if err != nil {
-			results[i].err = err
-			continue
-		}
-		r.LatencyMs = time.Since(start).Milliseconds()
-		results[i].result = r
+		wg.Add(1)
+		go func(idx int, channel SearchChannel) {
+			defer wg.Done()
+			start := time.Now()
+			r, err := channel.Search(ctx, sc)
+			if err != nil {
+				results[idx].err = err
+				return
+			}
+			r.LatencyMs = time.Since(start).Milliseconds()
+			results[idx].result = r
+		}(i, ch)
 	}
+	wg.Wait()
 
 	var allChunks []RetrievedChunk
 	var allResults []SearchChannelResult

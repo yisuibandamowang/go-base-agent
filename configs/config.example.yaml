@@ -107,6 +107,12 @@ rag:
         count: 5
         timeout-seconds: 5
 
+  guidance:
+    enabled: false
+    ambiguity-score-ratio: 0.8
+    ambiguity-margin: 0.15
+    max-options: 3
+
   trace:
     enabled: true
     max-error-length: 1000

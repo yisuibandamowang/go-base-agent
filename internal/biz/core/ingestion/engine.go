@@ -55,7 +55,7 @@ func (e *DefaultEngine) Run(ctx context.Context, taskID, collectionName, docID s
 
 	texts := make([]string, len(chunks))
 	for i, c := range chunks {
-		texts[i] = c.Content
+		texts[i] = embeddingTextOf(c)
 	}
 	embeddings, err := e.embedder(ctx, texts)
 	if err != nil {

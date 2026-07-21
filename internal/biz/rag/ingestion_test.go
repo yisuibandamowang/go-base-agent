@@ -97,6 +97,40 @@ func TestIngestionEngine_StartNodeSkipsReferencedNodeOrder(t *testing.T) {
 	}
 }
 
+func TestIngestionEngine_NormalizesJavaNodeTypeValues(t *testing.T) {
+	calls := make([]string, 0, 2)
+	nodes := []IngestionNode{
+		&recordingIngestionNode{typ: IngestionNodeType("FETCHER"), calls: &calls},
+		&recordingIngestionNode{typ: IngestionNodeType("parser"), calls: &calls},
+	}
+
+	engine := NewIngestionEngine(nodes)
+	pipeline := PipelineDefinition{
+		ID: "normalize",
+		Nodes: []NodeConfig{
+			{NodeID: "n1", NodeType: IngestionNodeType("fetcher"), NextNodeID: "n2", Enabled: true},
+			{NodeID: "n2", NodeType: IngestionNodeType("PARSER"), Enabled: true},
+		},
+	}
+
+	if err := engine.Execute(context.Background(), &IngestionContext{}, pipeline); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 2 || calls[0] != "n1" || calls[1] != "n2" {
+		t.Fatalf("unexpected execution order: %+v", calls)
+	}
+	runCtx := &IngestionContext{}
+	if err := engine.Execute(context.Background(), runCtx, pipeline); err != nil {
+		t.Fatalf("unexpected error on second run: %v", err)
+	}
+	if runCtx.Status != IngestionStatusCompleted {
+		t.Fatalf("expected completed status, got %q", runCtx.Status)
+	}
+	if len(runCtx.Logs) != 2 || runCtx.Logs[0].NodeType != NodeFetcher || runCtx.Logs[1].NodeType != NodeParser {
+		t.Fatalf("unexpected node logs: %+v", runCtx.Logs)
+	}
+}
+
 func TestIngestionEngine_ConditionFalseSkipsNodeAndContinues(t *testing.T) {
 	calls := make([]string, 0, 2)
 	nodes := []IngestionNode{
@@ -118,6 +152,78 @@ func TestIngestionEngine_ConditionFalseSkipsNodeAndContinues(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0] != "n2" {
 		t.Fatalf("expected skipped fetcher and executed parser, got %+v", calls)
+	}
+}
+
+func TestIngestionEngine_JavaStyleStringConditionExecutesNode(t *testing.T) {
+	calls := make([]string, 0, 2)
+	nodes := []IngestionNode{
+		&recordingIngestionNode{typ: NodeFetcher, calls: &calls},
+		&recordingIngestionNode{typ: NodeParser, calls: &calls},
+	}
+
+	engine := NewIngestionEngine(nodes)
+	runCtx := &IngestionContext{RawText: "会员 Agent 支持权益查询"}
+	pipeline := PipelineDefinition{
+		ID: "spel-condition",
+		Nodes: []NodeConfig{
+			{NodeID: "n1", NodeType: NodeFetcher, Condition: "#ctx.rawText.contains('会员')", NextNodeID: "n2", Enabled: true},
+			{NodeID: "n2", NodeType: NodeParser, Enabled: true},
+		},
+	}
+
+	if err := engine.Execute(context.Background(), runCtx, pipeline); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 2 || calls[0] != "n1" || calls[1] != "n2" {
+		t.Fatalf("expected java-style string condition to execute both nodes, got %+v", calls)
+	}
+}
+
+func TestConditionEvaluator_JavaStyleStringExpressions(t *testing.T) {
+	evaluator := NewConditionEvaluator()
+	ctx := &IngestionContext{
+		RawText:  "会员 Agent 支持权益查询",
+		MimeType: "text/markdown",
+		Metadata: map[string]any{"domain": "membership"},
+	}
+
+	for _, condition := range []string{
+		"rawText != null",
+		"#ctx.rawText.contains('会员')",
+		"#ctx.metadata['domain'] == 'membership'",
+		"mimeType == 'text/markdown'",
+	} {
+		if !evaluator.Evaluate(ctx, condition) {
+			t.Fatalf("expected condition %q to be true", condition)
+		}
+	}
+	if evaluator.Evaluate(ctx, "#ctx.rawText.contains('支付')") {
+		t.Fatal("expected non-matching contains condition to be false")
+	}
+}
+
+func TestIngestionEngine_FetcherLogIncludesRawBytesBase64(t *testing.T) {
+	nodes := []IngestionNode{
+		&NoopIngestionNode{typ: NodeFetcher},
+	}
+	engine := NewIngestionEngine(nodes)
+	runCtx := &IngestionContext{RawBytes: []byte("hello")}
+	pipeline := PipelineDefinition{
+		ID: "fetcher-output",
+		Nodes: []NodeConfig{
+			{NodeID: "fetch", NodeType: NodeFetcher, Enabled: true},
+		},
+	}
+
+	if err := engine.Execute(context.Background(), runCtx, pipeline); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(runCtx.Logs) != 1 {
+		t.Fatalf("expected one node log, got %+v", runCtx.Logs)
+	}
+	if got := runCtx.Logs[0].Output["rawBytesBase64"]; got != "aGVsbG8=" {
+		t.Fatalf("expected rawBytesBase64 to match Java output, got %+v", runCtx.Logs[0].Output)
 	}
 }
 

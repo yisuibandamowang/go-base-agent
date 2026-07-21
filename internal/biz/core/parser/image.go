@@ -1,8 +1,13 @@
 package parser
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +17,8 @@ import (
 	"go-base-agent/internal/infra/vlm"
 
 	"github.com/google/uuid"
+	"github.com/srwiley/oksvg"
+	"github.com/srwiley/rasterx"
 )
 
 // ImageParser 解析独立图片文档并产出可检索描述。
@@ -41,7 +48,7 @@ func NewImageParser(vlmService vlm.Service, uploader storage.Uploader, prompt st
 func (p *ImageParser) Type() rag.ParserType { return rag.ParserImage }
 
 func (p *ImageParser) Supports(mimeType string) bool {
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	switch normalizeMIMEType(mimeType) {
 	case "image/png", "image/jpeg", "image/jpg", "image/svg+xml":
 		return true
 	default:
@@ -60,6 +67,14 @@ func (p *ImageParser) Parse(ctx context.Context, data []byte, mimeType string, o
 	}
 	if p.vlmService == nil {
 		return nil, fmt.Errorf("vlm service is not configured")
+	}
+	if normalizeMIMEType(mimeType) == "image/svg+xml" {
+		rasterized, err := rasterizeSVGToPNG(ctx, data)
+		if err != nil {
+			return nil, fmt.Errorf("rasterize svg failed: %w", err)
+		}
+		data = rasterized
+		mimeType = "image/png"
 	}
 
 	sourceFile := parseOption(options, "sourceFile")
@@ -112,6 +127,59 @@ func (p *ImageParser) Parse(ctx context.Context, data []byte, mimeType string, o
 			"parsedAt":         time.Now().Format(time.RFC3339),
 		},
 	}, nil
+}
+
+func rasterizeSVGToPNG(ctx context.Context, svg []byte) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	icon, err := oksvg.ReadIconStream(bytes.NewReader(svg))
+	if err != nil {
+		return nil, fmt.Errorf("read svg icon: %w", err)
+	}
+	width, height := svgCanvasSize(icon)
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	icon.SetTarget(0, 0, float64(width), float64(height))
+	scanner := rasterx.NewScannerGV(width, height, canvas, canvas.Bounds())
+	dasher := rasterx.NewDasher(width, height, scanner)
+	icon.Draw(dasher, 1.0)
+
+	var out bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.DefaultCompression}
+	if err := encoder.Encode(&out, canvas); err != nil {
+		return nil, fmt.Errorf("encode svg png: %w", err)
+	}
+	return out.Bytes(), nil
+}
+
+func svgCanvasSize(icon *oksvg.SvgIcon) (int, int) {
+	width := int(icon.ViewBox.W)
+	height := int(icon.ViewBox.H)
+	if width <= 0 || height <= 0 {
+		width = 1600
+		height = 1600
+	}
+	if width > 1600 {
+		scale := 1600.0 / float64(width)
+		width = 1600
+		height = maxInt(1, int(float64(height)*scale))
+	}
+	if height > 1600 {
+		scale := 1600.0 / float64(height)
+		height = 1600
+		width = maxInt(1, int(float64(width)*scale))
+	}
+	return maxInt(1, width), maxInt(1, height)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func imageAssetKey(documentID, mimeType string) string {

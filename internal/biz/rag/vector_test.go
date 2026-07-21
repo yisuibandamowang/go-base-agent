@@ -87,6 +87,57 @@ func TestBuildVectorMetadataIncludesChunkMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildVectorMetadataIncludesStructuredChunkFields(t *testing.T) {
+	meta := buildVectorMetadata("doc-1", VectorChunk{
+		Index:          2,
+		BlockType:      "image",
+		OutlinePath:    []string{"会员中心", "权益查询"},
+		Provenance:     Provenance{SourceFile: "会员.xlsx", SheetName: "权益表"},
+		SectionContext: "caption=架构图",
+		SourceBlockIDs: []string{"img-1", "img-2"},
+		Assets: []AssetRef{
+			{PublicURL: "https://example.com/a.png", Mime: "image/png", SourceBlockID: "img-1"},
+		},
+	})
+
+	for _, want := range []string{
+		`"block_type":"image"`,
+		`"outline_path":"会员中心 > 权益查询"`,
+		`"source_file":"会员.xlsx"`,
+		`"sheet_name":"权益表"`,
+		`"section_context":"caption=架构图"`,
+		`"source_block_ids":"img-1,img-2"`,
+		`"asset_urls":"https://example.com/a.png"`,
+	} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("expected metadata to contain %s, got %s", want, meta)
+		}
+	}
+}
+
+func TestApplyStructuredMetadataRestoresProvenance(t *testing.T) {
+	chunk := VectorChunk{Metadata: map[string]string{
+		"block_type":       "table",
+		"outline_path":     "会员中心 > 权益查询",
+		"source_file":      "会员.xlsx",
+		"sheet_name":       "权益表",
+		"section_context":  "sheet=权益表",
+		"source_block_ids": "table-1,table-2",
+	}}
+
+	applyStructuredMetadata(&chunk)
+
+	if chunk.Provenance.SourceFile != "会员.xlsx" || chunk.Provenance.SheetName != "权益表" {
+		t.Fatalf("expected provenance read-back, got %+v", chunk.Provenance)
+	}
+	if chunk.BlockType != "table" || len(chunk.OutlinePath) != 2 || chunk.OutlinePath[1] != "权益查询" {
+		t.Fatalf("expected structured metadata read-back, got %+v", chunk)
+	}
+	if len(chunk.SourceBlockIDs) != 2 || chunk.SourceBlockIDs[1] != "table-2" {
+		t.Fatalf("expected source block ids read-back, got %+v", chunk.SourceBlockIDs)
+	}
+}
+
 func TestStringToVecParsesPgVectorLiteral(t *testing.T) {
 	got := stringToVec("[0.100000, -2.5,3]")
 	want := []float32{0.1, -2.5, 3}

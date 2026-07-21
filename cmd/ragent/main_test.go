@@ -105,7 +105,7 @@ func TestRagEvalHandler(t *testing.T) {
 			`"hasMcp":false`,
 			`"mcpContext":""`,
 			`"subIntents":["hello","hello follow-up"]`,
-			`"intentLeafIds":[null]`,
+			`"intentLeafIds":[null,null]`,
 			`"latencyMs":`,
 		} {
 			if !strings.Contains(body, want) {
@@ -116,6 +116,25 @@ func TestRagEvalHandler(t *testing.T) {
 			t.Fatalf("expected eval retrieval response, got %d %s", w.Code, body)
 		}
 	})
+}
+
+func TestRagEvalHandlerReturnsResolvedIntentLeafIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	api := r.Group("/api/ragent")
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, true, fakeEvalIntentResolver{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
+	r.ServeHTTP(w, req)
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d %s", w.Code, body)
+	}
+	if !strings.Contains(body, `"intentLeafIds":["leaf-1","leaf-2"]`) {
+		t.Fatalf("expected resolved leaf ids, got %s", body)
+	}
 }
 
 func TestBuildDocumentParserRegistryRegistersTikaWhenConfigured(t *testing.T) {
@@ -136,6 +155,13 @@ func TestBuildDocumentParserRegistryRegistersTikaWhenConfigured(t *testing.T) {
 	}
 	if !foundTika {
 		t.Fatal("expected tika parser type in registry")
+	}
+	parsed, err := reg.Parse(context.Background(), []byte("能力,说明\n积分查询,支持"), "text/csv; charset=utf-8", nil)
+	if err != nil {
+		t.Fatalf("expected csv parser to win before tika: %v", err)
+	}
+	if len(parsed.Blocks) != 1 || parsed.Blocks[0].Type != rag.BlockTable {
+		t.Fatalf("expected csv table block before tika fallback, got %+v", parsed.Blocks)
 	}
 }
 
@@ -563,4 +589,23 @@ func (f *fakeEvalRetriever) Retrieve(ctx context.Context, question string, topK 
 			"kb_name": "kb",
 		},
 	}}, nil
+}
+
+type fakeEvalIntentResolver struct{}
+
+func (f fakeEvalIntentResolver) ResolveQuestions(ctx context.Context, questions []string) ([]rag.SubQuestionIntent, error) {
+	out := make([]rag.SubQuestionIntent, 0, len(questions))
+	for i, question := range questions {
+		leafID := "leaf-1"
+		if i > 0 {
+			leafID = "leaf-2"
+		}
+		out = append(out, rag.SubQuestionIntent{
+			SubQuestion: question,
+			NodeScores: []rag.NodeScore{
+				{Node: rag.IntentNode{ID: leafID, Name: "会员积分"}, Score: 0.95},
+			},
+		})
+	}
+	return out, nil
 }

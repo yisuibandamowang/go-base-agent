@@ -26,6 +26,7 @@ const (
 func builtinTools() []*Tool {
 	tools := []*Tool{
 		newSalesQueryTool(),
+		newTicketQueryTool(),
 		newWeatherQueryTool(),
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("YDC_API_KEY")); apiKey != "" {
