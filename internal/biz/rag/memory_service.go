@@ -82,6 +82,11 @@ func (s *DefaultMemoryService) SaveMessage(ctx context.Context, conversationID s
 	return err
 }
 
+// AppendMessage appends a message and returns the stored message ID.
+func (s *DefaultMemoryService) AppendMessage(ctx context.Context, conversationID string, msg chat.Message) (string, error) {
+	return s.store.AppendMessage(ctx, conversationID, msg)
+}
+
 // LoadConversation loads the conversation metadata for title resolution.
 func (s *DefaultMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
 	return s.store.LoadConversation(ctx, conversationID)

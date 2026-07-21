@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -59,6 +60,7 @@ func (h *blockingHandle) Wait() {
 type recordingMemoryService struct {
 	history      []chat.Message
 	saved        []chat.Message
+	savedIDs     []string
 	conversation *Conversation
 }
 
@@ -69,6 +71,13 @@ func (m *recordingMemoryService) LoadHistory(ctx context.Context, conversationID
 func (m *recordingMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
 	m.saved = append(m.saved, msg)
 	return nil
+}
+
+func (m *recordingMemoryService) AppendMessage(ctx context.Context, conversationID string, msg chat.Message) (string, error) {
+	m.saved = append(m.saved, msg)
+	id := "msg-" + strconv.Itoa(len(m.saved))
+	m.savedIDs = append(m.savedIDs, id)
+	return id, nil
 }
 
 func (m *recordingMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
@@ -220,6 +229,52 @@ func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
 	}
 	if mem.saved[1].Role != chat.RoleAssistant || mem.saved[1].Content != "hello world" {
 		t.Fatalf("unexpected assistant message: %+v", mem.saved[1])
+	}
+}
+
+func TestPipeline_StreamChat_ChunksResponseByConfiguredSize(t *testing.T) {
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("abcdef")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
+	p.SetMessageChunkSize(3)
+	p.StreamChat(context.Background(), "question", "conv-1", "task-1", false, s)
+
+	body := w.Body.String()
+	if count := strings.Count(body, `"delta":"abc"`); count != 1 {
+		t.Fatalf("expected one abc chunk, got %d in: %s", count, body)
+	}
+	if count := strings.Count(body, `"delta":"def"`); count != 1 {
+		t.Fatalf("expected one def chunk, got %d in: %s", count, body)
+	}
+	if strings.Contains(body, `"delta":"abcdef"`) {
+		t.Fatalf("expected response to be chunked, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_FinishEventIncludesAssistantMessageID(t *testing.T) {
+	mem := &recordingMemoryService{}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("hello")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
+	p.StreamChat(context.Background(), "question", "conv-1", "task-1", false, s)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"messageId":"msg-2"`) {
+		t.Fatalf("expected finish event to include saved assistant message id, got: %s", body)
 	}
 }
 
@@ -701,6 +756,61 @@ func TestPipeline_StopTaskCancelsStreamAndClosesSender(t *testing.T) {
 	}
 }
 
+func TestPipeline_StopTaskCancelEventIncludesAssistantMessageID(t *testing.T) {
+	handleCh := make(chan *blockingHandle, 1)
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("partial")
+			handle := newBlockingHandle()
+			handleCh <- handle
+			return handle, nil
+		},
+	}
+
+	mem := &recordingMemoryService{}
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
+	done := make(chan struct{})
+	go func() {
+		p.StreamChat(context.Background(), "test", "conv-1", "task-stop", false, s)
+		close(done)
+	}()
+
+	var handle *blockingHandle
+	select {
+	case handle = <-handleCh:
+	case <-time.After(time.Second):
+		t.Fatal("expected stream handle to be created")
+	}
+
+	p.StopTask("task-stop")
+
+	select {
+	case <-handle.cancelled:
+	case <-time.After(time.Second):
+		handle.Cancel()
+		t.Fatal("expected StopTask to cancel stream handle")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		handle.Cancel()
+		t.Fatal("expected StreamChat to return after StopTask")
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event: cancel") {
+		t.Fatalf("missing cancel event, body: %s", body)
+	}
+	if !strings.Contains(body, `"messageId":"msg-2"`) {
+		t.Fatalf("expected cancel event to include assistant message id, got: %s", body)
+	}
+	if len(mem.saved) != 2 {
+		t.Fatalf("expected user and partial assistant messages to be saved, got %d", len(mem.saved))
+	}
+}
+
 func TestPipeline_StreamChat_DeepThinking(t *testing.T) {
 	var capturedReq chat.Request
 	llm := &fakeLLMService{
@@ -811,6 +921,7 @@ func TestPipeline_StreamChat_AllowsMcpOnlyContextWithoutRetrievedChunks(t *testi
 
 func TestPipeline_StreamChat_ThinkingCallback(t *testing.T) {
 	done := make(chan struct{})
+	mem := &recordingMemoryService{}
 	llm := &fakeLLMService{
 		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
 			go func() {
@@ -824,7 +935,7 @@ func TestPipeline_StreamChat_ThinkingCallback(t *testing.T) {
 	}
 
 	s, w := newTestSSESender(t)
-	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
 	go p.StreamChat(context.Background(), "test", "conv-1", "task-1", true, s)
 
 	<-done
@@ -838,6 +949,16 @@ func TestPipeline_StreamChat_ThinkingCallback(t *testing.T) {
 	}
 	if !strings.Contains(body, `"type":"response"`) {
 		t.Fatal("missing response type")
+	}
+	if len(mem.saved) != 2 {
+		t.Fatalf("expected user and assistant messages to be saved, got %d", len(mem.saved))
+	}
+	assistant := mem.saved[1]
+	if assistant.ThinkingContent != "let me think..." {
+		t.Fatalf("expected thinking content to be saved, got: %+v", assistant)
+	}
+	if assistant.ThinkingDuration < 1 {
+		t.Fatalf("expected thinking duration to be at least 1 second, got: %+v", assistant)
 	}
 }
 

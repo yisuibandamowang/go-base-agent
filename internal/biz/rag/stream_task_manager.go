@@ -13,12 +13,13 @@ type streamTaskManager struct {
 }
 
 type streamTask struct {
-	mu        sync.Mutex
-	once      sync.Once
-	cancelled bool
-	cancel    context.CancelFunc
-	handle    chat.StreamHandle
-	sender    *SSESender
+	mu              sync.Mutex
+	once            sync.Once
+	cancelled       bool
+	cancel          context.CancelFunc
+	handle          chat.StreamHandle
+	sender          *SSESender
+	cancelPayloadFn func() CompletionPayload
 }
 
 func newStreamTaskManager() *streamTaskManager {
@@ -62,6 +63,12 @@ func (t *streamTask) bindHandle(handle chat.StreamHandle) {
 	}
 }
 
+func (t *streamTask) setCancelPayloadFn(fn func() CompletionPayload) {
+	t.mu.Lock()
+	t.cancelPayloadFn = fn
+	t.mu.Unlock()
+}
+
 func (t *streamTask) cancelTask() {
 	t.once.Do(func() {
 		t.mu.Lock()
@@ -69,6 +76,7 @@ func (t *streamTask) cancelTask() {
 		cancel := t.cancel
 		handle := t.handle
 		sender := t.sender
+		payloadFn := t.cancelPayloadFn
 		t.mu.Unlock()
 
 		if cancel != nil {
@@ -78,7 +86,11 @@ func (t *streamTask) cancelTask() {
 			handle.Cancel()
 		}
 		if sender != nil && !sender.IsClosed() {
-			_ = sender.SendCancel("", "")
+			payload := CompletionPayload{}
+			if payloadFn != nil {
+				payload = payloadFn()
+			}
+			_ = sender.SendCancel(payload.MessageID, payload.Title)
 			_ = sender.SendDone()
 			sender.Close()
 		}

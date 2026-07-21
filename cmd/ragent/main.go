@@ -282,6 +282,7 @@ func main() {
 		retriever,
 		memSvc,
 	)
+	ragPipeline.SetMessageChunkSize(cfg.AI.Stream.MessageChunkSize)
 	ragPipeline.SetMcpContextProvider(rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector))
 	ragPipeline.SetIntentResolver(intentResolverSvc)
 	ragPipeline.SetIntentGuidanceService(intentGuidanceSvc)

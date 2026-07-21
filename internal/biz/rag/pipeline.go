@@ -15,16 +15,17 @@ import (
 // Pipeline orchestrates the RAG chat flow.
 // Aligns with Java StreamChatPipeline.
 type Pipeline struct {
-	llm            chat.LLMService
-	prompt         PromptBuilder
-	rewrite        QueryRewriter
-	retrieve       Retriever
-	memory         MemoryService
-	mcp            McpContextProvider
-	intentResolver IntentResolutionService
-	guidance       *IntentGuidanceService
-	trace          TraceRecorder
-	tasks          *streamTaskManager
+	llm              chat.LLMService
+	prompt           PromptBuilder
+	rewrite          QueryRewriter
+	retrieve         Retriever
+	memory           MemoryService
+	mcp              McpContextProvider
+	intentResolver   IntentResolutionService
+	guidance         *IntentGuidanceService
+	trace            TraceRecorder
+	tasks            *streamTaskManager
+	messageChunkSize int
 }
 
 // NewPipeline creates a new RAG pipeline.
@@ -50,6 +51,11 @@ func (p *Pipeline) SetIntentGuidanceService(guidance *IntentGuidanceService) {
 // SetTraceRecorder sets an optional recorder for RAG trace runs and nodes.
 func (p *Pipeline) SetTraceRecorder(recorder TraceRecorder) {
 	p.trace = recorder
+}
+
+// SetMessageChunkSize sets the SSE message delta chunk size in runes.
+func (p *Pipeline) SetMessageChunkSize(size int) {
+	p.messageChunkSize = size
 }
 
 // StreamChat implements Service.StreamChat.
@@ -210,7 +216,9 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		traceRecorder:       p.trace,
 		traceRun:            traceRun,
 		sendTitleOnComplete: sendTitleOnComplete,
+		messageChunkSize:    p.messageChunkSize,
 	}
+	task.setCancelPayloadFn(cb.buildCompletionPayloadOnCancel)
 	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)
 	cb.traceSpan = llmSpan
 	if ctx.Err() != nil {
@@ -355,7 +363,9 @@ func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, 
 		answerPrefix:        prefix,
 		task:                task,
 		sendTitleOnComplete: sendTitleOnComplete,
+		messageChunkSize:    p.messageChunkSize,
 	}
+	task.setCancelPayloadFn(cb.buildCompletionPayloadOnCancel)
 	handle, err := p.llm.StreamChat(ctx, req, cb)
 	if err != nil {
 		slog.Error("rag pipeline: retrieval fallback stream failed", "err", err)
@@ -381,6 +391,7 @@ type pipelineCallback struct {
 	memory              MemoryService
 	sender              *SSESender
 	answer              strings.Builder
+	thinking            strings.Builder
 	answerPrefix        string
 	citations           string
 	task                *streamTask
@@ -388,6 +399,9 @@ type pipelineCallback struct {
 	traceRun            *TraceRunRecord
 	traceSpan           *traceSpan
 	sendTitleOnComplete bool
+	thinkingStart       time.Time
+	thinkingDuration    int
+	messageChunkSize    int
 	firstPacket         bool
 }
 
@@ -398,7 +412,7 @@ func (c *pipelineCallback) OnContent(content string) {
 	slog.Info("rag pipeline: llm content chunk", "len", len(content))
 	c.recordFirstPacket()
 	c.answer.WriteString(content)
-	c.sender.SendMessage(MsgTypeResponse, content)
+	c.sendChunked(MsgTypeResponse, content)
 }
 
 func (c *pipelineCallback) OnThinking(content string) {
@@ -407,7 +421,11 @@ func (c *pipelineCallback) OnThinking(content string) {
 	}
 	slog.Info("rag pipeline: llm thinking chunk", "len", len(content))
 	c.recordFirstPacket()
-	c.sender.SendMessage(MsgTypeThink, content)
+	if c.thinkingStart.IsZero() {
+		c.thinkingStart = time.Now()
+	}
+	c.thinking.WriteString(content)
+	c.sendChunked(MsgTypeThink, content)
 }
 
 func (c *pipelineCallback) OnComplete() {
@@ -417,19 +435,12 @@ func (c *pipelineCallback) OnComplete() {
 	}
 	c.traceSpan.finish(traceStatusSuccess, nil)
 	slog.Info("rag pipeline: llm stream complete")
-	if c.memory != nil {
-		if answer := c.answerPrefix + c.answer.String(); answer != "" {
-			answer += c.citations
-			if err := c.memory.SaveMessage(c.ctx, c.conversationID, chat.NewAssistantMessage(answer)); err != nil {
-				slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
-			}
-		}
-	}
+	messageID := c.saveCompletedAssistantMessage()
 	title := c.resolveConversationTitle()
 	if c.citations != "" {
 		_ = c.sender.SendMessage(MsgTypeResponse, c.citations)
 	}
-	c.sender.SendFinish("", title)
+	c.sender.SendFinish(messageID, title)
 	c.sender.SendDone()
 	c.sender.Close()
 }
@@ -445,6 +456,35 @@ func (c *pipelineCallback) OnError(err error) {
 	_ = c.sender.SendFinish("", "")
 	_ = c.sender.SendDone()
 	c.sender.Close()
+}
+
+func (c *pipelineCallback) sendChunked(msgType, content string) {
+	size := c.messageChunkSize
+	if size <= 0 {
+		c.sender.SendMessage(msgType, content)
+		return
+	}
+	var b strings.Builder
+	count := 0
+	for _, r := range content {
+		b.WriteRune(r)
+		count++
+		if count >= size {
+			_ = c.sender.SendMessage(msgType, b.String())
+			b.Reset()
+			count = 0
+		}
+	}
+	if b.Len() > 0 {
+		_ = c.sender.SendMessage(msgType, b.String())
+	}
+}
+
+func (c *pipelineCallback) buildCompletionPayloadOnCancel() CompletionPayload {
+	return CompletionPayload{
+		MessageID: c.saveCancelledAssistantMessage(),
+		Title:     c.resolveConversationTitle(),
+	}
 }
 
 func (c *pipelineCallback) recordFirstPacket() {
@@ -468,6 +508,57 @@ func (c *pipelineCallback) resolveConversationTitle() string {
 		return fallbackTitle
 	}
 	return resolveConversationTitle(c.ctx, c.memory, c.conversationID, c.sendTitleOnComplete)
+}
+
+func (c *pipelineCallback) saveCompletedAssistantMessage() string {
+	if c == nil || c.memory == nil {
+		return ""
+	}
+	msg := chat.Message{
+		Role:             chat.RoleAssistant,
+		Content:          c.answer.String(),
+		ThinkingContent:  c.thinking.String(),
+		ThinkingDuration: c.resolveThinkingDuration(),
+	}
+	id, err := appendConversationMessage(c.ctx, c.memory, c.conversationID, msg)
+	if err != nil {
+		slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
+		return ""
+	}
+	return id
+}
+
+func (c *pipelineCallback) saveCancelledAssistantMessage() string {
+	if c == nil || c.memory == nil {
+		return "null"
+	}
+	content := c.answer.String()
+	if strings.TrimSpace(content) == "" {
+		return "null"
+	}
+	msg := chat.Message{
+		Role:             chat.RoleAssistant,
+		Content:          content,
+		ThinkingContent:  c.thinking.String(),
+		ThinkingDuration: c.resolveThinkingDuration(),
+	}
+	id, err := appendConversationMessage(c.ctx, c.memory, c.conversationID, msg)
+	if err != nil {
+		slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
+		return "null"
+	}
+	return id
+}
+
+func (c *pipelineCallback) resolveThinkingDuration() int {
+	if c == nil || c.thinkingStart.IsZero() {
+		return 0
+	}
+	duration := int(time.Since(c.thinkingStart).Round(time.Second) / time.Second)
+	if duration < 1 {
+		return 1
+	}
+	return duration
 }
 
 func shouldSendTitleOnComplete(ctx context.Context, memory MemoryService, conversationID string) bool {
@@ -497,6 +588,23 @@ func resolveConversationTitle(ctx context.Context, memory MemoryService, convers
 		return title
 	}
 	return fallbackTitle
+}
+
+type messageAppender interface {
+	AppendMessage(ctx context.Context, conversationID string, msg chat.Message) (string, error)
+}
+
+func appendConversationMessage(ctx context.Context, memory MemoryService, conversationID string, msg chat.Message) (string, error) {
+	if memory == nil {
+		return "", nil
+	}
+	if appender, ok := memory.(messageAppender); ok {
+		return appender.AppendMessage(ctx, conversationID, msg)
+	}
+	if err := memory.SaveMessage(ctx, conversationID, msg); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 func (p *Pipeline) systemOnlyPrompt(subIntents []SubQuestionIntent) (string, bool) {
@@ -543,14 +651,16 @@ func (p *Pipeline) streamSystemOnlyResponse(ctx context.Context, question, conve
 	_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
 	req := p.buildSystemOnlyRequest(question, history, customPrompt)
 	cb := &pipelineCallback{
-		ctx:            ctx,
-		conversationID: conversationID,
-		memory:         p.memory,
-		sender:         sender,
-		task:           task,
-		traceRecorder:  p.trace,
-		traceRun:       traceRun,
+		ctx:              ctx,
+		conversationID:   conversationID,
+		memory:           p.memory,
+		sender:           sender,
+		task:             task,
+		traceRecorder:    p.trace,
+		traceRun:         traceRun,
+		messageChunkSize: p.messageChunkSize,
 	}
+	task.setCancelPayloadFn(cb.buildCompletionPayloadOnCancel)
 	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)
 	cb.traceSpan = llmSpan
 	if ctx.Err() != nil {
