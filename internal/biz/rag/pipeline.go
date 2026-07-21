@@ -148,6 +148,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	}
 
+	mcpCtx := p.buildMcpContext(ctx, q)
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
 	chunks, err := p.retrieveChunks(ctx, q, subQuestions, 10)
 	var kbCtx string
@@ -165,10 +166,12 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	} else {
 		retrieveSpan.finish(traceStatusSuccess, nil)
-		slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
-		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
-		finishTraceRun(traceStatusSuccess, nil)
-		return
+		if strings.TrimSpace(mcpCtx) == "" {
+			slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
+			p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
+			finishTraceRun(traceStatusSuccess, nil)
+			return
+		}
 	}
 
 	var thinkingVal *bool
@@ -178,10 +181,11 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	req := p.prompt.Build(PromptContext{
-		Question:   q,
-		History:    history,
-		KbContext:  withChunkSources(chunks, kbCtx),
-		McpContext: p.buildMcpContext(ctx, q),
+		Question:     q,
+		SubQuestions: subQuestions,
+		History:      history,
+		KbContext:    withChunkSources(chunks, kbCtx),
+		McpContext:   mcpCtx,
 	})
 	req.Thinking = thinkingVal
 

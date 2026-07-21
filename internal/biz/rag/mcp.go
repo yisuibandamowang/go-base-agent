@@ -145,8 +145,9 @@ func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question s
 		return "", nil
 	}
 
-	var b strings.Builder
-	for i, executor := range executors {
+	successTexts := make([]string, 0, len(executors))
+	errorTexts := make([]string, 0)
+	for _, executor := range executors {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -161,28 +162,29 @@ func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question s
 			}
 		}
 
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString("工具：")
-		b.WriteString(tool.Name)
-		b.WriteString("\n")
 		if err != nil {
-			b.WriteString("错误：")
-			b.WriteString(err.Error())
+			errorTexts = append(errorTexts, formatMcpToolError(err.Error()))
 			continue
 		}
 
 		result, err := executor.Execute(ctx, params)
 		if err != nil {
-			b.WriteString("错误：")
-			b.WriteString(err.Error())
+			errorTexts = append(errorTexts, formatMcpToolError(err.Error()))
 			continue
 		}
-		b.WriteString("结果：")
-		b.WriteString(formatMcpResult(result))
+		text := formatMcpResult(result)
+		if mcpResultIsError(result) {
+			if text != "" {
+				errorTexts = append(errorTexts, formatMcpToolError(text))
+			}
+			continue
+		}
+		if text == "" {
+			continue
+		}
+		successTexts = append(successTexts, "工具："+tool.Name+"\n"+text)
 	}
-	return b.String(), nil
+	return formatMcpContextSections(successTexts, errorTexts), nil
 }
 
 func (p *DefaultMcpContextProvider) selectExecutors(ctx context.Context, question string) []McpToolExecutor {
@@ -224,8 +226,14 @@ func formatMcpResult(result map[string]interface{}) string {
 	if len(result) == 0 {
 		return "无"
 	}
+	if text, ok := result["text"]; ok {
+		return fmt.Sprint(text)
+	}
 	keys := make([]string, 0, len(result))
 	for key := range result {
+		if key == "isError" {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -235,6 +243,39 @@ func formatMcpResult(result map[string]interface{}) string {
 		parts = append(parts, key+"="+fmt.Sprint(result[key]))
 	}
 	return strings.Join(parts, "；")
+}
+
+func mcpResultIsError(result map[string]interface{}) bool {
+	value, ok := result["isError"]
+	if !ok {
+		return false
+	}
+	if isError, ok := value.(bool); ok {
+		return isError
+	}
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(value)), "true")
+}
+
+func formatMcpToolError(text string) string {
+	return "- 工具调用失败: " + text
+}
+
+func formatMcpContextSections(successTexts, errorTexts []string) string {
+	var b strings.Builder
+	if len(successTexts) > 0 {
+		b.WriteString("<data>\n")
+		b.WriteString(strings.Join(successTexts, "\n\n"))
+		b.WriteString("\n</data>")
+	}
+	if len(errorTexts) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("<errors>\n")
+		b.WriteString(strings.Join(errorTexts, "\n"))
+		b.WriteString("\n</errors>")
+	}
+	return b.String()
 }
 
 // McpContext holds the result of MCP tool execution for prompt formatting.

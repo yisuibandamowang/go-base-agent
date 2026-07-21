@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -10,6 +11,7 @@ type testMcpExecutor struct {
 	tool   ToolDefinition
 	params map[string]interface{}
 	result map[string]interface{}
+	err    error
 	calls  int
 }
 
@@ -17,6 +19,9 @@ func (e *testMcpExecutor) GetToolDefinition() ToolDefinition { return e.tool }
 func (e *testMcpExecutor) Execute(ctx context.Context, params map[string]interface{}) (map[string]interface{}, error) {
 	e.calls++
 	e.params = params
+	if e.err != nil {
+		return nil, e.err
+	}
 	if e.result != nil {
 		return e.result, nil
 	}
@@ -25,9 +30,13 @@ func (e *testMcpExecutor) Execute(ctx context.Context, params map[string]interfa
 
 type testMcpExtractor struct {
 	params map[string]interface{}
+	err    error
 }
 
 func (e *testMcpExtractor) ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
 	return e.params, nil
 }
 
@@ -150,6 +159,72 @@ func TestDefaultMcpContextProvider_SelectsRelevantTools(t *testing.T) {
 	}
 	if !strings.Contains(contextText, "member_profile") || strings.Contains(contextText, "weather_query") {
 		t.Fatalf("unexpected selected context: %q", contextText)
+	}
+}
+
+func TestDefaultMcpContextProvider_FormatsDataAndErrorsLikeJavaContext(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	registry.Register(&testMcpExecutor{
+		tool:   ToolDefinition{Name: "member_profile", Description: "查询会员画像"},
+		result: map[string]interface{}{"text": "会员等级：金卡"},
+	})
+	registry.Register(&testMcpExecutor{
+		tool:   ToolDefinition{Name: "ticket_query", Description: "查询工单"},
+		result: map[string]interface{}{"text": "权限不足", "isError": true},
+	})
+	registry.Register(&testMcpExecutor{
+		tool: ToolDefinition{Name: "weather_query", Description: "查询天气"},
+		err:  errors.New("timeout"),
+	})
+
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{})
+	contextText, err := provider.BuildContext(context.Background(), "帮我查会员等级和工单")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, want := range []string{
+		"<data>",
+		"工具：member_profile\n会员等级：金卡",
+		"</data>",
+		"<errors>",
+		"- 工具调用失败: 权限不足",
+		"- 工具调用失败: timeout",
+		"</errors>",
+	} {
+		if !strings.Contains(contextText, want) {
+			t.Fatalf("expected MCP context to contain %q, got %q", want, contextText)
+		}
+	}
+	for _, notWant := range []string{"结果：", "text=会员等级：金卡", "isError=true"} {
+		if strings.Contains(contextText, notWant) {
+			t.Fatalf("expected MCP context not to expose %q, got %q", notWant, contextText)
+		}
+	}
+}
+
+func TestDefaultMcpContextProvider_FormatsParameterExtractionFailureAsError(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	exec := &testMcpExecutor{
+		tool:   ToolDefinition{Name: "member_profile", Description: "查询会员画像"},
+		result: map[string]interface{}{"text": "会员等级：金卡"},
+	}
+	registry.Register(exec)
+
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{err: errors.New("missing user id")})
+	contextText, err := provider.BuildContext(context.Background(), "帮我查会员等级")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if exec.calls != 0 {
+		t.Fatalf("expected executor not to be called after parameter extraction failure, got %d", exec.calls)
+	}
+	if !strings.Contains(contextText, "<errors>\n- 工具调用失败: missing user id\n</errors>") {
+		t.Fatalf("expected extractor error to be formatted as MCP errors, got %q", contextText)
+	}
+	if strings.Contains(contextText, "<data>") || strings.Contains(contextText, "会员等级：金卡") {
+		t.Fatalf("expected failed parameter extraction not to inject tool data, got %q", contextText)
 	}
 }
 

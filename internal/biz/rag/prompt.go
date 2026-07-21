@@ -1,14 +1,20 @@
 package rag
 
-import "go-base-agent/internal/infra/chat"
+import (
+	"strconv"
+	"strings"
+
+	"go-base-agent/internal/infra/chat"
+)
 
 // PromptContext holds all inputs needed to build a chat prompt.
 // Aligns with Java PromptContext (minimal subset for 2B-4).
 type PromptContext struct {
-	Question   string
-	History    []chat.Message
-	KbContext  string
-	McpContext string
+	Question     string
+	SubQuestions []string
+	History      []chat.Message
+	KbContext    string
+	McpContext   string
 }
 
 // PromptBuilder builds a chat.Request from a PromptContext.
@@ -50,15 +56,64 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 
 	messages = append(messages, ctx.History...)
 
-	content := ctx.Question
-	if ctx.KbContext != "" {
-		content = "只能依据以下知识库内容回答用户问题；如果知识库内容不足以回答，请直接说明知识库中没有相关信息，不要使用模型自身知识补充。\n\n知识库内容：\n" + ctx.KbContext + "\n\n用户问题：" + content
-	}
-	if ctx.McpContext != "" {
-		content = "请结合以下MCP工具结果和知识库内容回答用户问题；如果工具结果与知识库内容冲突，请优先说明冲突并给出可追溯依据。\n\nMCP工具结果：\n" + ctx.McpContext + "\n\n" + content
-	}
-
-	messages = append(messages, chat.NewUserMessage(content))
+	messages = append(messages, chat.NewUserMessage(buildPromptUserContent(ctx)))
 	maxTokens := 1024
 	return chat.Request{Messages: messages, MaxTokens: &maxTokens}
+}
+
+func buildPromptUserContent(ctx PromptContext) string {
+	evidence := buildPromptEvidence(ctx.McpContext, ctx.KbContext)
+	question := buildPromptQuestion(ctx.Question, ctx.SubQuestions)
+	if evidence == "" {
+		return ctx.Question
+	}
+
+	instruction := "只能依据以下知识库内容回答用户问题；如果知识库内容不足以回答，请直接说明知识库中没有相关信息，不要使用模型自身知识补充。"
+	if strings.TrimSpace(ctx.McpContext) != "" && strings.TrimSpace(ctx.KbContext) != "" {
+		instruction = "请结合以下MCP工具结果和知识库内容回答用户问题；如果工具结果与知识库内容冲突，请优先说明冲突并给出可追溯依据。"
+	} else if strings.TrimSpace(ctx.McpContext) != "" {
+		instruction = "请结合以下MCP工具结果回答用户问题；如果工具结果不足以回答，请直接说明工具结果中没有相关信息。"
+	}
+
+	if question == "" {
+		return instruction + "\n\n" + evidence
+	}
+	return instruction + "\n\n" + evidence + "\n\n" + question
+}
+
+func buildPromptEvidence(mcpContext, kbContext string) string {
+	sections := make([]string, 0, 2)
+	if mcp := strings.TrimSpace(mcpContext); mcp != "" {
+		sections = append(sections, "<tool-data>\n"+mcp+"\n</tool-data>")
+	}
+	if kb := strings.TrimSpace(kbContext); kb != "" {
+		sections = append(sections, "<documents>\n"+kb+"\n</documents>")
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func buildPromptQuestion(question string, subQuestions []string) string {
+	normalized := normalizePromptSubQuestions(subQuestions)
+	if len(normalized) > 1 {
+		numbered := make([]string, 0, len(normalized))
+		for i, item := range normalized {
+			numbered = append(numbered, strconv.Itoa(i+1)+". "+item)
+		}
+		return "<questions>\n" + strings.Join(numbered, "\n") + "\n</questions>"
+	}
+	if strings.TrimSpace(question) == "" {
+		return ""
+	}
+	return "<question>" + question + "</question>"
+}
+
+func normalizePromptSubQuestions(subQuestions []string) []string {
+	normalized := make([]string, 0, len(subQuestions))
+	for _, question := range subQuestions {
+		question = strings.TrimSpace(question)
+		if question != "" {
+			normalized = append(normalized, question)
+		}
+	}
+	return normalized
 }

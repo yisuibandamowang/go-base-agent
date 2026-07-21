@@ -254,6 +254,9 @@ func TestPipeline_StreamChat_RetrievesSubQuestionsAndDeduplicatesChunks(t *testi
 	if count := strings.Count(content, "错误排查能力说明"); count != 1 {
 		t.Fatalf("expected duplicate chunks to appear once in prompt, got %d occurrences in: %s", count, content)
 	}
+	if !strings.Contains(content, "<questions>\n1. 会员Agent错误排查\n2. 会员Agent权益查询\n</questions>") {
+		t.Fatalf("expected prompt to include structured sub questions, got: %s", content)
+	}
 }
 
 func TestPipeline_StreamChat_AppendsCitationsAndLinks(t *testing.T) {
@@ -612,6 +615,37 @@ func TestPipeline_StreamChat_IncludesMcpContext(t *testing.T) {
 	}
 	if !strings.Contains(content, "用户为金卡会员") {
 		t.Fatalf("expected prompt to include MCP tool result, got: %s", content)
+	}
+}
+
+func TestPipeline_StreamChat_AllowsMcpOnlyContextWithoutRetrievedChunks(t *testing.T) {
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnContent("北京今日晴。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, &NoopRetriever{}, &NoopMemoryService{})
+	p.SetMcpContextProvider(staticMcpContextProvider{context: "<data>\n工具：weather_query\n北京 今日晴\n</data>"})
+	p.StreamChat(context.Background(), "查询天气", "conv-1", "task-1", false, s)
+
+	if len(capturedReq.Messages) == 0 {
+		t.Fatal("expected LLM to be called for MCP-only context")
+	}
+	content := capturedReq.Messages[len(capturedReq.Messages)-1].Content
+	if !strings.Contains(content, "<tool-data>\n<data>\n工具：weather_query\n北京 今日晴\n</data>\n</tool-data>") {
+		t.Fatalf("expected prompt to include MCP-only tool-data, got: %s", content)
+	}
+	if strings.Contains(content, "<documents>") {
+		t.Fatalf("expected MCP-only prompt not to include documents, got: %s", content)
+	}
+	if strings.Contains(w.Body.String(), "检索失败原因") {
+		t.Fatalf("expected MCP-only flow not to use retrieval fallback, got: %s", w.Body.String())
 	}
 }
 
