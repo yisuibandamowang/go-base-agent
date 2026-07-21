@@ -104,6 +104,14 @@ func (r *recordingRewriter) Rewrite(ctx context.Context, question string, histor
 	return &RewriteResult{RewrittenQuestion: r.result, SubQuestions: r.subQuestions}, nil
 }
 
+type staticIntentResolutionService struct {
+	subIntents []SubQuestionIntent
+}
+
+func (s staticIntentResolutionService) ResolveQuestions(ctx context.Context, questions []string) ([]SubQuestionIntent, error) {
+	return s.subIntents, nil
+}
+
 func testRetriever() Retriever {
 	return staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
 }
@@ -484,6 +492,48 @@ func TestPipeline_StreamChat_RetrieveErrorPrefixesSpecificReasonThenGuidesWithLL
 	}
 	if strings.Index(body, reason) > strings.Index(body, guidance) {
 		t.Fatalf("expected retrieval reason before model guidance, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_SystemOnlyIntentSkipsRetrieval(t *testing.T) {
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnContent("我是系统助手。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+	retriever := staticRetriever{err: errors.New("retrieval should be skipped")}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "你是谁",
+		NodeScores: []NodeScore{{
+			Node: IntentNode{
+				ID:             "system-intro",
+				Kind:           IntentKindSystem,
+				PromptTemplate: "你是一个公司内部助手，请直接介绍自己。",
+			},
+			Score: 0.95,
+		}},
+	}}})
+
+	p.StreamChat(context.Background(), "你是谁", "conv-1", "task-1", false, s)
+
+	if len(capturedReq.Messages) < 2 {
+		t.Fatalf("expected system-only intent to call LLM, got %d messages", len(capturedReq.Messages))
+	}
+	if capturedReq.Messages[0].Content != "你是一个公司内部助手，请直接介绍自己。" {
+		t.Fatalf("expected system-only prompt template, got: %s", capturedReq.Messages[0].Content)
+	}
+	if capturedReq.Messages[len(capturedReq.Messages)-1].Content != "你是谁" {
+		t.Fatalf("expected original question as user message, got: %s", capturedReq.Messages[len(capturedReq.Messages)-1].Content)
+	}
+	if strings.Contains(w.Body.String(), "检索失败原因") {
+		t.Fatalf("expected system-only flow not to use retrieval fallback, got: %s", w.Body.String())
 	}
 }
 
