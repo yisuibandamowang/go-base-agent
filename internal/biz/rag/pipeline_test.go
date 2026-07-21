@@ -537,6 +537,43 @@ func TestPipeline_StreamChat_SystemOnlyIntentSkipsRetrieval(t *testing.T) {
 	}
 }
 
+func TestPipeline_StreamChat_SystemOnlyIntentUsesDefaultPromptWhenTemplateMissing(t *testing.T) {
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnContent("默认系统回复。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, staticRetriever{err: errors.New("retrieval should be skipped")}, &NoopMemoryService{})
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "你好",
+		NodeScores: []NodeScore{{
+			Node: IntentNode{
+				ID:   "system-greeting",
+				Kind: IntentKindSystem,
+			},
+			Score: 0.9,
+		}},
+	}}})
+
+	p.StreamChat(context.Background(), "你好", "conv-1", "task-1", false, s)
+
+	if len(capturedReq.Messages) == 0 {
+		t.Fatal("expected LLM to be called for system-only intent")
+	}
+	if capturedReq.Messages[0].Role != chat.RoleSystem || capturedReq.Messages[0].Content == "" {
+		t.Fatalf("expected default system prompt, got %+v", capturedReq.Messages[0])
+	}
+	if capturedReq.Messages[len(capturedReq.Messages)-1].Content != "你好" {
+		t.Fatalf("expected original question as user message, got: %s", capturedReq.Messages[len(capturedReq.Messages)-1].Content)
+	}
+}
+
 func TestPipeline_StopTaskCancelsStreamAndClosesSender(t *testing.T) {
 	handleCh := make(chan *blockingHandle, 1)
 	llm := &fakeLLMService{

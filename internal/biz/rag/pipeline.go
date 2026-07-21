@@ -148,6 +148,11 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	}
 
+	if systemPrompt, ok := p.systemOnlyPrompt(resolvedSubIntents); ok {
+		p.streamSystemOnlyResponse(ctx, q, conversationID, history, task, sender, traceRun, systemPrompt)
+		return
+	}
+
 	mcpCtx := p.buildMcpContext(ctx, q)
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
 	chunks, err := p.retrieveChunks(ctx, q, subQuestions, 10)
@@ -448,6 +453,124 @@ func (c *pipelineCallback) recordFirstPacket() {
 	if err := c.traceRecorder.FinishNode(c.ctx, c.traceRun.TraceID, node.NodeID, traceStatusSuccess, nil); err != nil {
 		slog.Warn("rag trace: finish first packet node failed", "traceId", c.traceRun.TraceID, "err", err)
 	}
+}
+
+func (p *Pipeline) systemOnlyPrompt(subIntents []SubQuestionIntent) (string, bool) {
+	if len(subIntents) == 0 {
+		return "", false
+	}
+	hasSystem := false
+	for _, si := range subIntents {
+		if len(si.NodeScores) == 0 {
+			return "", false
+		}
+		for _, ns := range si.NodeScores {
+			if ns.Node.Kind != IntentKindSystem {
+				return "", false
+			}
+			if hasSystem {
+				continue
+			}
+			if prompt := strings.TrimSpace(ns.Node.PromptTemplate); prompt != "" {
+				hasSystem = true
+			}
+		}
+	}
+	if !hasSystem {
+		return "", true
+	}
+	return firstSystemPromptTemplate(subIntents), true
+}
+
+func firstSystemPromptTemplate(subIntents []SubQuestionIntent) string {
+	for _, si := range subIntents {
+		for _, ns := range si.NodeScores {
+			if ns.Node.Kind == IntentKindSystem {
+				if prompt := strings.TrimSpace(ns.Node.PromptTemplate); prompt != "" {
+					return prompt
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (p *Pipeline) streamSystemOnlyResponse(ctx context.Context, question, conversationID string, history []chat.Message, task *streamTask, sender *SSESender, traceRun *TraceRunRecord, customPrompt string) {
+	_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
+	req := p.buildSystemOnlyRequest(question, history, customPrompt)
+	cb := &pipelineCallback{
+		ctx:            ctx,
+		conversationID: conversationID,
+		memory:         p.memory,
+		sender:         sender,
+		task:           task,
+		traceRecorder:  p.trace,
+		traceRun:       traceRun,
+	}
+	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)
+	cb.traceSpan = llmSpan
+	if ctx.Err() != nil {
+		if task.isCancelled() {
+			llmSpan.finish(traceStatusCancelled, nil)
+			return
+		}
+		slog.Info("rag pipeline: cancelled before llm call", "err", ctx.Err())
+		llmSpan.finish(traceStatusError, ctx.Err())
+		sender.SendFinish("", "")
+		sender.SendDone()
+		sender.Close()
+		return
+	}
+	handle, err := p.llm.StreamChat(ctx, req, cb)
+	if err != nil {
+		slog.Error("rag pipeline: system-only stream chat failed", "err", err)
+		llmSpan.finish(traceStatusError, err)
+		cb.OnError(err)
+		return
+	}
+	task.bindHandle(handle)
+	slog.Info("rag pipeline: system-only llm stream started")
+	handle.Wait()
+	if task.isCancelled() {
+		llmSpan.finish(traceStatusCancelled, nil)
+		return
+	}
+	llmSpan.finish(traceStatusSuccess, nil)
+}
+
+func (p *Pipeline) buildSystemOnlyRequest(question string, history []chat.Message, customPrompt string) chat.Request {
+	req := p.prompt.Build(PromptContext{
+		Question: question,
+		History:  history,
+	})
+	if strings.TrimSpace(customPrompt) == "" {
+		if falseVal := false; req.Thinking == nil {
+			req.Thinking = &falseVal
+		} else {
+			*req.Thinking = false
+		}
+		return req
+	}
+
+	messages := make([]chat.Message, 0, len(req.Messages)+1)
+	messages = append(messages, chat.NewSystemMessage(customPrompt))
+	if len(req.Messages) > 0 {
+		if req.Messages[0].Role == chat.RoleSystem {
+			messages = append(messages, req.Messages[1:]...)
+		} else {
+			messages = append(messages, req.Messages...)
+		}
+	}
+	if len(messages) == 0 {
+		messages = append(messages, chat.NewSystemMessage(customPrompt))
+	}
+	req.Messages = messages
+	if falseVal := false; req.Thinking == nil {
+		req.Thinking = &falseVal
+	} else {
+		*req.Thinking = false
+	}
+	return req
 }
 
 func runeLimit(s string, n int) string {
