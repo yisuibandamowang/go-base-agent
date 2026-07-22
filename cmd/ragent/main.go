@@ -109,7 +109,7 @@ func main() {
 		documentUploadMaxWait = time.Second
 	}
 
-	llmService, embService, rerankService, vlmService, hasVLM := setupAI(cfg, logger)
+	llmService, preferredLLMService, embService, rerankService, vlmService, hasVLM := setupAI(cfg, logger)
 	mqProducer, mqConsumer, shutdownMQ := setupMQ(cfg.RocketMQ)
 	defer shutdownMQ()
 	_ = mqProducer
@@ -184,7 +184,7 @@ func main() {
 	convSvc.SetTitleMaxChars(cfg.RAG.Memory.TitleMaxLength)
 	convHandler := conversationHandler.NewConversationHandler(convSvc)
 
-	summaryGenerator := conversationService.NewLLMSummaryGenerator(llmService, "")
+	summaryGenerator := conversationService.NewLLMSummaryGenerator(preferredLLMService, "")
 	dbMemStore := conversationService.NewDBMemoryStore(
 		gormDB,
 		convRepo,
@@ -202,7 +202,7 @@ func main() {
 		go fn()
 	})
 	dbMemStore.SetTitleGenerator(
-		conversationService.NewLLMTitleGenerator(llmService, "", cfg.RAG.Memory.TitleMaxLength),
+		conversationService.NewLLMTitleGenerator(preferredLLMService, "", cfg.RAG.Memory.TitleMaxLength),
 		cfg.RAG.Memory.TitleMaxLength,
 	)
 	memSvc := rag.NewDefaultMemoryService(dbMemStore, cfg.RAG.Memory.HistoryKeepTurns)
@@ -265,7 +265,7 @@ func main() {
 	}))
 	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
 	queryNormalizer := rag.NewDBQueryTermNormalizer(termMappingRepo)
-	baseRewriter := rag.NewLLMRewriter(llmService,
+	baseRewriter := rag.NewLLMRewriter(preferredLLMService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
 		cfg.RAG.QueryRewrite.MaxHistoryChars,
 		cfg.RAG.QueryRewrite.Enabled,
@@ -273,8 +273,8 @@ func main() {
 	llmRewriter := rag.NewNormalizingRewriter(queryNormalizer, baseRewriter)
 
 	mcpRegistry := rag.NewMcpToolRegistry()
-	mcpExtractor := rag.NewLLMMcpParameterExtractor(llmService)
-	mcpSelector := rag.NewLLMMcpToolSelector(llmService)
+	mcpExtractor := rag.NewLLMMcpParameterExtractor(preferredLLMService)
+	mcpSelector := rag.NewLLMMcpToolSelector(preferredLLMService)
 	if len(cfg.RAG.MCP.Servers) > 0 {
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := rag.RegisterRemoteMcpServers(registerCtx, mcpRegistry, toMcpServerSpecs(cfg.RAG.MCP.Servers), &http.Client{Timeout: 10 * time.Second}); err != nil {
@@ -283,7 +283,7 @@ func main() {
 		registerCancel()
 	}
 
-	ragPipeline := rag.NewPipeline(llmService,
+	ragPipeline := rag.NewPipeline(preferredLLMService,
 		rag.NewDefaultPromptBuilder(),
 		llmRewriter,
 		retriever,
@@ -641,7 +641,7 @@ func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retr
 	api.GET("/rag/eval", ragEval(rewriter, retriever, resolver))
 }
 
-func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embedding.Service, rerank.Service, vlm.Service, bool) {
+func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, chat.LLMService, embedding.Service, rerank.Service, vlm.Service, bool) {
 	aiCfg := cfg.AI
 
 	health := model.NewHealthStore(aiCfg.Selection)
@@ -655,6 +655,7 @@ func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embeddin
 		chat.NewFirstPacketProbe(),
 		time.Duration(aiCfg.Selection.FirstPacketTimeoutSeconds)*time.Second,
 	)
+	preferredLLMService := buildPreferredLLMService(aiCfg, health, executor, chatClients, llmService)
 
 	embClients := buildEmbeddingClients(aiCfg)
 	embService := embedding.NewRoutingEmbeddingService(
@@ -676,7 +677,46 @@ func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, embeddin
 		"vlm_providers", len(vlmClients),
 	)
 
-	return llmService, embService, rerankService, vlmService, len(vlmClients) > 0
+	return llmService, preferredLLMService, embService, rerankService, vlmService, len(vlmClients) > 0
+}
+
+const preferredLocalChatProvider = "ollama"
+const preferredLocalChatModel = "qwen3.6:latest"
+
+func buildPreferredLLMService(aiCfg config.AIConfig, health *model.HealthStore, executor *model.RoutingExecutor, chatClients []chat.ChatClient, fallback chat.LLMService) chat.LLMService {
+	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
+	if !ok {
+		return fallback
+	}
+
+	localSelector := model.NewSelector(localCfg, health)
+	localService := chat.NewRoutingLLMService(
+		localSelector,
+		health,
+		executor,
+		chatClients,
+		chat.NewFirstPacketProbe(),
+		time.Duration(aiCfg.Selection.FirstPacketTimeoutSeconds)*time.Second,
+	)
+	return chat.NewFallbackLLMService(localService, fallback)
+}
+
+func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool) {
+	localCfg := aiCfg
+	localCfg.Chat.Candidates = nil
+	localCfg.Chat.DeepThinkingModel = ""
+
+	for _, candidate := range aiCfg.Chat.Candidates {
+		if candidate.Provider == preferredLocalChatProvider && strings.TrimSpace(candidate.Model) == preferredLocalChatModel {
+			localCfg.Chat.Candidates = []config.AICandidateConfig{candidate}
+			if strings.TrimSpace(candidate.ID) != "" {
+				localCfg.Chat.DefaultModel = candidate.ID
+			}
+			return localCfg, true
+		}
+	}
+
+	return aiCfg, false
 }
 
 func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {

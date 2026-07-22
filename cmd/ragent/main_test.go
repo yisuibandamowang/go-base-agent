@@ -236,6 +236,49 @@ func TestBuildChatClients_IncludesAnthropicProvider(t *testing.T) {
 	}
 }
 
+func TestBuildLocalPreferredChatConfig_SelectsOllamaQwen36(t *testing.T) {
+	aiCfg := config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"ollama": {
+				URL:      "http://localhost:11434",
+				Protocol: "openai-compatible",
+				Endpoints: map[string]string{
+					"chat": "/v1/chat/completions",
+				},
+			},
+			"bailian": {
+				URL:      "https://dashscope.aliyuncs.com",
+				Protocol: "openai-compatible",
+				Endpoints: map[string]string{
+					"chat": "/compatible-mode/v1/chat/completions",
+				},
+			},
+		},
+		Chat: config.AIChatConfig{
+			DefaultModel: "qwen3.7-plus",
+			Candidates: []config.AICandidateConfig{
+				{ID: "qwen3.7-plus", Provider: "bailian", Model: "qwen-plus-latest", Priority: 1},
+				{ID: "qwen3-local", Provider: "ollama", Model: "qwen3.6:latest", Priority: 2},
+			},
+		},
+	}
+
+	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
+	if !ok {
+		t.Fatal("expected local preferred chat config")
+	}
+	if localCfg.Chat.DefaultModel != "qwen3-local" {
+		t.Fatalf("unexpected local default model %q", localCfg.Chat.DefaultModel)
+	}
+	if len(localCfg.Chat.Candidates) != 1 {
+		t.Fatalf("expected one local candidate, got %d", len(localCfg.Chat.Candidates))
+	}
+	candidate := localCfg.Chat.Candidates[0]
+	if candidate.Provider != "ollama" || candidate.Model != "qwen3.6:latest" {
+		t.Fatalf("unexpected local candidate: %+v", candidate)
+	}
+}
+
 func TestBuildRerankClients_IncludesHTTPProviderAndNoopFallback(t *testing.T) {
 	clients := buildRerankClients(config.AIConfig{
 		Providers: config.AIProvidersConfig{

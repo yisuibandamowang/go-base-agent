@@ -191,7 +191,7 @@ ai:
         priority: 0
       - id: qwen3-local
         provider: ollama
-        model: qwen3:8b-fp16
+        model: qwen3.6:latest
         priority: 2
 
   embedding:
