@@ -145,46 +145,72 @@ func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question s
 		return "", nil
 	}
 
+	results := p.executeExecutors(ctx, question, executors)
 	successTexts := make([]string, 0, len(executors))
 	errorTexts := make([]string, 0)
-	for _, executor := range executors {
-		if err := ctx.Err(); err != nil {
-			return "", err
+	for _, result := range results {
+		if result.errorText != "" {
+			errorTexts = append(errorTexts, result.errorText)
 		}
-
-		tool := executor.GetToolDefinition()
-		params := map[string]interface{}{}
-		var err error
-		if p.extractor != nil {
-			params, err = p.extractor.ExtractParameters(ctx, question, tool)
-			if params == nil {
-				params = map[string]interface{}{}
-			}
+		if result.successText != "" {
+			successTexts = append(successTexts, result.successText)
 		}
-
-		if err != nil {
-			errorTexts = append(errorTexts, formatMcpToolError(err.Error()))
-			continue
-		}
-
-		result, err := executor.Execute(ctx, params)
-		if err != nil {
-			errorTexts = append(errorTexts, formatMcpToolError(err.Error()))
-			continue
-		}
-		text := formatMcpResult(result)
-		if mcpResultIsError(result) {
-			if text != "" {
-				errorTexts = append(errorTexts, formatMcpToolError(text))
-			}
-			continue
-		}
-		if text == "" {
-			continue
-		}
-		successTexts = append(successTexts, "工具："+tool.Name+"\n"+text)
 	}
 	return formatMcpContextSections(successTexts, errorTexts), nil
+}
+
+type mcpToolExecutionResult struct {
+	successText string
+	errorText   string
+}
+
+func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, question string, executors []McpToolExecutor) []mcpToolExecutionResult {
+	results := make([]mcpToolExecutionResult, len(executors))
+	var wg sync.WaitGroup
+	wg.Add(len(executors))
+	for i, executor := range executors {
+		go func(idx int, exec McpToolExecutor) {
+			defer wg.Done()
+			if err := ctx.Err(); err != nil {
+				results[idx].errorText = formatMcpToolError(err.Error())
+				return
+			}
+
+			tool := exec.GetToolDefinition()
+			params := map[string]interface{}{}
+			var err error
+			if p.extractor != nil {
+				params, err = p.extractor.ExtractParameters(ctx, question, tool)
+				if params == nil {
+					params = map[string]interface{}{}
+				}
+			}
+
+			if err != nil {
+				results[idx].errorText = formatMcpToolError(err.Error())
+				return
+			}
+
+			result, err := exec.Execute(ctx, params)
+			if err != nil {
+				results[idx].errorText = formatMcpToolError(err.Error())
+				return
+			}
+			text := formatMcpResult(result)
+			if mcpResultIsError(result) {
+				if text != "" {
+					results[idx].errorText = formatMcpToolError(text)
+				}
+				return
+			}
+			if text == "" {
+				return
+			}
+			results[idx].successText = "工具：" + tool.Name + "\n" + text
+		}(i, executor)
+	}
+	wg.Wait()
+	return results
 }
 
 func (p *DefaultMcpContextProvider) selectExecutors(ctx context.Context, question string) []McpToolExecutor {

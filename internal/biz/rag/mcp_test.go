@@ -5,19 +5,24 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type testMcpExecutor struct {
-	tool   ToolDefinition
-	params map[string]interface{}
-	result map[string]interface{}
-	err    error
-	calls  int
+	tool          ToolDefinition
+	params        map[string]interface{}
+	result        map[string]interface{}
+	err           error
+	calls         int
+	beforeExecute func()
 }
 
 func (e *testMcpExecutor) GetToolDefinition() ToolDefinition { return e.tool }
 func (e *testMcpExecutor) Execute(ctx context.Context, params map[string]interface{}) (map[string]interface{}, error) {
 	e.calls++
+	if e.beforeExecute != nil {
+		e.beforeExecute()
+	}
 	e.params = params
 	if e.err != nil {
 		return nil, e.err
@@ -225,6 +230,80 @@ func TestDefaultMcpContextProvider_FormatsParameterExtractionFailureAsError(t *t
 	}
 	if strings.Contains(contextText, "<data>") || strings.Contains(contextText, "会员等级：金卡") {
 		t.Fatalf("expected failed parameter extraction not to inject tool data, got %q", contextText)
+	}
+}
+
+func TestDefaultMcpContextProvider_ExecutesToolsConcurrently(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	registry.Register(&testMcpExecutor{
+		tool:   ToolDefinition{Name: "member_profile", Description: "查询会员画像"},
+		result: map[string]interface{}{"text": "会员等级：金卡"},
+		beforeExecute: func() {
+			started <- "member_profile"
+			<-release
+		},
+	})
+	registry.Register(&testMcpExecutor{
+		tool:   ToolDefinition{Name: "weather_query", Description: "查询天气"},
+		result: map[string]interface{}{"text": "北京 晴"},
+		beforeExecute: func() {
+			started <- "weather_query"
+			<-release
+		},
+	})
+
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	done := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		text, err := provider.BuildContext(ctx, "帮我查会员等级和天气")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		done <- text
+	}()
+
+	waitStarts := func(wants ...string) {
+		t.Helper()
+		remaining := make(map[string]bool, len(wants))
+		for _, want := range wants {
+			remaining[want] = true
+		}
+		deadline := time.NewTimer(200 * time.Millisecond)
+		defer deadline.Stop()
+		for len(remaining) > 0 {
+			select {
+			case got := <-started:
+				if !remaining[got] {
+					t.Fatalf("unexpected tool start %q", got)
+				}
+				delete(remaining, got)
+			case <-deadline.C:
+				t.Fatalf("timeout waiting for tool starts, remaining=%v", remaining)
+			}
+		}
+	}
+
+	waitStarts("member_profile", "weather_query")
+	close(release)
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("unexpected error: %v", err)
+	case text := <-done:
+		for _, want := range []string{"工具：member_profile", "工具：weather_query"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("expected MCP context to contain %q, got %q", want, text)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for MCP context")
 	}
 }
 
