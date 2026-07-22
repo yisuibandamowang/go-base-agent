@@ -18,6 +18,7 @@ type Tool struct {
 	Description string
 	Properties  map[string]propDesc
 	Required    []string
+	Domains     []string
 	Execute     func(ctx context.Context, args map[string]interface{}) ([]toolContent, error)
 }
 
@@ -48,6 +49,22 @@ func RegisterTools(
 		listChunksTool(chunkRepo),
 	}
 	return append(tools, builtinTools()...)
+}
+
+func (t *Tool) VisibleToDomain(domain string) bool {
+	if t == nil || len(t.Domains) == 0 {
+		return true
+	}
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	for _, allowed := range t.Domains {
+		if strings.EqualFold(strings.TrimSpace(allowed), domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // search_knowledge_base: vector search across knowledge bases.

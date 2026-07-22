@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	intentModel "go-base-agent/internal/biz/intent_tree/model"
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/infra/chat"
 )
 
@@ -25,6 +26,7 @@ type QueryTermNormalizer interface {
 // DBQueryTermNormalizer loads enabled mappings from the database and applies them safely.
 type DBQueryTermNormalizer struct {
 	lister QueryTermMappingLister
+	cache  QueryTermMappingCacheManager
 	domain string
 }
 
@@ -35,6 +37,11 @@ func NewDBQueryTermNormalizer(lister QueryTermMappingLister) *DBQueryTermNormali
 	return &DBQueryTermNormalizer{lister: lister}
 }
 
+// SetCacheManager injects an optional Redis cache manager for term mappings.
+func (n *DBQueryTermNormalizer) SetCacheManager(cache QueryTermMappingCacheManager) {
+	n.cache = cache
+}
+
 // Normalize applies enabled source-to-target mappings in priority order.
 func (n *DBQueryTermNormalizer) Normalize(ctx context.Context, text string) (string, error) {
 	if n == nil || strings.TrimSpace(text) == "" {
@@ -43,7 +50,7 @@ func (n *DBQueryTermNormalizer) Normalize(ctx context.Context, text string) (str
 	if n.lister == nil {
 		return text, nil
 	}
-	mappings, err := n.loadMappings(ctx)
+	mappings, err := n.loadMappings(ctx, n.effectiveDomain(ctx))
 	if err != nil {
 		return text, err
 	}
@@ -63,14 +70,24 @@ func (n *DBQueryTermNormalizer) Normalize(ctx context.Context, text string) (str
 	return result, nil
 }
 
-func (n *DBQueryTermNormalizer) loadMappings(ctx context.Context) ([]intentModel.QueryTermMapping, error) {
+func (n *DBQueryTermNormalizer) loadMappings(ctx context.Context, domain string) ([]intentModel.QueryTermMapping, error) {
+	if n.cache != nil {
+		cached, hit, err := n.cache.LoadMappings(ctx, domain)
+		if err != nil {
+			return nil, fmt.Errorf("load query term mappings from cache: %w", err)
+		}
+		if hit {
+			return cached, nil
+		}
+	}
+
 	page := 1
 	mappings := make([]intentModel.QueryTermMapping, 0)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		batch, total, err := n.lister.ListByDomain(ctx, n.domain, page, queryTermMappingPageSize)
+		batch, total, err := n.lister.ListByDomain(ctx, domain, page, queryTermMappingPageSize)
 		if err != nil {
 			return nil, fmt.Errorf("load query term mappings: %w", err)
 		}
@@ -92,7 +109,25 @@ func (n *DBQueryTermNormalizer) loadMappings(ctx context.Context) ([]intentModel
 		}
 		return mappings[i].SourceTerm < mappings[j].SourceTerm
 	})
+	if n.cache != nil {
+		if err := n.cache.SaveMappings(ctx, domain, mappings); err != nil {
+			slog.Warn("save query term mappings cache failed", "domain", domain, "err", err)
+		}
+	}
 	return mappings, nil
+}
+
+func (n *DBQueryTermNormalizer) effectiveDomain(ctx context.Context) string {
+	if n != nil && strings.TrimSpace(n.domain) != "" {
+		return strings.TrimSpace(n.domain)
+	}
+	if ctx == nil {
+		return ""
+	}
+	if tenant := appctx.Tenant(ctx); tenant != nil {
+		return strings.TrimSpace(tenant.Domain)
+	}
+	return ""
 }
 
 func applyQueryTermMapping(text, sourceTerm, targetTerm string) string {

@@ -24,6 +24,10 @@ func (f failingFileBackend) Read(ctx context.Context, docID string) ([]byte, err
 	return nil, f.err
 }
 
+func (f failingFileBackend) Delete(ctx context.Context, docID string) error {
+	return f.err
+}
+
 func TestNewConfiguredFileStoreFallsBackToMemoryWhenRustFSMissing(t *testing.T) {
 	store, err := NewConfiguredFileStore(config.RustFSConfig{})
 	if err != nil {
@@ -57,5 +61,28 @@ func TestFileStoreGetReturnsBackendErrorAsMiss(t *testing.T) {
 
 	if _, ok := store.Get("doc-1"); ok {
 		t.Fatal("expected failed backend get to be treated as a miss")
+	}
+}
+
+func TestFileStoreDeleteRemovesMemoryObject(t *testing.T) {
+	store := NewFileStore()
+	if err := store.PutWithContext(context.Background(), "doc-1", "a.md", []byte("hello")); err != nil {
+		t.Fatalf("put memory file: %v", err)
+	}
+	if err := store.Delete(context.Background(), "doc-1"); err != nil {
+		t.Fatalf("delete memory file: %v", err)
+	}
+	if _, ok := store.Get("doc-1"); ok {
+		t.Fatal("expected deleted file to be missing")
+	}
+}
+
+func TestFileStoreDeleteReturnsBackendError(t *testing.T) {
+	expected := errors.New("delete unavailable")
+	store := &FileStore{backend: failingFileBackend{err: expected}}
+
+	err := store.Delete(context.Background(), "doc-1")
+	if !errors.Is(err, expected) {
+		t.Fatalf("expected backend error, got %v", err)
 	}
 }

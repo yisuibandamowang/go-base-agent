@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,10 +92,16 @@ func (f *fakeScheduleChunkRunner) RunChunkNow(_ context.Context, docID string, u
 }
 
 func TestDocumentScheduleService_ScanDueFetchesRemoteDocumentAndStartsChunk(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	dbPath := filepath.Join(t.TempDir(), "lock-heartbeat.db")
+	gdb, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := gdb.AutoMigrate(
 		&knowledgeModel.KnowledgeDocument{},
 		&knowledgeModel.KnowledgeDocumentSchedule{},
@@ -192,6 +199,125 @@ func TestDocumentScheduleService_ScanDueFetchesRemoteDocumentAndStartsChunk(t *t
 	}
 	if execCount != 1 {
 		t.Fatalf("expected one success exec log, got %d", execCount)
+	}
+}
+
+func TestDocumentScheduleService_ScanDueKeepsLockAliveDuringLongRefresh(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "lock-heartbeat.db")
+	gdb, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+		&knowledgeModel.KnowledgeDocumentScheduleExec{},
+	); err != nil {
+		t.Fatalf("migrate schedule tables: %v", err)
+	}
+
+	baseNow := time.Now()
+	release := make(chan struct{})
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:            "kb-1",
+		DocName:         "slow.md",
+		FileURL:         "https://example.com/slow.md",
+		FileType:        "md",
+		SourceType:      "url",
+		SourceLocation:  "https://example.com/slow.md",
+		ScheduleEnabled: 1,
+		ScheduleCron:    "@every 1h",
+		Status:          "success",
+		CreatedBy:       "user-1",
+	}
+	doc.ID = "doc-slow"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	schedule := &knowledgeModel.KnowledgeDocumentSchedule{
+		DocID:       doc.ID,
+		KbID:        doc.KbID,
+		CronExpr:    "@every 1h",
+		Enabled:     1,
+		NextRunTime: ptrTime(baseNow.Add(-time.Minute)),
+	}
+	if err := gdb.Create(schedule).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+
+	fileStore := &fakeScheduleFileStore{}
+	chunkStarter := &fakeScheduleChunkRunner{}
+	source := &fakeScheduleSource{
+		doc: &crawler.Document{
+			Meta: crawler.DocumentMeta{
+				ID:         doc.SourceLocation,
+				Title:      "slow.md",
+				URL:        doc.SourceLocation,
+				MimeType:   "text/markdown",
+				Size:       48,
+				SourceName: "url",
+				UpdatedAt:  baseNow,
+				Extra:      map[string]string{"etag": "etag-slow", "last_modified": "Thu, 16 Jul 2026 10:00:00 GMT"},
+			},
+			Content: []byte("会员 Agent 支持权益查询和积分查询，且需要长时间处理。"),
+		},
+		onFetch: func() {
+			<-release
+		},
+	}
+
+	svc := NewDocumentScheduleService(
+		gdb,
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		fileStore,
+		chunkStarter,
+		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 1},
+	)
+	var renewCount int
+	var lastRenew time.Time
+	svc.lockRenewObserver = func(_ string, lockUntil time.Time) {
+		renewCount++
+		lastRenew = lockUntil
+	}
+	svc.RegisterSource(source)
+
+	done := make(chan struct{})
+	var scanCount int
+	var scanErr error
+	go func() {
+		scanCount, scanErr = svc.ScanDue(context.Background())
+		close(done)
+	}()
+
+	time.Sleep(1500 * time.Millisecond)
+	if renewCount == 0 || !lastRenew.After(baseNow.Add(1500*time.Millisecond)) {
+		t.Fatalf("expected heartbeat to renew lock, count=%d lastRenew=%v", renewCount, lastRenew)
+	}
+
+	close(release)
+	<-done
+	if scanErr != nil {
+		t.Fatalf("scan due: %v", scanErr)
+	}
+	if scanCount != 1 {
+		t.Fatalf("expected 1 processed schedule, got %d", scanCount)
+	}
+
+	var updated knowledgeModel.KnowledgeDocumentSchedule
+	if err := gdb.First(&updated, "doc_id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("find updated schedule: %v", err)
+	}
+	if updated.LastStatus != "success" || updated.LastSuccessTime == nil {
+		t.Fatalf("expected success state to be written with active lock, got %+v", updated)
+	}
+	if updated.LockOwner != "" || updated.LockUntil != nil {
+		t.Fatalf("expected lock released after success, got %+v", updated)
 	}
 }
 

@@ -66,6 +66,7 @@ func newTicketQueryTool() *Tool {
 	return &Tool{
 		Name:        ticketToolID,
 		Description: "查询客户技术支持工单数据，支持按地区、状态、优先级、产品、客户等维度筛选，支持汇总概览、工单列表、统计分析等多种查询",
+		Domains:     []string{"ticket"},
 		Properties: map[string]propDesc{
 			"region":       {Type: "string", Description: "地区筛选：华东、华南、华北、西南、西北，不填则查询全国"},
 			"status":       {Type: "string", Description: "工单状态筛选：待处理、处理中、已解决、已关闭，不填则查询全部状态"},

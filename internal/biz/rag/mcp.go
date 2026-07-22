@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	appctx "go-base-agent/internal/framework/context"
 )
 
 // ToolParam describes a parameter of an MCP tool.
@@ -25,6 +27,7 @@ type ToolDefinition struct {
 	Name        string
 	Description string
 	Parameters  []ToolParam
+	Domains     []string
 }
 
 // McpToolExecutor executes an MCP tool with parameters.
@@ -265,7 +268,10 @@ func buildMcpParameterPromptTemplates(subIntents []SubQuestionIntent) map[string
 }
 
 func (p *DefaultMcpContextProvider) selectExecutors(ctx context.Context, question string) []McpToolExecutor {
-	executors := p.registry.ListAllExecutors()
+	executors := filterExecutorsByTenant(p.registry.ListAllExecutors(), tenantDomain(ctx))
+	if len(executors) == 0 {
+		return nil
+	}
 	if p.selector == nil || len(executors) <= 1 {
 		return executors
 	}
@@ -297,6 +303,43 @@ func (p *DefaultMcpContextProvider) selectExecutors(ctx context.Context, questio
 		}
 	}
 	return filtered
+}
+
+func filterExecutorsByTenant(executors []McpToolExecutor, domain string) []McpToolExecutor {
+	if len(executors) == 0 {
+		return nil
+	}
+	filtered := make([]McpToolExecutor, 0, len(executors))
+	for _, executor := range executors {
+		if toolDefinitionVisibleToDomain(executor.GetToolDefinition(), domain) {
+			filtered = append(filtered, executor)
+		}
+	}
+	return filtered
+}
+
+func tenantDomain(ctx context.Context) string {
+	tenant := appctx.Tenant(ctx)
+	if tenant == nil {
+		return ""
+	}
+	return strings.TrimSpace(tenant.Domain)
+}
+
+func toolDefinitionVisibleToDomain(def ToolDefinition, domain string) bool {
+	if len(def.Domains) == 0 {
+		return true
+	}
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	for _, allowed := range def.Domains {
+		if strings.EqualFold(strings.TrimSpace(allowed), domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatMcpResult(result map[string]interface{}) string {

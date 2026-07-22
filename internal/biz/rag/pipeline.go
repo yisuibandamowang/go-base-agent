@@ -16,6 +16,7 @@ import (
 // Aligns with Java StreamChatPipeline.
 type Pipeline struct {
 	llm              chat.LLMService
+	preferredLLM     chat.LLMService
 	prompt           PromptBuilder
 	rewrite          QueryRewriter
 	retrieve         Retriever
@@ -56,6 +57,11 @@ func (p *Pipeline) SetTraceRecorder(recorder TraceRecorder) {
 // SetMessageChunkSize sets the SSE message delta chunk size in runes.
 func (p *Pipeline) SetMessageChunkSize(size int) {
 	p.messageChunkSize = size
+}
+
+// SetPreferredLLMService sets the lightweight LLM used for non-RAG responses.
+func (p *Pipeline) SetPreferredLLMService(llm chat.LLMService) {
+	p.preferredLLM = llm
 }
 
 // StreamChat implements Service.StreamChat.
@@ -142,7 +148,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	if p.guidance != nil {
-		decision := p.guidance.DetectAmbiguity(q, resolvedSubIntents)
+		decision := p.guidance.DetectAmbiguity(ctx, q, resolvedSubIntents)
 		if decision.Action == GuidanceActionPrompt && strings.TrimSpace(decision.Prompt) != "" {
 			sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
 			_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
@@ -156,7 +162,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	if systemPrompt, ok := p.systemOnlyPrompt(resolvedSubIntents); ok {
-		p.streamSystemOnlyResponse(ctx, q, conversationID, history, task, sender, traceRun, systemPrompt)
+		p.streamSystemOnlyResponse(ctx, q, conversationID, history, task, sender, traceRun, p.lightweightLLM(), systemPrompt)
 		return
 	}
 
@@ -167,7 +173,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	if err != nil {
 		retrieveSpan.finish(traceStatusError, err)
 		slog.Warn("rag: retrieve failed", "err", err)
-		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库检索执行失败："+err.Error())
+		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, p.lightweightLLM(), "检索失败原因：知识库检索执行失败："+err.Error())
 		finishTraceRun(traceStatusSuccess, nil)
 		return
 	} else if len(chunks) > 0 {
@@ -180,7 +186,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		retrieveSpan.finish(traceStatusSuccess, nil)
 		if strings.TrimSpace(mcpCtx) == "" {
 			slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
-			p.streamRetrievalFallback(ctx, conversationID, question, sender, task, "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
+			p.streamRetrievalFallback(ctx, conversationID, question, sender, task, p.lightweightLLM(), "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
 			finishTraceRun(traceStatusSuccess, nil)
 			return
 		}
@@ -201,6 +207,10 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		McpContext:   mcpCtx,
 	})
 	req.Thinking = thinkingVal
+	answerLLM := p.llm
+	if len(chunks) == 0 && strings.TrimSpace(mcpCtx) == "" {
+		answerLLM = p.lightweightLLM()
+	}
 
 	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
@@ -235,7 +245,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		finishTraceRun(traceStatusError, ctx.Err())
 		return
 	}
-	handle, err := p.llm.StreamChat(ctx, req, cb)
+	handle, err := answerLLM.StreamChat(ctx, req, cb)
 	if err != nil {
 		slog.Error("rag pipeline: stream chat failed", "err", err)
 		llmSpan.finish(traceStatusError, err)
@@ -253,6 +263,16 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 	llmSpan.finish(traceStatusSuccess, nil)
 	finishTraceRun(traceStatusSuccess, nil)
+}
+
+func (p *Pipeline) lightweightLLM() chat.LLMService {
+	if p != nil && p.preferredLLM != nil {
+		return p.preferredLLM
+	}
+	if p != nil {
+		return p.llm
+	}
+	return nil
 }
 
 func (p *Pipeline) startTraceRun(ctx context.Context, conversationID, taskID string) *TraceRunRecord {
@@ -346,7 +366,7 @@ func deduplicateChunks(chunks []RetrievedChunk) []RetrievedChunk {
 	return deduped
 }
 
-func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, task *streamTask, reason string) {
+func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, task *streamTask, llm chat.LLMService, reason string) {
 	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
 	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
@@ -374,7 +394,10 @@ func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, 
 		messageChunkSize:    p.messageChunkSize,
 	}
 	task.setCancelPayloadFn(cb.buildCompletionPayloadOnCancel)
-	handle, err := p.llm.StreamChat(ctx, req, cb)
+	if llm == nil {
+		llm = p.llm
+	}
+	handle, err := llm.StreamChat(ctx, req, cb)
 	if err != nil {
 		slog.Error("rag pipeline: retrieval fallback stream failed", "err", err)
 		cb.OnError(err)
@@ -655,7 +678,7 @@ func firstSystemPromptTemplate(subIntents []SubQuestionIntent) string {
 	return ""
 }
 
-func (p *Pipeline) streamSystemOnlyResponse(ctx context.Context, question, conversationID string, history []chat.Message, task *streamTask, sender *SSESender, traceRun *TraceRunRecord, customPrompt string) {
+func (p *Pipeline) streamSystemOnlyResponse(ctx context.Context, question, conversationID string, history []chat.Message, task *streamTask, sender *SSESender, traceRun *TraceRunRecord, llm chat.LLMService, customPrompt string) {
 	_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
 	req := p.buildSystemOnlyRequest(question, history, customPrompt)
 	cb := &pipelineCallback{
@@ -683,7 +706,10 @@ func (p *Pipeline) streamSystemOnlyResponse(ctx context.Context, question, conve
 		sender.Close()
 		return
 	}
-	handle, err := p.llm.StreamChat(ctx, req, cb)
+	if llm == nil {
+		llm = p.llm
+	}
+	handle, err := llm.StreamChat(ctx, req, cb)
 	if err != nil {
 		slog.Error("rag pipeline: system-only stream chat failed", "err", err)
 		llmSpan.finish(traceStatusError, err)

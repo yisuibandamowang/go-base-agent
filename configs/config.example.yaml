@@ -86,6 +86,9 @@ rag:
     servers:
       - name: default
         url: ${MCP_SERVER_URL}
+        domains:
+          - sales
+          - ticket
 
   search:
     channels:

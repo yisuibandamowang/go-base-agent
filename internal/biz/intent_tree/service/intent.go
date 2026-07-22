@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/intent_tree/dto"
 	"go-base-agent/internal/biz/intent_tree/model"
 	"go-base-agent/internal/biz/intent_tree/repo"
+	"go-base-agent/internal/biz/rag"
 
 	"gorm.io/gorm"
 )
@@ -17,6 +19,8 @@ import (
 type IntentService struct {
 	intentRepo    *repo.IntentRepo
 	termRepo      *repo.TermMappingRepo
+	termCache     rag.QueryTermMappingCacheManager
+	intentCache   rag.IntentNodeCacheManager
 	db            *gorm.DB
 	auditRecorder *auditService.BizChangeLogService
 }
@@ -29,6 +33,16 @@ func NewIntentService(intentRepo *repo.IntentRepo, termRepo *repo.TermMappingRep
 // SetAuditRecorder 设置审计日志记录器。
 func (s *IntentService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
 	s.auditRecorder = recorder
+}
+
+// SetQueryTermMappingCacheManager injects the optional query term mapping cache.
+func (s *IntentService) SetQueryTermMappingCacheManager(cache rag.QueryTermMappingCacheManager) {
+	s.termCache = cache
+}
+
+// SetIntentNodeCacheManager injects the optional intent tree cache.
+func (s *IntentService) SetIntentNodeCacheManager(cache rag.IntentNodeCacheManager) {
+	s.intentCache = cache
 }
 
 // CreateNode 创建意图节点。
@@ -63,6 +77,7 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 		ActionDesc:    "创建意图节点：" + resp.Name,
 		AfterSnapshot: resp,
 	})
+	s.clearIntentNodeCache(ctx)
 	return resp, nil
 }
 
@@ -96,6 +111,7 @@ func (s *IntentService) UpdateNode(ctx context.Context, id string, req dto.Updat
 		BeforeSnapshot: before,
 		AfterSnapshot:  resp,
 	})
+	s.clearIntentNodeCache(ctx)
 	return resp, nil
 }
 
@@ -116,6 +132,7 @@ func (s *IntentService) DeleteNode(ctx context.Context, id string) error {
 		ActionDesc:     "删除意图节点：" + before.Name,
 		BeforeSnapshot: before,
 	})
+	s.clearIntentNodeCache(ctx)
 	return nil
 }
 
@@ -139,6 +156,7 @@ func (s *IntentService) ToggleNode(ctx context.Context, id string, enabled int16
 		BeforeSnapshot: before,
 		AfterSnapshot:  after,
 	})
+	s.clearIntentNodeCache(ctx)
 	return nil
 }
 
@@ -209,6 +227,7 @@ func (s *IntentService) CreateTermMapping(ctx context.Context, req dto.CreateTer
 		ActionDesc:    "创建关键词映射：" + resp.SourceTerm,
 		AfterSnapshot: resp,
 	})
+	s.clearQueryTermMappingCache(ctx, resp.Domain)
 	return resp, nil
 }
 
@@ -242,6 +261,7 @@ func (s *IntentService) UpdateTermMapping(ctx context.Context, id string, req dt
 		BeforeSnapshot: before,
 		AfterSnapshot:  resp,
 	})
+	s.clearQueryTermMappingCache(ctx, resp.Domain)
 	return resp, nil
 }
 
@@ -262,6 +282,7 @@ func (s *IntentService) DeleteTermMapping(ctx context.Context, id string) error 
 		ActionDesc:     "删除关键词映射：" + before.SourceTerm,
 		BeforeSnapshot: before,
 	})
+	s.clearQueryTermMappingCache(ctx, before.Domain)
 	return nil
 }
 
@@ -378,6 +399,24 @@ func toTermResp(m *model.QueryTermMapping) *dto.TermMappingResp {
 		Enabled:    m.Enabled,
 		Remark:     m.Remark,
 		CreateTime: m.CreateTime,
+	}
+}
+
+func (s *IntentService) clearQueryTermMappingCache(ctx context.Context, domain string) {
+	if s == nil || s.termCache == nil {
+		return
+	}
+	if err := s.termCache.ClearMappings(ctx, strings.TrimSpace(domain)); err != nil {
+		slog.Warn("clear query term mappings cache failed", "domain", domain, "err", err)
+	}
+}
+
+func (s *IntentService) clearIntentNodeCache(ctx context.Context) {
+	if s == nil || s.intentCache == nil {
+		return
+	}
+	if err := s.intentCache.ClearNodes(ctx); err != nil {
+		slog.Warn("clear intent tree cache failed", "err", err)
 	}
 }
 

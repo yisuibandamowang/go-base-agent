@@ -19,8 +19,9 @@ import (
 
 // McpServerSpec describes a remote MCP server endpoint.
 type McpServerSpec struct {
-	Name string
-	URL  string
+	Name    string
+	URL     string
+	Domains []string
 }
 
 type mcpRPCResponse struct {
@@ -129,7 +130,7 @@ func registerRemoteMcpServer(ctx context.Context, registry McpToolRegistry, serv
 		if strings.TrimSpace(tool.Name) == "" {
 			continue
 		}
-		def := toToolDefinition(tool)
+		def := toToolDefinition(tool, server.Domains)
 		registry.Register(&remoteMcpToolExecutor{
 			client:   client,
 			endpoint: endpoint,
@@ -139,7 +140,7 @@ func registerRemoteMcpServer(ctx context.Context, registry McpToolRegistry, serv
 	return nil
 }
 
-func toToolDefinition(tool remoteToolDefinition) ToolDefinition {
+func toToolDefinition(tool remoteToolDefinition, domains []string) ToolDefinition {
 	params := make([]ToolParam, 0, len(tool.InputSchema.Properties))
 	keys := make([]string, 0, len(tool.InputSchema.Properties))
 	for name := range tool.InputSchema.Properties {
@@ -165,6 +166,7 @@ func toToolDefinition(tool remoteToolDefinition) ToolDefinition {
 		Name:        tool.Name,
 		Description: tool.Description,
 		Parameters:  params,
+		Domains:     append([]string(nil), domains...),
 	}
 }
 

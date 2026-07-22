@@ -199,8 +199,9 @@ type RAGMCPConfig struct {
 }
 
 type RAGMCPServerConfig struct {
-	Name string `mapstructure:"name"`
-	URL  string `mapstructure:"url"`
+	Name    string   `mapstructure:"name"`
+	URL     string   `mapstructure:"url"`
+	Domains []string `mapstructure:"domains"`
 }
 
 type RAGSearchConfig struct {

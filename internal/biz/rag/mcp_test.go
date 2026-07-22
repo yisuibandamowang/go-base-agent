@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	appctx "go-base-agent/internal/framework/context"
 )
 
 type testMcpExecutor struct {
@@ -164,6 +166,37 @@ func TestDefaultMcpContextProvider_SelectsRelevantTools(t *testing.T) {
 	}
 	if !strings.Contains(contextText, "member_profile") || strings.Contains(contextText, "weather_query") {
 		t.Fatalf("unexpected selected context: %q", contextText)
+	}
+}
+
+func TestDefaultMcpContextProvider_FiltersToolsByTenantDomain(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	salesExec := &testMcpExecutor{
+		tool:   ToolDefinition{Name: "sales_query", Description: "查询销售", Domains: []string{"sales"}},
+		result: map[string]interface{}{"text": "sales"},
+	}
+	ticketExec := &testMcpExecutor{
+		tool:   ToolDefinition{Name: "ticket_query", Description: "查询工单", Domains: []string{"ticket"}},
+		result: map[string]interface{}{"text": "ticket"},
+	}
+	registry.Register(salesExec)
+	registry.Register(ticketExec)
+
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{params: map[string]interface{}{}})
+	ctx := appctx.WithTenant(context.Background(), &appctx.TenantContext{Domain: "ticket"})
+
+	contextText, err := provider.BuildContext(ctx, "查工单")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if salesExec.calls != 0 {
+		t.Fatalf("expected sales tool to be hidden, got %d calls", salesExec.calls)
+	}
+	if ticketExec.calls != 1 {
+		t.Fatalf("expected ticket tool to be executed once, got %d", ticketExec.calls)
+	}
+	if !strings.Contains(contextText, "ticket_query") || strings.Contains(contextText, "sales_query") {
+		t.Fatalf("unexpected filtered context: %q", contextText)
 	}
 }
 

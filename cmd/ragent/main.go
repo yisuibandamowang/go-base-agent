@@ -212,17 +212,25 @@ func main() {
 	termMappingRepo := intentRepo.NewTermMappingRepo(gormDB)
 	intentSvc := intentService.NewIntentService(intentTreeRepo, termMappingRepo, gormDB)
 	intentSvc.SetAuditRecorder(auditSvc)
+	intentNodeCacheManager := rag.NewRedisIntentNodeCacheManager(rdb)
+	queryTermCacheManager := rag.NewRedisQueryTermMappingCacheManager(rdb)
+	intentSvc.SetIntentNodeCacheManager(intentNodeCacheManager)
+	intentSvc.SetQueryTermMappingCacheManager(queryTermCacheManager)
 	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
-	intentResolverSvc := rag.NewIntentResolver(intentTreeRepo, rag.IntentResolverOptions{
+	cachedIntentTreeLister := rag.NewCachedIntentNodeLister(intentTreeRepo, intentNodeCacheManager)
+	intentResolverSvc := rag.NewIntentResolver(cachedIntentTreeLister, rag.IntentResolverOptions{
 		MinScore:   cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
 		MaxIntents: 5,
 	})
+	intentResolverSvc.SetLLMService(preferredLLMService)
 	intentGuidanceSvc := rag.NewIntentGuidanceService(rag.GuidanceOptions{
 		Enabled:             cfg.RAG.Guidance.Enabled,
 		AmbiguityScoreRatio: cfg.RAG.Guidance.AmbiguityScoreRatio,
 		AmbiguityMargin:     cfg.RAG.Guidance.AmbiguityMargin,
 		MaxOptions:          cfg.RAG.Guidance.MaxOptions,
 	})
+	intentGuidanceSvc.SetIntentNodeLister(cachedIntentTreeLister)
+	intentGuidanceSvc.SetAmbiguityChecker(rag.NewLLMAmbiguityChecker(preferredLLMService))
 
 	adminRepoObj := adminRepo.NewAdminRepo(gormDB)
 	sampleQRepo := adminRepo.NewSampleQuestionRepo(gormDB)
@@ -266,6 +274,7 @@ func main() {
 	}))
 	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
 	queryNormalizer := rag.NewDBQueryTermNormalizer(termMappingRepo)
+	queryNormalizer.SetCacheManager(queryTermCacheManager)
 	baseRewriter := rag.NewLLMRewriter(preferredLLMService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
 		cfg.RAG.QueryRewrite.MaxHistoryChars,
@@ -284,13 +293,14 @@ func main() {
 		registerCancel()
 	}
 
-	ragPipeline := rag.NewPipeline(preferredLLMService,
+	ragPipeline := rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
 		llmRewriter,
 		retriever,
 		memSvc,
 	)
 	ragPipeline.SetMessageChunkSize(cfg.AI.Stream.MessageChunkSize)
+	ragPipeline.SetPreferredLLMService(preferredLLMService)
 	ragPipeline.SetMcpContextProvider(rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector))
 	ragPipeline.SetIntentResolver(intentResolverSvc)
 	ragPipeline.SetIntentGuidanceService(intentGuidanceSvc)
@@ -840,8 +850,9 @@ func toMcpServerSpecs(servers []config.RAGMCPServerConfig) []rag.McpServerSpec {
 	specs := make([]rag.McpServerSpec, 0, len(servers))
 	for _, server := range servers {
 		specs = append(specs, rag.McpServerSpec{
-			Name: server.Name,
-			URL:  server.URL,
+			Name:    server.Name,
+			URL:     server.URL,
+			Domains: append([]string(nil), server.Domains...),
 		})
 	}
 	return specs

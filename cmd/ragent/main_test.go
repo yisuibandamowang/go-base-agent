@@ -305,6 +305,20 @@ func TestBuildRerankClients_IncludesHTTPProviderAndNoopFallback(t *testing.T) {
 	}
 }
 
+func TestToMcpServerSpecsCarriesDomains(t *testing.T) {
+	specs := toMcpServerSpecs([]config.RAGMCPServerConfig{{
+		Name:    "ticket",
+		URL:     "http://localhost:9099",
+		Domains: []string{"ticket"},
+	}})
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 spec, got %d", len(specs))
+	}
+	if len(specs[0].Domains) != 1 || specs[0].Domains[0] != "ticket" {
+		t.Fatalf("expected domains to be propagated, got %+v", specs[0].Domains)
+	}
+}
+
 func TestRagSettingsExposesFullConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

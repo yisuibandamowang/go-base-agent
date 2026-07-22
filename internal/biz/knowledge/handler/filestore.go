@@ -27,6 +27,7 @@ type fileStoreBackend interface {
 	Put(ctx context.Context, docID, name string, data []byte) error
 	Get(ctx context.Context, docID string) (*storedFile, bool, error)
 	Read(ctx context.Context, docID string) ([]byte, error)
+	Delete(ctx context.Context, docID string) error
 }
 
 type memoryFileBackend struct {
@@ -116,6 +117,14 @@ func (s *FileStore) Read(docID string) ([]byte, error) {
 	return s.backend.Read(context.Background(), docID)
 }
 
+// Delete removes a stored file.
+func (s *FileStore) Delete(ctx context.Context, docID string) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("file store backend is nil")
+	}
+	return s.backend.Delete(ctx, docID)
+}
+
 func (s *memoryFileBackend) Put(ctx context.Context, docID string, name string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,9 +154,17 @@ func (s *memoryFileBackend) Read(ctx context.Context, docID string) ([]byte, err
 	return f.Data, nil
 }
 
+func (s *memoryFileBackend) Delete(ctx context.Context, docID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.files, docID)
+	return nil
+}
+
 type s3API interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
 type s3FileBackend struct {
@@ -206,6 +223,18 @@ func (s *s3FileBackend) Read(ctx context.Context, docID string) ([]byte, error) 
 		return nil, err
 	}
 	return f.Data, nil
+}
+
+func (s *s3FileBackend) Delete(ctx context.Context, docID string) error {
+	key := s.objectKey(docID)
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("delete object %s/%s: %w", s.bucket, key, err)
+	}
+	return nil
 }
 
 func (s *s3FileBackend) objectKey(docID string) string {

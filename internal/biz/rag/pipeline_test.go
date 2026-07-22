@@ -647,6 +647,57 @@ func TestPipeline_StreamChat_SystemOnlyIntentUsesDefaultPromptWhenTemplateMissin
 	}
 }
 
+func TestPipeline_StreamChat_SystemOnlyIntentUsesPreferredLLMWhenConfigured(t *testing.T) {
+	done := make(chan struct{})
+	strong := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("云端系统回复")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+	preferred := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("本地系统回复")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(strong, NewDefaultPromptBuilder(), &NoopRewriter{}, staticRetriever{err: errors.New("retrieval should be skipped")}, &NoopMemoryService{})
+	p.SetPreferredLLMService(preferred)
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "你是谁",
+		NodeScores: []NodeScore{{
+			Node: IntentNode{
+				ID:             "system-intro",
+				Kind:           IntentKindSystem,
+				PromptTemplate: "你是系统助手。",
+			},
+			Score: 0.95,
+		}},
+	}}})
+
+	p.StreamChat(context.Background(), "你是谁", "conv-1", "task-1", false, s)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for preferred llm response")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "本地系统回复") {
+		t.Fatalf("expected preferred llm to handle system-only response, got: %s", body)
+	}
+	if strings.Contains(body, "云端系统回复") {
+		t.Fatalf("expected strong llm not to handle system-only response, got: %s", body)
+	}
+}
+
 func TestPipeline_StreamChat_NewConversationFinishEventIncludesConversationTitle(t *testing.T) {
 	done := make(chan struct{})
 	llm := &fakeLLMService{
@@ -672,6 +723,49 @@ func TestPipeline_StreamChat_NewConversationFinishEventIncludesConversationTitle
 	body := w.Body.String()
 	if !strings.Contains(body, `"title":"会员咨询"`) {
 		t.Fatalf("expected finish event to include conversation title, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_UsesStrongLLMWhenKbContextExists(t *testing.T) {
+	done := make(chan struct{})
+	strong := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("云端RAG回答")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+	preferred := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("本地RAG回答")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	mem := &recordingMemoryService{}
+	s, w := newTestSSESender(t)
+	p := NewPipeline(strong, NewDefaultPromptBuilder(), &NoopRewriter{}, staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}, mem)
+	p.SetPreferredLLMService(preferred)
+	p.StreamChat(context.Background(), "当前会员等级是什么", "conv-1", "task-1", false, s)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for strong llm response")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "云端RAG回答") {
+		t.Fatalf("expected strong llm for kb-backed response, got: %s", body)
+	}
+	if strings.Contains(body, "本地RAG回答") {
+		t.Fatalf("expected preferred llm not to handle kb-backed response, got: %s", body)
+	}
+	if len(mem.saved) == 0 {
+		t.Fatal("expected conversation messages to be saved")
 	}
 }
 

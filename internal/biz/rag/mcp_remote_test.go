@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/infra/chat"
 )
 
@@ -85,8 +86,9 @@ func TestRegisterRemoteMcpServersRegistersToolAndExecutesCall(t *testing.T) {
 
 	registry := NewMcpToolRegistry()
 	if err := RegisterRemoteMcpServers(context.Background(), registry, []McpServerSpec{{
-		Name: "stub",
-		URL:  srv.URL,
+		Name:    "stub",
+		URL:     srv.URL,
+		Domains: []string{"ticket"},
 	}}, srv.Client()); err != nil {
 		t.Fatalf("register remote mcp servers: %v", err)
 	}
@@ -98,12 +100,27 @@ func TestRegisterRemoteMcpServersRegistersToolAndExecutesCall(t *testing.T) {
 	if !ok {
 		t.Fatal("expected remote tool to be registered")
 	}
+	if defs := exec.GetToolDefinition(); len(defs.Domains) != 1 || defs.Domains[0] != "ticket" {
+		t.Fatalf("expected remote tool domains to be propagated, got %+v", defs.Domains)
+	}
 	result, err := exec.Execute(context.Background(), map[string]interface{}{"city": "北京"})
 	if err != nil {
 		t.Fatalf("execute remote tool: %v", err)
 	}
 	if !strings.Contains(fmt.Sprint(result), "北京 今日天气 晴") {
 		t.Fatalf("expected remote result text, got %+v", result)
+	}
+
+	provider := NewDefaultMcpContextProvider(registry, &testMcpExtractor{
+		params: map[string]interface{}{"city": "北京"},
+	})
+	ctx := appctx.WithTenant(context.Background(), &appctx.TenantContext{Domain: "sales"})
+	contextText, err := provider.BuildContext(ctx, "查天气")
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if contextText != "" {
+		t.Fatalf("expected mismatched tenant domain to hide remote tool, got %q", contextText)
 	}
 }
 

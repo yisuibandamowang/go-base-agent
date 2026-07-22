@@ -36,16 +36,17 @@ const scheduleLeaseLostNote = "（调度锁已失效，未写回调度状态）"
 
 // DocumentScheduleService 执行知识库文档定时刷新。
 type DocumentScheduleService struct {
-	db           *gorm.DB
-	docRepo      *repo.KnowledgeDocumentRepo
-	scheduleRepo *repo.KnowledgeDocumentScheduleRepo
-	fileStore    scheduleFileWriter
-	chunkStarter scheduleChunkStarter
-	cfg          config.RAGKnowledgeScheduleConfig
-	sources      map[string]crawler.Source
-	owner        string
-	now          func() time.Time
-	parser       cron.Parser
+	db                *gorm.DB
+	docRepo           *repo.KnowledgeDocumentRepo
+	scheduleRepo      *repo.KnowledgeDocumentScheduleRepo
+	fileStore         scheduleFileWriter
+	chunkStarter      scheduleChunkStarter
+	cfg               config.RAGKnowledgeScheduleConfig
+	sources           map[string]crawler.Source
+	owner             string
+	now               func() time.Time
+	parser            cron.Parser
+	lockRenewObserver func(scheduleID string, lockUntil time.Time)
 }
 
 // NewDocumentScheduleService 创建文档定时刷新服务。
@@ -134,6 +135,10 @@ func (s *DocumentScheduleService) ScanDue(ctx context.Context) (int, error) {
 }
 
 func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model.KnowledgeDocumentSchedule, startedAt time.Time) error {
+	stopHeartbeat := s.startLockHeartbeat(ctx, schedule)
+	if stopHeartbeat != nil {
+		defer stopHeartbeat()
+	}
 	doc, err := s.docRepo.FindByID(ctx, schedule.DocID)
 	if err != nil {
 		return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("find document: %w", err), nil)
@@ -185,6 +190,9 @@ func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model
 	nextRun, err := s.nextRunTime(schedule.CronExpr, startedAt)
 	if err != nil {
 		return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("parse cron: %w", err), remoteDoc)
+	}
+	if stopHeartbeat != nil {
+		stopHeartbeat()
 	}
 	now := s.now()
 	updates := map[string]any{
@@ -287,6 +295,50 @@ func (s *DocumentScheduleService) updateScheduleIfOwned(ctx context.Context, sch
 		return false, result.Error
 	}
 	return result.RowsAffected > 0, nil
+}
+
+func (s *DocumentScheduleService) startLockHeartbeat(ctx context.Context, schedule model.KnowledgeDocumentSchedule) func() {
+	if strings.TrimSpace(schedule.LockOwner) == "" {
+		return nil
+	}
+	lockSeconds := s.cfg.LockSeconds
+	if lockSeconds <= 0 {
+		lockSeconds = 900
+	}
+	interval := time.Duration(lockSeconds) * time.Second / 3
+	if interval < 500*time.Millisecond {
+		interval = 500 * time.Millisecond
+	}
+	hbCtx, cancel := context.WithCancel(ctx)
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				renewUntil := time.Now().Add(time.Duration(lockSeconds) * time.Second)
+				updated, err := s.updateScheduleIfOwned(hbCtx, schedule, map[string]any{
+					"lock_until":  renewUntil,
+					"update_time": s.now(),
+				})
+				if err != nil {
+					slog.Warn("knowledge document schedule heartbeat renew failed", "scheduleId", schedule.ID, "err", err)
+					continue
+				}
+				if !updated {
+					slog.Warn("knowledge document schedule heartbeat lost", "scheduleId", schedule.ID, "lockOwner", schedule.LockOwner)
+					cancel()
+					return
+				}
+				if s.lockRenewObserver != nil {
+					s.lockRenewObserver(schedule.ID, renewUntil)
+				}
+			}
+		}
+	}()
+	return cancel
 }
 
 func (s *DocumentScheduleService) recordExec(ctx context.Context, schedule model.KnowledgeDocumentSchedule, status, message string, start, end time.Time, remoteDoc *crawler.Document, contentHash string, scheduleUpdated bool) error {

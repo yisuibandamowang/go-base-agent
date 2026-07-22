@@ -33,6 +33,20 @@ func (f fakeFileReader) Read(string) ([]byte, error) {
 	return f.data, nil
 }
 
+type capturingDeletableFileReader struct {
+	deleteErr     error
+	deletedDocIDs []string
+}
+
+func (f *capturingDeletableFileReader) Read(string) ([]byte, error) {
+	return nil, nil
+}
+
+func (f *capturingDeletableFileReader) Delete(_ context.Context, docID string) error {
+	f.deletedDocIDs = append(f.deletedDocIDs, docID)
+	return f.deleteErr
+}
+
 type fakeEmbeddingService struct{}
 
 func (f fakeEmbeddingService) Embed(context.Context, string) ([]float32, error) {
@@ -402,7 +416,13 @@ func TestDocumentService_RecordsAuditLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &auditModel.BizChangeLog{}); err != nil {
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeChunk{},
+		&knowledgeModel.KnowledgeDocumentChunkLog{},
+		&auditModel.BizChangeLog{},
+	); err != nil {
 		t.Fatalf("migrate knowledge tables: %v", err)
 	}
 
@@ -1047,6 +1067,7 @@ func TestDocumentService_DeleteDocumentRemovesScheduleAndExecRecords(t *testing.
 		&knowledgeModel.KnowledgeBase{},
 		&knowledgeModel.KnowledgeDocument{},
 		&knowledgeModel.KnowledgeChunk{},
+		&knowledgeModel.KnowledgeDocumentChunkLog{},
 		&knowledgeModel.KnowledgeDocumentSchedule{},
 		&knowledgeModel.KnowledgeDocumentScheduleExec{},
 	); err != nil {
@@ -1109,6 +1130,99 @@ func TestDocumentService_DeleteDocumentRemovesScheduleAndExecRecords(t *testing.
 	}
 	if scheduleCount != 0 || execCount != 0 {
 		t.Fatalf("expected schedule and exec removed, got schedule=%d exec=%d", scheduleCount, execCount)
+	}
+}
+
+func TestDocumentService_DeleteDocumentRemovesChunksLogsAndVectors(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeChunk{},
+		&knowledgeModel.KnowledgeDocumentChunkLog{},
+	); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+	log := &knowledgeModel.KnowledgeDocumentChunkLog{DocID: doc.ID, Status: "success"}
+	if err := gdb.Create(log).Error; err != nil {
+		t.Fatalf("create chunk log: %v", err)
+	}
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		vecStore:  vecStore,
+	}
+
+	if err := svc.DeleteDocument(context.Background(), doc.ID); err != nil {
+		t.Fatalf("delete document: %v", err)
+	}
+
+	var activeChunks, logCount int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeChunk{}).Where("doc_id = ? AND deleted = 0", doc.ID).Count(&activeChunks).Error; err != nil {
+		t.Fatalf("count active chunks: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocumentChunkLog{}).Where("doc_id = ?", doc.ID).Count(&logCount).Error; err != nil {
+		t.Fatalf("count chunk logs: %v", err)
+	}
+	if activeChunks != 0 || logCount != 0 {
+		t.Fatalf("expected chunks and logs removed, got chunks=%d logs=%d", activeChunks, logCount)
+	}
+	if len(vecStore.deletedDocCalls) != 1 || vecStore.deletedDocCalls[0] != "collection_a|"+doc.ID {
+		t.Fatalf("expected document vectors deleted, got %+v", vecStore.deletedDocCalls)
+	}
+}
+
+func TestDocumentService_DeleteDocumentDeletesStoredFileQuietly(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentChunkLog{},
+	); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	fileStore := &capturingDeletableFileReader{deleteErr: errors.New("delete failed")}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		fileStore: fileStore,
+	}
+
+	if err := svc.DeleteDocument(context.Background(), doc.ID); err != nil {
+		t.Fatalf("delete document: %v", err)
+	}
+	if len(fileStore.deletedDocIDs) != 1 || fileStore.deletedDocIDs[0] != doc.ID {
+		t.Fatalf("expected stored file delete invoked, got %+v", fileStore.deletedDocIDs)
 	}
 }
 

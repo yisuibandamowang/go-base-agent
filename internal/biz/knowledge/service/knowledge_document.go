@@ -64,6 +64,10 @@ type FileReader interface {
 	Read(docID string) ([]byte, error)
 }
 
+type fileDeleter interface {
+	Delete(ctx context.Context, docID string) error
+}
+
 type ingestionTaskStarter interface {
 	Create(ctx context.Context, req ingestionDto.CreateTaskReq, userID string) (*ingestionDto.IngestionResultResp, error)
 }
@@ -1082,12 +1086,34 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
 		return fmt.Errorf("文档正在分块中，无法删除")
 	}
 	before := s.docToResp(doc)
-	if err := s.docRepo.SoftDelete(ctx, id); err != nil {
-		return err
+	if s.chunkRepo != nil {
+		if err := s.chunkRepo.DeleteByDocID(ctx, id); err != nil {
+			return fmt.Errorf("delete document chunks: %w", err)
+		}
 	}
 	if s.scheduleRepo != nil {
 		if err := s.scheduleRepo.DeleteByDocIDWithExec(ctx, id); err != nil {
 			return fmt.Errorf("delete document schedule: %w", err)
+		}
+	}
+	if err := s.db.WithContext(ctx).Where("doc_id = ?", id).Delete(&model.KnowledgeDocumentChunkLog{}).Error; err != nil {
+		return fmt.Errorf("delete document chunk logs: %w", err)
+	}
+	if err := s.docRepo.SoftDelete(ctx, id); err != nil {
+		return fmt.Errorf("soft delete document: %w", err)
+	}
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return fmt.Errorf("find knowledge base for document delete: %w", err)
+		}
+		if err := s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, id); err != nil {
+			return fmt.Errorf("delete document vectors: %w", err)
+		}
+	}
+	if deleter, ok := s.fileStore.(fileDeleter); ok {
+		if err := deleter.Delete(ctx, id); err != nil {
+			slog.Warn("delete document stored file failed", "docId", id, "err", err)
 		}
 	}
 	s.recordAudit(ctx, auditService.RecordReq{

@@ -39,6 +39,7 @@ func newSalesQueryTool() *Tool {
 	return &Tool{
 		Name:        "sales_query",
 		Description: "查询软件销售数据，支持按地区、时间、产品、销售人员等维度筛选，支持汇总统计、排名、明细列表等多种查询",
+		Domains:     []string{"sales"},
 		Properties: map[string]propDesc{
 			"region":      {Type: "string", Description: "地区筛选：华东、华南、华北、西南、西北，不填则查询全国"},
 			"period":      {Type: "string", Description: "时间段：本月、上月、本季度、上季度、本年，默认本月"},
