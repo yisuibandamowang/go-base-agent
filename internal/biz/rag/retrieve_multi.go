@@ -27,6 +27,7 @@ type SearchContext struct {
 	OriginalQuestion  string
 	RewrittenQuestion string
 	SubQuestions      []string
+	Intents           []SubQuestionIntent
 	TopK              int
 	KnowledgeBaseID   string
 }
@@ -84,6 +85,14 @@ func (r *MultiChannelRetriever) Retrieve(ctx context.Context, question string, t
 		RewrittenQuestion: question,
 		TopK:              topK,
 	})
+}
+
+// RetrieveWithContext runs the configured retrieval channels with the full search context.
+func (r *MultiChannelRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	if r == nil || r.engine == nil {
+		return nil, nil
+	}
+	return r.engine.Retrieve(ctx, sc)
 }
 
 // NewMultiChannelRetrievalEngine creates a new retrieval engine.

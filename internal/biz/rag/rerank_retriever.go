@@ -48,3 +48,50 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, question string, topK in
 	}
 	return result, nil
 }
+
+// RetrieveWithContext runs retrieval with the richer search context when supported.
+func (r *RerankRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	if r == nil || r.base == nil {
+		return nil, nil
+	}
+	var (
+		chunks []RetrievedChunk
+		err    error
+	)
+	if intentAware, ok := r.base.(IntentAwareRetriever); ok {
+		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
+	} else {
+		question := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
+		chunks, err = r.base.Retrieve(ctx, question, sc.TopK)
+	}
+	if err != nil || !r.enabled || len(chunks) == 0 {
+		return chunks, err
+	}
+
+	byID := make(map[string]RetrievedChunk, len(chunks))
+	candidates := make([]rerank.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		byID[chunk.ID] = chunk
+		candidates = append(candidates, rerank.Chunk{
+			ID:    chunk.ID,
+			Text:  chunk.Text,
+			Score: chunk.Score,
+		})
+	}
+
+	question := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
+	reranked, err := r.rerank.Rerank(ctx, question, candidates, sc.TopK)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]RetrievedChunk, 0, len(reranked))
+	for _, item := range reranked {
+		chunk, ok := byID[item.ID]
+		if !ok {
+			continue
+		}
+		chunk.Score = item.Score
+		result = append(result, chunk)
+	}
+	return result, nil
+}

@@ -139,6 +139,20 @@ func (s staticIntentResolutionService) ResolveQuestions(ctx context.Context, que
 	return s.subIntents, nil
 }
 
+type recordingIntentAwareRetriever struct {
+	contexts []SearchContext
+	chunks   []RetrievedChunk
+}
+
+func (r *recordingIntentAwareRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	return r.chunks, nil
+}
+
+func (r *recordingIntentAwareRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	r.contexts = append(r.contexts, sc)
+	return r.chunks, nil
+}
+
 func testRetriever() Retriever {
 	return staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
 }
@@ -766,6 +780,47 @@ func TestPipeline_StreamChat_UsesStrongLLMWhenKbContextExists(t *testing.T) {
 	}
 	if len(mem.saved) == 0 {
 		t.Fatal("expected conversation messages to be saved")
+	}
+}
+
+func TestPipeline_StreamChat_PassesSubIntentsToIntentAwareRetriever(t *testing.T) {
+	done := make(chan struct{})
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("intent aware answer")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+	retriever := &recordingIntentAwareRetriever{
+		chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "会员积分怎么查",
+		NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "leaf-kb", CollectionName: "member_kb", TopK: 6, Kind: IntentKindKB},
+			Score: 0.92,
+		}},
+	}}})
+
+	p.StreamChat(context.Background(), "会员积分怎么查", "conv-1", "task-1", false, s)
+
+	<-done
+	if len(retriever.contexts) == 0 {
+		t.Fatal("expected intent-aware retriever to be called")
+	}
+	got := retriever.contexts[0]
+	if len(got.Intents) != 1 || len(got.Intents[0].NodeScores) != 1 {
+		t.Fatalf("expected sub intents to be passed to retriever, got %+v", got.Intents)
+	}
+	if got.Intents[0].NodeScores[0].Node.CollectionName != "member_kb" {
+		t.Fatalf("expected kb collection to be preserved, got %+v", got.Intents[0].NodeScores[0].Node)
 	}
 }
 

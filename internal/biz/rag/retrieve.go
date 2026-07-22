@@ -16,6 +16,11 @@ type Retriever interface {
 	Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error)
 }
 
+// IntentAwareRetriever can receive the richer search context with intents.
+type IntentAwareRetriever interface {
+	RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error)
+}
+
 // NoopRetriever returns empty results.
 type NoopRetriever struct{}
 

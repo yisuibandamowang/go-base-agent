@@ -168,7 +168,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 
 	mcpCtx := p.buildMcpContext(ctx, q, resolvedSubIntents)
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
-	chunks, err := p.retrieveChunks(ctx, q, subQuestions, 10)
+	chunks, err := p.retrieveChunks(ctx, q, subQuestions, resolvedSubIntents, 10)
 	var kbCtx string
 	if err != nil {
 		retrieveSpan.finish(traceStatusError, err)
@@ -322,11 +322,51 @@ func (p *Pipeline) buildMcpContext(ctx context.Context, question string, subInte
 	return mcpCtx
 }
 
-func (p *Pipeline) retrieveChunks(ctx context.Context, question string, subQuestions []string, topK int) ([]RetrievedChunk, error) {
+func (p *Pipeline) retrieveChunks(ctx context.Context, question string, subQuestions []string, subIntents []SubQuestionIntent, topK int) ([]RetrievedChunk, error) {
+	if aware, ok := p.retrieve.(IntentAwareRetriever); ok {
+		return p.retrieveChunksWithContext(ctx, question, subQuestions, subIntents, topK, aware)
+	}
 	queries := retrievalQueries(question, subQuestions)
 	allChunks := make([]RetrievedChunk, 0)
 	for _, query := range queries {
 		chunks, err := p.retrieve.Retrieve(ctx, query, topK)
+		if err != nil {
+			return nil, err
+		}
+		allChunks = append(allChunks, chunks...)
+	}
+	return deduplicateChunks(allChunks), nil
+}
+
+func (p *Pipeline) retrieveChunksWithContext(ctx context.Context, question string, subQuestions []string, subIntents []SubQuestionIntent, topK int, aware IntentAwareRetriever) ([]RetrievedChunk, error) {
+	queries := retrievalQueries(question, subQuestions)
+	if len(subIntents) == 0 {
+		chunks, err := aware.RetrieveWithContext(ctx, SearchContext{
+			OriginalQuestion:  question,
+			RewrittenQuestion: question,
+			SubQuestions:      queries,
+			TopK:              topK,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return deduplicateChunks(chunks), nil
+	}
+
+	allChunks := make([]RetrievedChunk, 0)
+	for _, subIntent := range subIntents {
+		query := strings.TrimSpace(subIntent.SubQuestion)
+		if query == "" {
+			query = question
+		}
+		sc := SearchContext{
+			OriginalQuestion:  question,
+			RewrittenQuestion: query,
+			SubQuestions:      []string{query},
+			Intents:           []SubQuestionIntent{subIntent},
+			TopK:              topK,
+		}
+		chunks, err := aware.RetrieveWithContext(ctx, sc)
 		if err != nil {
 			return nil, err
 		}

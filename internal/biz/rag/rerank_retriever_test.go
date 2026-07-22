@@ -43,3 +43,33 @@ func TestRerankRetriever_ReranksAndPreservesMetadata(t *testing.T) {
 		t.Fatalf("unexpected reranked chunks: %+v", chunks)
 	}
 }
+
+func TestRerankRetriever_RetrieveWithContextPassesSearchContext(t *testing.T) {
+	base := &recordingIntentAwareRetriever{
+		chunks: []RetrievedChunk{{ID: "a", Text: "A", Score: 0.1}},
+	}
+	reranker := &fakeRerankService{result: []rerank.Chunk{{ID: "a", Text: "A", Score: 0.99}}}
+	retriever := NewRerankRetriever(base, reranker)
+
+	chunks, err := retriever.RetrieveWithContext(context.Background(), SearchContext{
+		OriginalQuestion:  "会员问题",
+		RewrittenQuestion: "会员积分怎么查",
+		Intents: []SubQuestionIntent{{
+			SubQuestion: "会员积分怎么查",
+			NodeScores:  []NodeScore{{Node: IntentNode{ID: "leaf-kb", CollectionName: "member_kb", Kind: IntentKindKB}, Score: 0.9}},
+		}},
+		TopK: 3,
+	})
+	if err != nil {
+		t.Fatalf("retrieve with context: %v", err)
+	}
+	if len(base.contexts) != 1 || len(base.contexts[0].Intents) != 1 {
+		t.Fatalf("expected search context to be passed to base retriever, got %+v", base.contexts)
+	}
+	if reranker.query != "会员积分怎么查" || reranker.topN != 3 {
+		t.Fatalf("unexpected rerank call: query=%q topN=%d", reranker.query, reranker.topN)
+	}
+	if len(chunks) != 1 || chunks[0].Score != 0.99 {
+		t.Fatalf("unexpected reranked chunks: %+v", chunks)
+	}
+}

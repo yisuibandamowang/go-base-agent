@@ -36,8 +36,16 @@ func (c *RetrieverSearchChannel) IsEnabled(sc SearchContext) bool {
 
 func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
 	start := time.Now()
-	query := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
-	chunks, err := c.retriever.Retrieve(ctx, query, sc.TopK)
+	var (
+		chunks []RetrievedChunk
+		err    error
+	)
+	if intentAware, ok := c.retriever.(IntentAwareRetriever); ok {
+		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
+	} else {
+		query := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
+		chunks, err = c.retriever.Retrieve(ctx, query, sc.TopK)
+	}
 	if err != nil {
 		return SearchChannelResult{}, err
 	}
@@ -148,19 +156,22 @@ func (c *PgIntentDirectedSearchChannel) Name() string            { return "Inten
 func (c *PgIntentDirectedSearchChannel) Priority() int           { return c.priority }
 func (c *PgIntentDirectedSearchChannel) Type() SearchChannelType { return ChannelIntentDirected }
 func (c *PgIntentDirectedSearchChannel) IsEnabled(sc SearchContext) bool {
-	return c != nil && c.vectorDB != nil && strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != ""
+	return c != nil && c.vectorDB != nil && (len(intentDirectedTargetsFromContext(sc, 0)) > 0 || strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != "")
 }
 
 func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
 	start := time.Now()
 	query := strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion))
-	collections, err := c.matchIntentCollections(ctx, query)
-	if err != nil || len(collections) == 0 {
-		return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
-	}
-	topK := sc.TopK
-	if topK <= 0 {
-		topK = 10
+	targets := intentDirectedTargetsFromContext(sc, 0)
+	if len(targets) == 0 {
+		collections, err := c.matchIntentCollections(ctx, query)
+		if err != nil || len(collections) == 0 {
+			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+		}
+		targets = make([]intentDirectedTarget, 0, len(collections))
+		for _, collection := range collections {
+			targets = append(targets, intentDirectedTarget{collectionName: collection, topK: sc.TopK})
+		}
 	}
 	type row struct {
 		ID             string  `gorm:"column:id"`
@@ -172,8 +183,12 @@ func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchCon
 		Score          float64 `gorm:"column:score"`
 	}
 	chunks := make([]RetrievedChunk, 0)
-	for _, collection := range collections {
+	for _, target := range targets {
 		rows := make([]row, 0)
+		topK := target.topK
+		if topK <= 0 {
+			topK = 10
+		}
 		err := c.vectorDB.WithContext(ctx).Raw(
 			`SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url, 0.7 AS score
 			 FROM t_knowledge_vector v
@@ -183,7 +198,7 @@ func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchCon
 			 WHERE v.collection_name = ?
 			 ORDER BY v.create_time DESC
 			 LIMIT ?`,
-			collection, topK,
+			target.collectionName, topK,
 		).Scan(&rows).Error
 		if err != nil {
 			continue
@@ -193,11 +208,59 @@ func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchCon
 				ID:       row.ID,
 				Text:     row.Content,
 				Score:    row.Score,
-				Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), knowledgeModel.KnowledgeBase{CollectionName: collection}, row.DocName, row.SourceLocation, row.FileURL),
+				Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), knowledgeModel.KnowledgeBase{CollectionName: target.collectionName}, row.DocName, row.SourceLocation, row.FileURL),
 			})
 		}
 	}
 	return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
+}
+
+type intentDirectedTarget struct {
+	collectionName string
+	topK           int
+}
+
+func intentDirectedTargetsFromContext(sc SearchContext, minScore float64) []intentDirectedTarget {
+	seen := make(map[string]int)
+	targets := make([]intentDirectedTarget, 0)
+	for _, subIntent := range sc.Intents {
+		for _, ns := range subIntent.NodeScores {
+			if ns.Score < minScore || ns.Node.Kind != IntentKindKB {
+				continue
+			}
+			collectionName := strings.TrimSpace(ns.Node.CollectionName)
+			if collectionName == "" {
+				continue
+			}
+			topK := resolveIntentDirectedTopK(ns, sc.TopK)
+			if idx, ok := seen[collectionName]; ok {
+				if topK > targets[idx].topK {
+					targets[idx].topK = topK
+				}
+				continue
+			}
+			seen[collectionName] = len(targets)
+			targets = append(targets, intentDirectedTarget{
+				collectionName: collectionName,
+				topK:           topK,
+			})
+		}
+	}
+	return targets
+}
+
+func resolveIntentDirectedTopK(ns NodeScore, fallbackTopK int) int {
+	if fallbackTopK <= 0 {
+		fallbackTopK = 10
+	}
+	topK := fallbackTopK
+	if ns.Node.TopK > 0 {
+		topK = ns.Node.TopK
+	}
+	if topK <= 0 {
+		topK = fallbackTopK
+	}
+	return topK
 }
 
 func (c *PgIntentDirectedSearchChannel) matchIntentCollections(ctx context.Context, query string) ([]string, error) {
