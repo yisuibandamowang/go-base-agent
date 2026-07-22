@@ -307,6 +307,44 @@ func TestDefaultMcpContextProvider_ExecutesToolsConcurrently(t *testing.T) {
 	}
 }
 
+func TestDefaultMcpContextProvider_UsesIntentPromptTemplate(t *testing.T) {
+	registry := NewMcpToolRegistry()
+	extractor := &recordingMcpPromptExtractor{}
+	registry.Register(&testMcpExecutor{
+		tool: ToolDefinition{
+			Name: "weather_query",
+			Parameters: []ToolParam{
+				{Name: "city", Type: "string", Required: true},
+			},
+		},
+	})
+
+	provider := NewDefaultMcpContextProvider(registry, extractor)
+	ctxText, err := provider.BuildContextWithIntents(context.Background(), "帮我看天气", []SubQuestionIntent{
+		{
+			SubQuestion: "帮我看天气",
+			NodeScores: []NodeScore{
+				{
+					Node: IntentNode{
+						Kind:                IntentKindMCP,
+						McpToolID:           "weather_query",
+						ParamPromptTemplate: "你是一个天气参数提取器。",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if extractor.systemPrompt != "你是一个天气参数提取器。" {
+		t.Fatalf("expected custom prompt to be forwarded, got %q", extractor.systemPrompt)
+	}
+	if !strings.Contains(ctxText, "weather_query") {
+		t.Fatalf("unexpected context text: %q", ctxText)
+	}
+}
+
 type testMcpSelector struct {
 	selected []string
 }

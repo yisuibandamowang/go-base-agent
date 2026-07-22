@@ -146,6 +146,27 @@ func TestLLMMcpParameterExtractor_FillsDefaultValues(t *testing.T) {
 	}
 }
 
+func TestLLMMcpParameterExtractor_UsesCustomPromptTemplate(t *testing.T) {
+	extractor := &recordingMcpPromptExtractor{
+		reply: `{"city":"北京"}`,
+	}
+	params, err := extractor.ExtractParametersWithTemplate(context.Background(), "帮我看天气", ToolDefinition{
+		Name: "weather_query",
+		Parameters: []ToolParam{
+			{Name: "city", Type: "string", Required: true},
+		},
+	}, "你是一个天气参数提取器。")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if params["city"] != "北京" {
+		t.Fatalf("unexpected params: %+v", params)
+	}
+	if extractor.systemPrompt != "你是一个天气参数提取器。" {
+		t.Fatalf("expected custom system prompt to be used, got %q", extractor.systemPrompt)
+	}
+}
+
 func TestLLMMcpToolSelector_ParsesJsonArray(t *testing.T) {
 	selector := NewLLMMcpToolSelector(&testLLMService{
 		reply: `["member_profile"]`,
@@ -176,4 +197,18 @@ func (s *testLLMService) ChatWithModel(ctx context.Context, req chat.Request, mo
 
 func (s *testLLMService) StreamChat(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
 	return &fakeHandle{}, nil
+}
+
+type recordingMcpPromptExtractor struct {
+	reply        string
+	systemPrompt string
+}
+
+func (e *recordingMcpPromptExtractor) ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error) {
+	return e.ExtractParametersWithTemplate(ctx, question, tool, "")
+}
+
+func (e *recordingMcpPromptExtractor) ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error) {
+	e.systemPrompt = customPromptTemplate
+	return map[string]interface{}{"city": "北京"}, nil
 }

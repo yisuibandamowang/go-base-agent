@@ -160,7 +160,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		return
 	}
 
-	mcpCtx := p.buildMcpContext(ctx, q)
+	mcpCtx := p.buildMcpContext(ctx, q, resolvedSubIntents)
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
 	chunks, err := p.retrieveChunks(ctx, q, subQuestions, 10)
 	var kbCtx string
@@ -282,9 +282,17 @@ func (p *Pipeline) startTraceNode(ctx context.Context, run *TraceRunRecord, pare
 	return &traceSpan{ctx: ctx, recorder: p.trace, traceID: run.TraceID, nodeID: node.NodeID}
 }
 
-func (p *Pipeline) buildMcpContext(ctx context.Context, question string) string {
+func (p *Pipeline) buildMcpContext(ctx context.Context, question string, subIntents []SubQuestionIntent) string {
 	if p.mcp == nil {
 		return ""
+	}
+	if provider, ok := p.mcp.(McpIntentAwareContextProvider); ok {
+		mcpCtx, err := provider.BuildContextWithIntents(ctx, question, subIntents)
+		if err != nil {
+			slog.Warn("rag: build mcp context failed", "err", err)
+			return ""
+		}
+		return mcpCtx
 	}
 	mcpCtx, err := p.mcp.BuildContext(ctx, question)
 	if err != nil {

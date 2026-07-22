@@ -118,6 +118,11 @@ type McpContextProvider interface {
 	BuildContext(ctx context.Context, question string) (string, error)
 }
 
+// McpIntentAwareContextProvider can build MCP context with resolved intent candidates.
+type McpIntentAwareContextProvider interface {
+	BuildContextWithIntents(ctx context.Context, question string, subIntents []SubQuestionIntent) (string, error)
+}
+
 // DefaultMcpContextProvider executes registered MCP tools and formats their results.
 type DefaultMcpContextProvider struct {
 	registry  McpToolRegistry
@@ -136,6 +141,11 @@ func NewDefaultMcpContextProvider(registry McpToolRegistry, extractor McpParamet
 
 // BuildContext executes registered MCP tools and returns prompt-ready context text.
 func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question string) (string, error) {
+	return p.BuildContextWithIntents(ctx, question, nil)
+}
+
+// BuildContextWithIntents executes registered MCP tools and returns prompt-ready context text.
+func (p *DefaultMcpContextProvider) BuildContextWithIntents(ctx context.Context, question string, subIntents []SubQuestionIntent) (string, error) {
 	if p == nil || p.registry == nil || p.registry.Size() == 0 {
 		return "", nil
 	}
@@ -145,7 +155,8 @@ func (p *DefaultMcpContextProvider) BuildContext(ctx context.Context, question s
 		return "", nil
 	}
 
-	results := p.executeExecutors(ctx, question, executors)
+	promptTemplates := buildMcpParameterPromptTemplates(subIntents)
+	results := p.executeExecutors(ctx, question, executors, promptTemplates)
 	successTexts := make([]string, 0, len(executors))
 	errorTexts := make([]string, 0)
 	for _, result := range results {
@@ -164,7 +175,7 @@ type mcpToolExecutionResult struct {
 	errorText   string
 }
 
-func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, question string, executors []McpToolExecutor) []mcpToolExecutionResult {
+func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, question string, executors []McpToolExecutor, promptTemplates map[string]string) []mcpToolExecutionResult {
 	results := make([]mcpToolExecutionResult, len(executors))
 	var wg sync.WaitGroup
 	wg.Add(len(executors))
@@ -180,7 +191,21 @@ func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, questi
 			params := map[string]interface{}{}
 			var err error
 			if p.extractor != nil {
-				params, err = p.extractor.ExtractParameters(ctx, question, tool)
+				customPrompt := ""
+				if len(promptTemplates) > 0 {
+					customPrompt = strings.TrimSpace(promptTemplates[tool.Name])
+				}
+				if customPrompt != "" {
+					if templateAware, ok := p.extractor.(interface {
+						ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error)
+					}); ok {
+						params, err = templateAware.ExtractParametersWithTemplate(ctx, question, tool, customPrompt)
+					} else {
+						params, err = p.extractor.ExtractParameters(ctx, question, tool)
+					}
+				} else {
+					params, err = p.extractor.ExtractParameters(ctx, question, tool)
+				}
 				if params == nil {
 					params = map[string]interface{}{}
 				}
@@ -211,6 +236,32 @@ func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, questi
 	}
 	wg.Wait()
 	return results
+}
+
+func buildMcpParameterPromptTemplates(subIntents []SubQuestionIntent) map[string]string {
+	if len(subIntents) == 0 {
+		return nil
+	}
+	templates := make(map[string]string)
+	for _, si := range subIntents {
+		for _, ns := range si.NodeScores {
+			if ns.Node.Kind != IntentKindMCP {
+				continue
+			}
+			toolID := strings.TrimSpace(ns.Node.McpToolID)
+			template := strings.TrimSpace(ns.Node.ParamPromptTemplate)
+			if toolID == "" || template == "" {
+				continue
+			}
+			if _, exists := templates[toolID]; !exists {
+				templates[toolID] = template
+			}
+		}
+	}
+	if len(templates) == 0 {
+		return nil
+	}
+	return templates
 }
 
 func (p *DefaultMcpContextProvider) selectExecutors(ctx context.Context, question string) []McpToolExecutor {

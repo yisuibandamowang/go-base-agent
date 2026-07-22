@@ -300,13 +300,23 @@ func NewLLMMcpParameterExtractor(llm chat.LLMService) *LLMMcpParameterExtractor 
 
 // ExtractParameters asks the LLM for tool parameters and normalizes the result.
 func (e *LLMMcpParameterExtractor) ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error) {
+	return e.ExtractParametersWithTemplate(ctx, question, tool, "")
+}
+
+// ExtractParametersWithTemplate asks the LLM for tool parameters using an optional custom system prompt.
+func (e *LLMMcpParameterExtractor) ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error) {
 	if e == nil || e.llm == nil || len(tool.Parameters) == 0 {
 		return map[string]interface{}{}, nil
 	}
 
+	systemPrompt := "你是一个MCP参数提取器。只返回严格 JSON 对象，不要返回解释、代码块或多余文本。"
+	if strings.TrimSpace(customPromptTemplate) != "" {
+		systemPrompt = strings.TrimSpace(customPromptTemplate)
+	}
+
 	req := chat.Request{
 		Messages: []chat.Message{
-			chat.NewSystemMessage("你是一个MCP参数提取器。只返回严格 JSON 对象，不要返回解释、代码块或多余文本。"),
+			chat.NewSystemMessage(systemPrompt),
 			chat.NewUserMessage(buildMcpParameterPrompt(question, tool)),
 		},
 		Temperature: floatPtr(0.1),
