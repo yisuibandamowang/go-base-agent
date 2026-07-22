@@ -87,3 +87,13 @@ func (r *KnowledgeDocumentScheduleRepo) CreateExec(ctx context.Context, exec *mo
 func (r *KnowledgeDocumentScheduleRepo) DeleteByDocID(ctx context.Context, docID string) error {
 	return r.gdb.WithContext(ctx).Where("doc_id = ?", docID).Delete(&model.KnowledgeDocumentSchedule{}).Error
 }
+
+// DeleteByDocIDWithExec 根据文档 ID 删除定时任务及其执行记录。
+func (r *KnowledgeDocumentScheduleRepo) DeleteByDocIDWithExec(ctx context.Context, docID string) error {
+	return r.gdb.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("doc_id = ?", docID).Delete(&model.KnowledgeDocumentScheduleExec{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("doc_id = ?", docID).Delete(&model.KnowledgeDocumentSchedule{}).Error
+	})
+}

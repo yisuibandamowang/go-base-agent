@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -25,23 +26,25 @@ import (
 	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
 
+	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
 
 // DocumentService 文档管理业务逻辑层。
 type DocumentService struct {
-	docRepo        *repo.KnowledgeDocumentRepo
-	chunkRepo      *repo.KnowledgeChunkRepo
-	scheduleRepo   *repo.KnowledgeDocumentScheduleRepo
-	kbRepo         knowledgeBaseFinder
-	db             *gorm.DB
-	emb            embedding.Service
-	vecStore       vectorStore
-	fileStore      FileReader
-	ingestion      ingestionTaskStarter
-	auditRecorder  *auditService.BizChangeLogService
-	parserRegistry *parser.Registry
-	llm            chat.LLMService
+	docRepo                    *repo.KnowledgeDocumentRepo
+	chunkRepo                  *repo.KnowledgeChunkRepo
+	scheduleRepo               *repo.KnowledgeDocumentScheduleRepo
+	kbRepo                     knowledgeBaseFinder
+	db                         *gorm.DB
+	emb                        embedding.Service
+	vecStore                   vectorStore
+	fileStore                  FileReader
+	ingestion                  ingestionTaskStarter
+	auditRecorder              *auditService.BizChangeLogService
+	parserRegistry             *parser.Registry
+	llm                        chat.LLMService
+	scheduleMinIntervalSeconds int
 }
 
 type knowledgeBaseFinder interface {
@@ -76,13 +79,14 @@ func NewDocumentService(
 	fileStore FileReader,
 ) *DocumentService {
 	return &DocumentService{
-		docRepo:   docRepo,
-		chunkRepo: chunkRepo,
-		kbRepo:    kbRepo,
-		db:        db,
-		emb:       emb,
-		vecStore:  vecStore,
-		fileStore: fileStore,
+		docRepo:                    docRepo,
+		chunkRepo:                  chunkRepo,
+		kbRepo:                     kbRepo,
+		db:                         db,
+		emb:                        emb,
+		vecStore:                   vecStore,
+		fileStore:                  fileStore,
+		scheduleMinIntervalSeconds: 60,
 	}
 }
 
@@ -111,6 +115,11 @@ func (s *DocumentService) SetLLMService(llm chat.LLMService) {
 	s.llm = llm
 }
 
+// SetScheduleMinIntervalSeconds 设置文档调度最小周期秒数。
+func (s *DocumentService) SetScheduleMinIntervalSeconds(seconds int) {
+	s.scheduleMinIntervalSeconds = seconds
+}
+
 // CreateDocument 创建文档记录，状态为 pending。
 func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req dto.CreateDocumentReq, userID string) (*dto.DocumentResp, error) {
 	if _, err := s.kbRepo.FindByID(ctx, kbID); err != nil {
@@ -130,6 +139,9 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 	doc.CreateTime = time.Now()
 	doc.UpdateTime = time.Now()
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
+	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+		return nil, err
+	}
 
 	if req.ChunkStrategy != "" {
 		doc.ProcessMode = "chunk"
@@ -212,6 +224,15 @@ func documentPipelineNodeMessage(nodeType string, chunkCount int) string {
 // StartChunk 开始文档分块处理：状态校验 → 更新为 running → 异步执行分块任务。
 // 对齐 Java KnowledgeDocumentServiceImpl.startChunk。
 func (s *DocumentService) StartChunk(ctx context.Context, docID string, userID string) error {
+	return s.startChunk(ctx, docID, userID, true)
+}
+
+// RunChunkNow 开始文档分块处理并等待完成。
+func (s *DocumentService) RunChunkNow(ctx context.Context, docID string, userID string) error {
+	return s.startChunk(ctx, docID, userID, false)
+}
+
+func (s *DocumentService) startChunk(ctx context.Context, docID string, userID string, async bool) error {
 	doc, err := s.docRepo.FindByID(ctx, docID)
 	if err != nil {
 		return fmt.Errorf("文档不存在")
@@ -230,20 +251,23 @@ func (s *DocumentService) StartChunk(ctx context.Context, docID string, userID s
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
-	// 异步执行分块任务
-	go s.executeChunk(docID)
-	return nil
+	if async {
+		go func() {
+			_ = s.executeChunk(context.Background(), docID)
+		}()
+		return nil
+	}
+	return s.executeChunk(ctx, docID)
 }
 
 // executeChunk 执行分块任务（对应 Java runChunkTask）。
-func (s *DocumentService) executeChunk(docID string) {
-	ctx := context.Background()
+func (s *DocumentService) executeChunk(ctx context.Context, docID string) error {
 	startTime := time.Now()
 
 	doc, err := s.docRepo.FindByID(ctx, docID)
 	if err != nil {
 		slog.Error("chunk task: document not found", "docId", docID, "err", err)
-		return
+		return fmt.Errorf("document not found: %w", err)
 	}
 
 	// 1. 创建分块日志
@@ -272,19 +296,19 @@ func (s *DocumentService) executeChunk(docID string) {
 			slog.Error("chunk task: pipeline process failed", "docId", docID, "err", err)
 			s.markChunkFailed(ctx, docID)
 			s.updateChunkLog(chunkLog.ID, "failed", 0, 0, 0, 0, 0, time.Since(startTime).Milliseconds(), err.Error())
-			return
+			return err
 		}
 		s.markPipelineCompleted(ctx, docID, result.ChunkCount)
 		s.updateChunkLog(chunkLog.ID, "success", result.ChunkCount, 0, 0, 0, 0, time.Since(startTime).Milliseconds(), result.Message)
 		slog.Info("chunk task: pipeline completed", "docId", docID, "taskId", result.TaskID, "chunks", result.ChunkCount)
-		return
+		return nil
 	}
 	extractDuration, chunkDuration, embedDuration, chunkResults, err = s.runChunkProcess(ctx, doc)
 	if err != nil {
 		slog.Error("chunk task: process failed", "docId", docID, "err", err)
 		s.markChunkFailed(ctx, docID)
 		s.updateChunkLog(chunkLog.ID, "failed", 0, extractDuration, chunkDuration, embedDuration, 0, time.Since(startTime).Milliseconds(), err.Error())
-		return
+		return err
 	}
 
 	// 3. 持久化分块和向量（事务）
@@ -295,12 +319,13 @@ func (s *DocumentService) executeChunk(docID string) {
 		slog.Error("chunk task: persist failed", "docId", docID, "err", err)
 		s.markChunkFailed(ctx, docID)
 		s.updateChunkLog(chunkLog.ID, "failed", 0, extractDuration, chunkDuration, embedDuration, persistDuration, time.Since(startTime).Milliseconds(), err.Error())
-		return
+		return err
 	}
 
 	// 4. 更新分块日志为成功
 	s.updateChunkLog(chunkLog.ID, "success", savedCount, extractDuration, chunkDuration, embedDuration, persistDuration, time.Since(startTime).Milliseconds(), "")
 	slog.Info("chunk task: completed", "docId", docID, "chunks", savedCount)
+	return nil
 }
 
 func (s *DocumentService) runPipelineProcess(ctx context.Context, doc *model.KnowledgeDocument) (*ingestionDto.IngestionResultResp, error) {
@@ -1003,9 +1028,18 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	if err != nil {
 		return nil, fmt.Errorf("document not found: %w", err)
 	}
+	if doc.Status == "running" {
+		return nil, fmt.Errorf("文档正在分块中，无法修改")
+	}
+	if strings.TrimSpace(req.DocName) == "" {
+		return nil, fmt.Errorf("文档名称不能为空")
+	}
 	before := s.docToResp(doc)
-	doc.DocName = req.DocName
+	doc.DocName = strings.TrimSpace(req.DocName)
 	doc.UpdatedBy = userID
+	if strings.TrimSpace(req.SourceLocation) != "" && strings.EqualFold(normalizeKnowledgeSourceType(doc.SourceType), "url") {
+		doc.SourceLocation = strings.TrimSpace(req.SourceLocation)
+	}
 	if req.ScheduleEnabled != nil {
 		doc.ScheduleEnabled = *req.ScheduleEnabled
 	}
@@ -1017,6 +1051,9 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 		doc.ChunkConfig = req.ChunkConfig
 	}
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, doc.ScheduleEnabled, doc.ScheduleCron)
+	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+		return nil, err
+	}
 	if err := s.docRepo.Update(ctx, doc); err != nil {
 		return nil, fmt.Errorf("update document: %w", err)
 	}
@@ -1041,12 +1078,17 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if doc.Status == "running" {
+		return fmt.Errorf("文档正在分块中，无法删除")
+	}
 	before := s.docToResp(doc)
 	if err := s.docRepo.SoftDelete(ctx, id); err != nil {
 		return err
 	}
 	if s.scheduleRepo != nil {
-		_ = s.scheduleRepo.DeleteByDocID(ctx, id)
+		if err := s.scheduleRepo.DeleteByDocIDWithExec(ctx, id); err != nil {
+			return fmt.Errorf("delete document schedule: %w", err)
+		}
 	}
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeDocument,
@@ -1064,6 +1106,9 @@ func (s *DocumentService) ToggleDocument(ctx context.Context, id string, enabled
 	if err != nil {
 		return err
 	}
+	if doc.Status == "running" {
+		return fmt.Errorf("文档正在分块中，无法修改")
+	}
 	before := s.docToResp(doc)
 	now := time.Now()
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -1076,14 +1121,17 @@ func (s *DocumentService) ToggleDocument(ctx context.Context, id string, enabled
 		if result.RowsAffected == 0 {
 			return gorm.ErrRecordNotFound
 		}
+		doc.Enabled = enabled
+		doc.UpdateTime = now
+		if err := s.syncDocumentScheduleIfExistsTx(ctx, tx, doc); err != nil {
+			return err
+		}
 		return tx.Model(&model.KnowledgeChunk{}).
 			Where("doc_id = ? AND deleted = 0", id).
 			Updates(map[string]interface{}{"enabled": enabled, "update_time": now}).Error
 	}); err != nil {
 		return err
 	}
-	doc.Enabled = enabled
-	doc.UpdateTime = now
 	if enabled == 1 {
 		if err := s.syncDocumentVectors(ctx, doc); err != nil {
 			return err
@@ -1452,14 +1500,88 @@ func (s *DocumentService) syncDocumentSchedule(ctx context.Context, doc *model.K
 	if enabled != 1 || strings.TrimSpace(cronExpr) == "" {
 		return s.scheduleRepo.DeleteByDocID(ctx, doc.ID)
 	}
+	nextRunTime, err := s.documentScheduleNextRunTime(cronExpr, now)
+	if err != nil {
+		return err
+	}
 	schedule := &model.KnowledgeDocumentSchedule{
 		DocID:       doc.ID,
 		KbID:        doc.KbID,
 		CronExpr:    strings.TrimSpace(cronExpr),
 		Enabled:     1,
-		NextRunTime: &now,
+		NextRunTime: &nextRunTime,
 	}
 	return s.scheduleRepo.UpsertByDocID(ctx, schedule)
+}
+
+func (s *DocumentService) syncDocumentScheduleIfExistsTx(ctx context.Context, tx *gorm.DB, doc *model.KnowledgeDocument) error {
+	if s.scheduleRepo == nil || tx == nil || doc == nil || strings.TrimSpace(doc.ID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(documentSourceURL(doc)) == "" {
+		return nil
+	}
+	var existing model.KnowledgeDocumentSchedule
+	if err := tx.WithContext(ctx).Where("doc_id = ?", doc.ID).First(&existing).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("find document schedule: %w", err)
+	}
+	cronExpr := strings.TrimSpace(doc.ScheduleCron)
+	enabled := int16(0)
+	var nextRunTime *time.Time
+	if doc.Enabled == 1 && doc.ScheduleEnabled == 1 && cronExpr != "" {
+		enabled = 1
+		next, err := s.documentScheduleNextRunTime(cronExpr, time.Now())
+		if err != nil {
+			return fmt.Errorf("parse document schedule cron: %w", err)
+		}
+		nextRunTime = &next
+	}
+	return tx.WithContext(ctx).Model(&model.KnowledgeDocumentSchedule{}).
+		Where("id = ?", existing.ID).
+		Updates(map[string]any{
+			"cron_expr":     cronExpr,
+			"enabled":       enabled,
+			"next_run_time": nextRunTime,
+			"update_time":   time.Now(),
+		}).Error
+}
+
+func (s *DocumentService) validateDocumentSchedule(enabled int16, cronExpr string) error {
+	if enabled != 1 || strings.TrimSpace(cronExpr) == "" {
+		return nil
+	}
+	_, err := s.documentScheduleNextRunTime(cronExpr, time.Now())
+	return err
+}
+
+func (s *DocumentService) documentScheduleNextRunTime(expr string, from time.Time) (time.Time, error) {
+	parsed, err := cron.NewParser(
+		cron.SecondOptional |
+			cron.Minute |
+			cron.Hour |
+			cron.Dom |
+			cron.Month |
+			cron.Dow |
+			cron.Descriptor,
+	).Parse(strings.TrimSpace(expr))
+	if err != nil {
+		return time.Time{}, err
+	}
+	next := parsed.Next(from)
+	if next.IsZero() {
+		return time.Time{}, fmt.Errorf("cron expression has no next run")
+	}
+	minIntervalSeconds := s.scheduleMinIntervalSeconds
+	if minIntervalSeconds <= 0 {
+		minIntervalSeconds = 60
+	}
+	if next.Before(from.Add(time.Duration(minIntervalSeconds) * time.Second)) {
+		return time.Time{}, fmt.Errorf("定时周期不能小于 %d 秒", minIntervalSeconds)
+	}
+	return next, nil
 }
 
 func normalizeDocumentSchedule(doc *model.KnowledgeDocument, enabled int16, cronExpr string) (int16, string) {

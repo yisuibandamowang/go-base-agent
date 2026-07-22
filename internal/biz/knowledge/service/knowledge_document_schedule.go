@@ -28,6 +28,12 @@ type scheduleChunkStarter interface {
 	StartChunk(ctx context.Context, docID string, userID string) error
 }
 
+type scheduleChunkSynchronizer interface {
+	RunChunkNow(ctx context.Context, docID string, userID string) error
+}
+
+const scheduleLeaseLostNote = "（调度锁已失效，未写回调度状态）"
+
 // DocumentScheduleService 执行知识库文档定时刷新。
 type DocumentScheduleService struct {
 	db           *gorm.DB
@@ -133,7 +139,7 @@ func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model
 		return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("find document: %w", err), nil)
 	}
 	if doc.ScheduleEnabled != 1 || schedule.Enabled != 1 {
-		return s.releaseSchedule(ctx, schedule.ID, map[string]any{"last_status": "skipped"})
+		return s.markSkipped(ctx, schedule, startedAt, "定时已关闭", nil, "")
 	}
 	source := s.sourceForDocument(doc)
 	if source == nil {
@@ -156,11 +162,21 @@ func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model
 	etag := remoteDoc.Meta.Extra["etag"]
 	lastModified := remoteDoc.Meta.Extra["last_modified"]
 	unchanged := contentHash == schedule.LastContentHash && schedule.LastContentHash != ""
-	if !unchanged {
-		s.fileStore.Put(doc.ID, fileName, remoteDoc.Content)
-		if err := s.updateDocumentAfterFetch(ctx, doc, remoteDoc, fileName); err != nil {
-			return s.markFailed(ctx, schedule, startedAt, err, remoteDoc)
+	if unchanged {
+		return s.markSkipped(ctx, schedule, startedAt, "远程文件未变化", remoteDoc, contentHash)
+	}
+	if doc.Status == "running" {
+		return s.markSkipped(ctx, schedule, startedAt, "文档正在分块中，跳过本次调度", remoteDoc, contentHash)
+	}
+	s.fileStore.Put(doc.ID, fileName, remoteDoc.Content)
+	if err := s.updateDocumentAfterFetch(ctx, doc, remoteDoc, fileName); err != nil {
+		return s.markFailed(ctx, schedule, startedAt, err, remoteDoc)
+	}
+	if syncRunner, ok := s.chunkStarter.(scheduleChunkSynchronizer); ok {
+		if err := syncRunner.RunChunkNow(ctx, doc.ID, doc.CreatedBy); err != nil {
+			return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("run chunk now: %w", err), remoteDoc)
 		}
+	} else {
 		if err := s.chunkStarter.StartChunk(ctx, doc.ID, doc.CreatedBy); err != nil {
 			return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("start chunk: %w", err), remoteDoc)
 		}
@@ -184,14 +200,12 @@ func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model
 		"lock_until":        nil,
 		"update_time":       now,
 	}
-	if err := s.scheduleRepo.UpdateByID(ctx, schedule.ID, updates); err != nil {
+	scheduleUpdated, err := s.updateScheduleIfOwned(ctx, schedule, updates)
+	if err != nil {
+		_ = s.recordExec(ctx, schedule, "success", "refreshed", startedAt, now, remoteDoc, contentHash, false)
 		return fmt.Errorf("update schedule success: %w", err)
 	}
-	message := "refreshed"
-	if unchanged {
-		message = "unchanged"
-	}
-	return s.recordExec(ctx, schedule, "success", message, startedAt, now, remoteDoc, contentHash)
+	return s.recordExec(ctx, schedule, "success", "refreshed", startedAt, now, remoteDoc, contentHash, scheduleUpdated)
 }
 
 func (s *DocumentScheduleService) updateDocumentAfterFetch(ctx context.Context, doc *model.KnowledgeDocument, remoteDoc *crawler.Document, fileName string) error {
@@ -218,7 +232,7 @@ func (s *DocumentScheduleService) updateDocumentAfterFetch(ctx context.Context, 
 func (s *DocumentScheduleService) markFailed(ctx context.Context, schedule model.KnowledgeDocumentSchedule, startedAt time.Time, cause error, remoteDoc *crawler.Document) error {
 	now := s.now()
 	nextRun := startedAt.Add(time.Duration(maxInt(s.cfg.MinIntervalSeconds, 60)) * time.Second)
-	_ = s.scheduleRepo.UpdateByID(ctx, schedule.ID, map[string]any{
+	scheduleUpdated, _ := s.updateScheduleIfOwned(ctx, schedule, map[string]any{
 		"last_run_time": startedAt,
 		"last_status":   "failed",
 		"last_error":    truncateString(cause.Error(), 512),
@@ -231,21 +245,54 @@ func (s *DocumentScheduleService) markFailed(ctx context.Context, schedule model
 	if remoteDoc != nil {
 		contentHash = sha256Hex(remoteDoc.Content)
 	}
-	_ = s.recordExec(ctx, schedule, "failed", truncateString(cause.Error(), 512), startedAt, now, remoteDoc, contentHash)
+	_ = s.recordExec(ctx, schedule, "failed", truncateString(cause.Error(), 512), startedAt, now, remoteDoc, contentHash, scheduleUpdated)
 	return cause
 }
 
-func (s *DocumentScheduleService) releaseSchedule(ctx context.Context, scheduleID string, extra map[string]any) error {
-	if extra == nil {
-		extra = make(map[string]any)
+func (s *DocumentScheduleService) markSkipped(ctx context.Context, schedule model.KnowledgeDocumentSchedule, startedAt time.Time, message string, remoteDoc *crawler.Document, contentHash string) error {
+	nextRun, err := s.nextRunTime(schedule.CronExpr, startedAt)
+	if err != nil {
+		return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("parse cron: %w", err), remoteDoc)
 	}
-	extra["lock_owner"] = ""
-	extra["lock_until"] = nil
-	extra["update_time"] = s.now()
-	return s.scheduleRepo.UpdateByID(ctx, scheduleID, extra)
+	now := s.now()
+	updates := map[string]any{
+		"last_run_time": startedAt,
+		"last_status":   "skipped",
+		"last_error":    truncateString(message, 512),
+		"next_run_time": nextRun,
+		"lock_owner":    "",
+		"lock_until":    nil,
+		"update_time":   now,
+	}
+	if remoteDoc != nil {
+		updates["last_etag"] = remoteDoc.Meta.Extra["etag"]
+		updates["last_modified"] = remoteDoc.Meta.Extra["last_modified"]
+		updates["last_content_hash"] = contentHash
+	}
+	scheduleUpdated, err := s.updateScheduleIfOwned(ctx, schedule, updates)
+	if err != nil {
+		_ = s.recordExec(ctx, schedule, "skipped", message, startedAt, now, remoteDoc, contentHash, false)
+		return fmt.Errorf("update schedule skipped: %w", err)
+	}
+	return s.recordExec(ctx, schedule, "skipped", message, startedAt, now, remoteDoc, contentHash, scheduleUpdated)
 }
 
-func (s *DocumentScheduleService) recordExec(ctx context.Context, schedule model.KnowledgeDocumentSchedule, status, message string, start, end time.Time, remoteDoc *crawler.Document, contentHash string) error {
+func (s *DocumentScheduleService) updateScheduleIfOwned(ctx context.Context, schedule model.KnowledgeDocumentSchedule, updates map[string]any) (bool, error) {
+	query := s.db.WithContext(ctx).Model(&model.KnowledgeDocumentSchedule{}).Where("id = ?", schedule.ID)
+	if schedule.LockOwner != "" {
+		query = query.Where("lock_owner = ?", schedule.LockOwner)
+	}
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+func (s *DocumentScheduleService) recordExec(ctx context.Context, schedule model.KnowledgeDocumentSchedule, status, message string, start, end time.Time, remoteDoc *crawler.Document, contentHash string, scheduleUpdated bool) error {
+	if !scheduleUpdated {
+		message = strings.TrimSpace(message) + scheduleLeaseLostNote
+	}
 	exec := &model.KnowledgeDocumentScheduleExec{
 		ScheduleID:  schedule.ID,
 		DocID:       schedule.DocID,

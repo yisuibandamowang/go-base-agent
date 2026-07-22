@@ -19,6 +19,7 @@ type CreateDocumentReq struct {
 type UpdateDocumentReq struct {
 	DocName         string `json:"docName" binding:"required"`
 	Enabled         *int16 `json:"enabled"`
+	SourceLocation  string `json:"sourceLocation"`
 	ScheduleEnabled *int16 `json:"scheduleEnabled"`
 	ScheduleCron    string `json:"scheduleCron"`
 	ChunkStrategy   string `json:"chunkStrategy"`

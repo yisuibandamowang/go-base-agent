@@ -141,6 +141,7 @@ func main() {
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, vecStore, fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)
+	docSvc.SetScheduleMinIntervalSeconds(cfg.RAG.Knowledge.Schedule.MinIntervalSeconds)
 	docSvc.SetLLMService(llmService)
 	if parserRegistry := buildDocumentParserRegistry(cfg, vlmService, hasVLM, fileStore); parserRegistry != nil {
 		docSvc.SetParserRegistry(parserRegistry)
