@@ -143,6 +143,24 @@ func TestFusionPostProcessor_TruncatesRerankCandidates(t *testing.T) {
 	}
 }
 
+func TestFusionPostProcessor_SingleChannelKeepsOriginalScoresAndTruncates(t *testing.T) {
+	pp := NewFusionPostProcessorWithLimit(60, 2)
+	chunks := []RetrievedChunk{
+		{ID: "a", Text: "alpha", Score: 0.9},
+		{ID: "b", Text: "beta", Score: 0.7},
+		{ID: "c", Text: "gamma", Score: 0.5},
+	}
+	results := []SearchChannelResult{{Chunks: chunks}}
+
+	result := pp.Process(chunks, results)
+	if len(result) != 2 {
+		t.Fatalf("expected candidates to be truncated to 2, got %+v", result)
+	}
+	if result[0].ID != "a" || result[0].Score != 0.9 || result[1].ID != "b" || result[1].Score != 0.7 {
+		t.Fatalf("expected single channel scores/order to be preserved, got %+v", result)
+	}
+}
+
 func TestMultiChannelRetrieverImplementsRetriever(t *testing.T) {
 	channels := []SearchChannel{
 		&testChannel{name: "vector", priority: 1, enabled: true, typ: ChannelVectorGlobal, chunks: []RetrievedChunk{

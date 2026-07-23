@@ -26,6 +26,7 @@ type RetrieverSearchChannel struct {
 	confidenceThreshold    float64
 	supplementThreshold    float64
 	topKMultiplier         int
+	candidateBudget        int
 }
 
 // NewRetrieverSearchChannel creates a channel backed by a Retriever.
@@ -50,6 +51,14 @@ func (c *RetrieverSearchChannel) SetVectorGlobalOptions(intentDirectedEnabled bo
 	c.confidenceThreshold = confidenceThreshold
 	c.supplementThreshold = supplementThreshold
 	c.topKMultiplier = topKMultiplier
+}
+
+// SetVectorGlobalCandidateBudget configures the total budget for global vector retrieval.
+func (c *RetrieverSearchChannel) SetVectorGlobalCandidateBudget(candidateBudget int) {
+	if c == nil {
+		return
+	}
+	c.candidateBudget = candidateBudget
 }
 
 func (c *RetrieverSearchChannel) Name() string            { return c.name }
@@ -83,6 +92,9 @@ func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (
 	)
 	if intentAware, ok := c.retriever.(IntentAwareRetriever); ok {
 		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
+	} else if globalRetriever, ok := c.retriever.(GlobalRetriever); ok && c.shouldUseGlobalRetriever(globalRetriever) {
+		query := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
+		chunks, err = globalRetriever.RetrieveGlobal(ctx, query, c.candidateBudget)
 	} else {
 		query := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
 		chunks, err = c.retriever.Retrieve(ctx, query, c.resolveTopK(sc.TopK))
@@ -96,6 +108,15 @@ func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (
 		Chunks:      chunks,
 		LatencyMs:   time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func (c *RetrieverSearchChannel) shouldUseGlobalRetriever(globalRetriever GlobalRetriever) bool {
+	return c != nil &&
+		c.typ == ChannelVectorGlobal &&
+		c.vectorGlobalConfigured &&
+		c.candidateBudget > 0 &&
+		globalRetriever != nil &&
+		globalRetriever.SupportsGlobalRetrieval()
 }
 
 func (c *RetrieverSearchChannel) resolveTopK(topK int) int {

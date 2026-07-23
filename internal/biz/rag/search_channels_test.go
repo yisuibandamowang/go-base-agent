@@ -18,6 +18,28 @@ func (r *recordingTopKRetriever) Retrieve(_ context.Context, _ string, topK int)
 	return []RetrievedChunk{{ID: "chunk-1", Text: "vector result"}}, nil
 }
 
+type recordingGlobalRetriever struct {
+	topKs      []int
+	globalKs   []int
+	supports   bool
+	globalUsed bool
+}
+
+func (r *recordingGlobalRetriever) Retrieve(_ context.Context, _ string, topK int) ([]RetrievedChunk, error) {
+	r.topKs = append(r.topKs, topK)
+	return []RetrievedChunk{{ID: "local", Text: "local vector result"}}, nil
+}
+
+func (r *recordingGlobalRetriever) SupportsGlobalRetrieval() bool {
+	return r.supports
+}
+
+func (r *recordingGlobalRetriever) RetrieveGlobal(_ context.Context, _ string, topK int) ([]RetrievedChunk, error) {
+	r.globalKs = append(r.globalKs, topK)
+	r.globalUsed = true
+	return []RetrievedChunk{{ID: "global", Text: "global vector result"}}, nil
+}
+
 func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
 	sc := SearchContext{
 		TopK: 10,
@@ -90,6 +112,30 @@ func TestRetrieverSearchChannelVectorGlobalSupplementsSingleMediumConfidenceInte
 	}
 	if !channel.IsEnabled(mediumSingleIntent) {
 		t.Fatalf("expected vector global channel to supplement a single medium confidence intent")
+	}
+}
+
+func TestRetrieverSearchChannelVectorGlobalUsesCandidateBudgetForGlobalRetriever(t *testing.T) {
+	retriever := &recordingGlobalRetriever{supports: true}
+	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, retriever)
+	channel.SetVectorGlobalOptions(true, 0.6, 3, 0.8)
+	channel.SetVectorGlobalCandidateBudget(100)
+
+	result, err := channel.Search(context.Background(), SearchContext{OriginalQuestion: "会员等级规则", TopK: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if !retriever.globalUsed {
+		t.Fatalf("expected global retrieval to be used")
+	}
+	if got, want := retriever.globalKs, []int{100}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("candidate budget mismatch: got %v, want %v", got, want)
+	}
+	if len(retriever.topKs) != 0 {
+		t.Fatalf("expected per-collection retrieve not to be used, got %v", retriever.topKs)
+	}
+	if len(result.Chunks) != 1 || result.Chunks[0].ID != "global" {
+		t.Fatalf("unexpected chunks: %+v", result.Chunks)
 	}
 }
 

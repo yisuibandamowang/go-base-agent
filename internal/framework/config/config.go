@@ -220,6 +220,7 @@ type RAGSearchChannelConfig struct {
 	Enabled                         *bool   `mapstructure:"enabled"`
 	ConfidenceThreshold             float64 `mapstructure:"confidence-threshold"`
 	SingleIntentSupplementThreshold float64 `mapstructure:"single-intent-supplement-threshold"`
+	CandidateBudget                 int     `mapstructure:"candidate-budget"`
 	TopKMultiplier                  int     `mapstructure:"top-k-multiplier"`
 	MinIntentScore                  float64 `mapstructure:"min-intent-score"`
 	Mode                            string  `mapstructure:"mode"`

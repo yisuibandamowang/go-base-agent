@@ -275,6 +275,7 @@ func main() {
 			cfg.RAG.Search.Channels.VectorGlobal.TopKMultiplier,
 			cfg.RAG.Search.Channels.VectorGlobal.SingleIntentSupplementThreshold,
 		)
+		vectorGlobalChannel.SetVectorGlobalCandidateBudget(cfg.RAG.Search.Channels.VectorGlobal.CandidateBudget)
 		searchChannels = append(searchChannels, vectorGlobalChannel)
 	}
 	webSearchCfg := cfg.RAG.Search.Channels.WebSearch

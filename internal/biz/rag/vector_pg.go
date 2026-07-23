@@ -115,6 +115,25 @@ func (s *PgVectorStore) DropVectorSpace(ctx context.Context, collectionName stri
 
 // Search 向量相似度搜索。
 func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec []float32, topK int) ([]VectorChunk, error) {
+	return s.searchCollections(ctx, []string{collectionName}, vec, topK)
+}
+
+// SearchCollections performs one vector search across multiple pgvector logical collections.
+func (s *PgVectorStore) SearchCollections(ctx context.Context, collectionNames []string, vec []float32, topK int) ([]VectorChunk, error) {
+	return s.searchCollections(ctx, collectionNames, vec, topK)
+}
+
+func (s *PgVectorStore) searchCollections(ctx context.Context, collectionNames []string, vec []float32, topK int) ([]VectorChunk, error) {
+	collections := make([]string, 0, len(collectionNames))
+	for _, collectionName := range collectionNames {
+		collectionName = strings.TrimSpace(collectionName)
+		if collectionName != "" {
+			collections = append(collections, collectionName)
+		}
+	}
+	if len(collections) == 0 {
+		return nil, nil
+	}
 	type searchRow struct {
 		pgVectorRow
 		Score float64 `gorm:"column:score"`
@@ -122,10 +141,10 @@ func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec [
 	var rows []searchRow
 	err := s.db.WithContext(ctx).Raw(
 		`SELECT *, 1 - (embedding <=> ?) AS score FROM t_knowledge_vector 
-		 WHERE collection_name = ? 
+		 WHERE collection_name IN ? 
 		 ORDER BY embedding <=> ? 
 		 LIMIT ?`,
-		vecToString(vec), collectionName, vecToString(vec), topK,
+		vecToString(vec), collections, vecToString(vec), topK,
 	).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
@@ -139,6 +158,10 @@ func (s *PgVectorStore) Search(ctx context.Context, collectionName string, vec [
 			Score:     r.Score,
 			Metadata:  parseVectorMetadata(r.Metadata),
 		}
+		if chunk.Metadata == nil {
+			chunk.Metadata = make(map[string]string)
+		}
+		chunk.Metadata["collection_name"] = r.CollectionName
 		applyStructuredMetadata(&chunk)
 		chunks = append(chunks, chunk)
 	}

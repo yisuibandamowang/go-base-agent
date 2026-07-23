@@ -21,6 +21,12 @@ type IntentAwareRetriever interface {
 	RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error)
 }
 
+// GlobalRetriever can perform a single global retrieval with a total candidate budget.
+type GlobalRetriever interface {
+	SupportsGlobalRetrieval() bool
+	RetrieveGlobal(ctx context.Context, question string, topK int) ([]RetrievedChunk, error)
+}
+
 // NoopRetriever returns empty results.
 type NoopRetriever struct{}
 

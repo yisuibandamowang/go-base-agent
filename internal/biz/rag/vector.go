@@ -36,6 +36,11 @@ type VectorSearchService interface {
 	Search(ctx context.Context, collectionName string, vec []float32, topK int) ([]VectorChunk, error)
 }
 
+// GlobalVectorSearchService supports one search across multiple logical collections.
+type GlobalVectorSearchService interface {
+	SearchCollections(ctx context.Context, collectionNames []string, vec []float32, topK int) ([]VectorChunk, error)
+}
+
 // VectorSpaceID uniquely identifies a vector space.
 type VectorSpaceID struct {
 	Name string

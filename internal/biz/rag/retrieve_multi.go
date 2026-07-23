@@ -199,6 +199,9 @@ func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchC
 	if len(chunks) == 0 || len(results) == 0 {
 		return chunks
 	}
+	if len(results) == 1 {
+		return f.truncateCandidates(chunks)
+	}
 
 	scores := make(map[string]float64)
 	for _, result := range results {
@@ -221,10 +224,14 @@ func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchC
 		}
 		return fused[i].Score > fused[j].Score
 	})
-	if f.rerankCandidateLimit > 0 && len(fused) > f.rerankCandidateLimit {
-		return fused[:f.rerankCandidateLimit]
+	return f.truncateCandidates(fused)
+}
+
+func (f *FusionPostProcessor) truncateCandidates(chunks []RetrievedChunk) []RetrievedChunk {
+	if f.rerankCandidateLimit > 0 && len(chunks) > f.rerankCandidateLimit {
+		return chunks[:f.rerankCandidateLimit]
 	}
-	return fused
+	return chunks
 }
 
 func chunkKey(chunk RetrievedChunk) string {

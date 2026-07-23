@@ -59,6 +59,24 @@ func (s *recordingVectorSearcher) Search(_ context.Context, collectionName strin
 	return s.results, nil
 }
 
+type recordingGlobalVectorSearcher struct {
+	collections []string
+	topKs       []int
+	results     []VectorChunk
+}
+
+func (s *recordingGlobalVectorSearcher) Search(_ context.Context, collectionName string, _ []float32, topK int) ([]VectorChunk, error) {
+	s.collections = append(s.collections, collectionName)
+	s.topKs = append(s.topKs, topK)
+	return nil, nil
+}
+
+func (s *recordingGlobalVectorSearcher) SearchCollections(_ context.Context, collectionNames []string, _ []float32, topK int) ([]VectorChunk, error) {
+	s.collections = append(s.collections, collectionNames...)
+	s.topKs = append(s.topKs, topK)
+	return s.results, nil
+}
+
 func TestPgRetriever_EmbedsQuestionWithEachKnowledgeBaseModel(t *testing.T) {
 	emb := &recordingEmbeddingService{}
 	searcher := &recordingVectorSearcher{}
@@ -82,6 +100,52 @@ func TestPgRetriever_EmbedsQuestionWithEachKnowledgeBaseModel(t *testing.T) {
 	wantCollections := []string{"collection_a", "collection_b"}
 	if !reflect.DeepEqual(searcher.collections, wantCollections) {
 		t.Fatalf("collections mismatch: got %v, want %v", searcher.collections, wantCollections)
+	}
+}
+
+func TestPgRetriever_RetrieveGlobalUsesSingleBudgetAcrossCollections(t *testing.T) {
+	emb := &recordingEmbeddingService{}
+	searcher := &recordingGlobalVectorSearcher{
+		results: []VectorChunk{
+			{
+				ChunkID: "chunk-1",
+				Content: "会员等级按成长值计算",
+				Score:   0.92,
+				Metadata: map[string]string{
+					"collection_name": "collection_a",
+					"doc_id":          "doc-1",
+				},
+			},
+		},
+	}
+	retriever := &PgRetriever{
+		vectorSearch: searcher,
+		emb:          emb,
+		kbRepo: fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "会员知识库", EmbeddingModel: "emb-shared", CollectionName: "collection_a"},
+			{Name: "支付知识库", EmbeddingModel: "emb-shared", CollectionName: "collection_b"},
+		}},
+		topK: 10,
+	}
+
+	chunks, err := retriever.RetrieveGlobal(context.Background(), "会员等级规则", 7)
+	if err != nil {
+		t.Fatalf("retrieve global: %v", err)
+	}
+	if got, want := emb.modelIDs, []string{"emb-shared"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("embedding models mismatch: got %v, want %v", got, want)
+	}
+	if got, want := searcher.collections, []string{"collection_a", "collection_b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("collections mismatch: got %v, want %v", got, want)
+	}
+	if got, want := searcher.topKs, []int{7}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("topK mismatch: got %v, want %v", got, want)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected one chunk, got %+v", chunks)
+	}
+	if chunks[0].Metadata["kb_name"] != "会员知识库" || chunks[0].Metadata["collection_name"] != "collection_a" {
+		t.Fatalf("expected knowledge base metadata, got %+v", chunks[0].Metadata)
 	}
 }
 

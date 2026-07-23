@@ -96,6 +96,7 @@ rag:
         enabled: true
         confidence-threshold: 0.6
         single-intent-supplement-threshold: 0.8
+        candidate-budget: 100
         top-k-multiplier: 3
       intent-directed:
         enabled: true

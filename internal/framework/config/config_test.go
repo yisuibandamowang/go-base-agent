@@ -187,10 +187,13 @@ ai:
 	}
 }
 
-func TestLoadParsesRAGSearchFusionConfig(t *testing.T) {
+func TestLoadParsesRAGSearchConfig(t *testing.T) {
 	yaml := `
 rag:
   search:
+    channels:
+      vector-global:
+        candidate-budget: 80
     fusion:
       strategy: rrf
       rrf-k: 42
@@ -216,6 +219,9 @@ rag:
 	}
 	if cfg.RAG.Search.Fusion.RerankCandidateLimit != 25 {
 		t.Fatalf("unexpected rerank candidate limit: %d", cfg.RAG.Search.Fusion.RerankCandidateLimit)
+	}
+	if cfg.RAG.Search.Channels.VectorGlobal.CandidateBudget != 80 {
+		t.Fatalf("unexpected candidate budget: %d", cfg.RAG.Search.Channels.VectorGlobal.CandidateBudget)
 	}
 }
 
