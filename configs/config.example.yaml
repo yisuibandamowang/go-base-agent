@@ -95,6 +95,7 @@ rag:
       vector-global:
         enabled: true
         confidence-threshold: 0.6
+        single-intent-supplement-threshold: 0.8
         top-k-multiplier: 3
       intent-directed:
         enabled: true
@@ -102,6 +103,7 @@ rag:
         top-k-multiplier: 2
       keyword:
         enabled: true
+        mode: both
         top-k-multiplier: 1
       web-search:
         enabled: false
@@ -109,6 +111,10 @@ rag:
         api-key: ${YDC_API_KEY}
         count: 5
         timeout-seconds: 5
+    fusion:
+      strategy: rrf
+      rrf-k: 60
+      rerank-candidate-limit: 50
 
   guidance:
     enabled: false

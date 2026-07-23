@@ -175,15 +175,21 @@ func (d *DedupPostProcessor) Process(chunks []RetrievedChunk, results []SearchCh
 // FusionPostProcessor applies reciprocal rank fusion across channel results.
 // Aligns with the Java FusionPostProcessor capability.
 type FusionPostProcessor struct {
-	rrfK int
+	rrfK                 int
+	rerankCandidateLimit int
 }
 
 // NewFusionPostProcessor creates an RRF post-processor.
 func NewFusionPostProcessor(rrfK int) *FusionPostProcessor {
+	return NewFusionPostProcessorWithLimit(rrfK, 0)
+}
+
+// NewFusionPostProcessorWithLimit creates an RRF post-processor with an optional candidate limit.
+func NewFusionPostProcessorWithLimit(rrfK int, rerankCandidateLimit int) *FusionPostProcessor {
 	if rrfK <= 0 {
 		rrfK = 60
 	}
-	return &FusionPostProcessor{rrfK: rrfK}
+	return &FusionPostProcessor{rrfK: rrfK, rerankCandidateLimit: rerankCandidateLimit}
 }
 
 func (f *FusionPostProcessor) Name() string { return "fusion" }
@@ -215,6 +221,9 @@ func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchC
 		}
 		return fused[i].Score > fused[j].Score
 	})
+	if f.rerankCandidateLimit > 0 && len(fused) > f.rerankCandidateLimit {
+		return fused[:f.rerankCandidateLimit]
+	}
 	return fused
 }
 

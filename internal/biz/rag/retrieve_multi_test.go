@@ -121,6 +121,28 @@ func TestFusionPostProcessor_RRFReordersByCrossChannelHits(t *testing.T) {
 	}
 }
 
+func TestFusionPostProcessor_TruncatesRerankCandidates(t *testing.T) {
+	pp := NewFusionPostProcessorWithLimit(60, 2)
+	chunks := []RetrievedChunk{
+		{ID: "a", Text: "alpha"},
+		{ID: "b", Text: "beta"},
+		{ID: "c", Text: "gamma"},
+		{ID: "d", Text: "delta"},
+	}
+	results := []SearchChannelResult{
+		{Chunks: []RetrievedChunk{{ID: "a", Text: "alpha"}, {ID: "b", Text: "beta"}, {ID: "c", Text: "gamma"}, {ID: "d", Text: "delta"}}},
+		{Chunks: []RetrievedChunk{{ID: "b", Text: "beta"}, {ID: "a", Text: "alpha"}, {ID: "d", Text: "delta"}, {ID: "c", Text: "gamma"}}},
+	}
+
+	result := pp.Process(chunks, results)
+	if len(result) != 2 {
+		t.Fatalf("expected candidates to be truncated to 2, got %+v", result)
+	}
+	if result[0].ID != "a" || result[1].ID != "b" {
+		t.Fatalf("expected highest RRF candidates to be retained, got %+v", result)
+	}
+}
+
 func TestMultiChannelRetrieverImplementsRetriever(t *testing.T) {
 	channels := []SearchChannel{
 		&testChannel{name: "vector", priority: 1, enabled: true, typ: ChannelVectorGlobal, chunks: []RetrievedChunk{

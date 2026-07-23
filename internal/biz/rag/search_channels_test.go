@@ -46,7 +46,7 @@ func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
 func TestRetrieverSearchChannelVectorGlobalUsesConfidenceAndTopKMultiplier(t *testing.T) {
 	retriever := &recordingTopKRetriever{}
 	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, retriever)
-	channel.SetVectorGlobalOptions(true, 0.6, 3)
+	channel.SetVectorGlobalOptions(true, 0.6, 3, 0.8)
 
 	highConfidenceIntent := SearchContext{
 		OriginalQuestion: "会员等级规则",
@@ -71,6 +71,69 @@ func TestRetrieverSearchChannelVectorGlobalUsesConfidenceAndTopKMultiplier(t *te
 	}
 	if got, want := retriever.topKs, []int{15}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("topK mismatch: got %v, want %v", got, want)
+	}
+}
+
+func TestRetrieverSearchChannelVectorGlobalSupplementsSingleMediumConfidenceIntent(t *testing.T) {
+	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, &recordingTopKRetriever{})
+	channel.SetVectorGlobalOptions(true, 0.6, 3, 0.8)
+
+	mediumSingleIntent := SearchContext{
+		OriginalQuestion: "会员等级规则",
+		TopK:             5,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "intent-1", CollectionName: "collection_a", Kind: IntentKindKB},
+				Score: 0.7,
+			}},
+		}},
+	}
+	if !channel.IsEnabled(mediumSingleIntent) {
+		t.Fatalf("expected vector global channel to supplement a single medium confidence intent")
+	}
+}
+
+func TestPgKeywordSearchChannelResolvesModeAndTopKMultiplier(t *testing.T) {
+	kbs := []knowledgeModel.KnowledgeBase{
+		{Name: "会员知识库", CollectionName: "collection_a"},
+		{Name: "支付知识库", CollectionName: "collection_b"},
+	}
+	channel := NewPgKeywordSearchChannel(nil, fakeKnowledgeBaseLister{kbs: kbs}, 5)
+	channel.SetKeywordOptions("both", 2)
+
+	intentKbs, err := channel.resolveKnowledgeBases(context.Background(), SearchContext{
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{
+				{Node: IntentNode{ID: "kb", CollectionName: "collection_b", Kind: IntentKindKB}, Score: 0.8},
+				{Node: IntentNode{ID: "mcp", CollectionName: "collection_a", Kind: IntentKindMCP}, Score: 0.9},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("resolve knowledge bases: %v", err)
+	}
+	if len(intentKbs) != 1 || intentKbs[0].CollectionName != "collection_b" {
+		t.Fatalf("expected both mode to prefer intent collection, got %+v", intentKbs)
+	}
+	if got, want := channel.resolveTopK(5), 10; got != want {
+		t.Fatalf("topK mismatch: got %d, want %d", got, want)
+	}
+
+	globalKbs, err := channel.resolveKnowledgeBases(context.Background(), SearchContext{})
+	if err != nil {
+		t.Fatalf("resolve global knowledge bases: %v", err)
+	}
+	if len(globalKbs) != 2 {
+		t.Fatalf("expected both mode to fallback to global collections, got %+v", globalKbs)
+	}
+
+	channel.SetKeywordOptions("intent", 2)
+	intentOnlyKbs, err := channel.resolveKnowledgeBases(context.Background(), SearchContext{})
+	if err != nil {
+		t.Fatalf("resolve intent-only knowledge bases: %v", err)
+	}
+	if len(intentOnlyKbs) != 0 {
+		t.Fatalf("expected intent mode without intents to return no collections, got %+v", intentOnlyKbs)
 	}
 }
 

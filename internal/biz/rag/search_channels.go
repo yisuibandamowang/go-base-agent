@@ -24,6 +24,7 @@ type RetrieverSearchChannel struct {
 	vectorGlobalConfigured bool
 	intentDirectedEnabled  bool
 	confidenceThreshold    float64
+	supplementThreshold    float64
 	topKMultiplier         int
 }
 
@@ -33,16 +34,21 @@ func NewRetrieverSearchChannel(name string, typ SearchChannelType, priority int,
 }
 
 // SetVectorGlobalOptions configures Java-compatible vector global fallback behavior.
-func (c *RetrieverSearchChannel) SetVectorGlobalOptions(intentDirectedEnabled bool, confidenceThreshold float64, topKMultiplier int) {
+func (c *RetrieverSearchChannel) SetVectorGlobalOptions(intentDirectedEnabled bool, confidenceThreshold float64, topKMultiplier int, singleIntentSupplementThresholds ...float64) {
 	if c == nil {
 		return
 	}
 	if topKMultiplier <= 0 {
 		topKMultiplier = 1
 	}
+	supplementThreshold := 0.8
+	if len(singleIntentSupplementThresholds) > 0 && singleIntentSupplementThresholds[0] > 0 {
+		supplementThreshold = singleIntentSupplementThresholds[0]
+	}
 	c.vectorGlobalConfigured = true
 	c.intentDirectedEnabled = intentDirectedEnabled
 	c.confidenceThreshold = confidenceThreshold
+	c.supplementThreshold = supplementThreshold
 	c.topKMultiplier = topKMultiplier
 }
 
@@ -59,8 +65,14 @@ func (c *RetrieverSearchChannel) IsEnabled(sc SearchContext) bool {
 	if !c.intentDirectedEnabled {
 		return true
 	}
-	maxScore, ok := maxIntentScore(sc.Intents)
-	return !ok || maxScore < c.confidenceThreshold
+	maxScore, count := intentScoreStats(sc.Intents)
+	if count == 0 {
+		return true
+	}
+	if maxScore < c.confidenceThreshold {
+		return true
+	}
+	return count == 1 && maxScore < c.supplementThreshold
 }
 
 func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
@@ -97,30 +109,44 @@ func (c *RetrieverSearchChannel) resolveTopK(topK int) int {
 	return topK * multiplier
 }
 
-func maxIntentScore(intents []SubQuestionIntent) (float64, bool) {
-	found := false
+func intentScoreStats(intents []SubQuestionIntent) (float64, int) {
+	count := 0
 	maxScore := 0.0
 	for _, subIntent := range intents {
 		for _, nodeScore := range subIntent.NodeScores {
-			if !found || nodeScore.Score > maxScore {
+			if count == 0 || nodeScore.Score > maxScore {
 				maxScore = nodeScore.Score
-				found = true
 			}
+			count++
 		}
 	}
-	return maxScore, found
+	return maxScore, count
 }
 
 // PgKeywordSearchChannel performs simple PostgreSQL content keyword recall.
 type PgKeywordSearchChannel struct {
-	vectorDB *gorm.DB
-	kbRepo   knowledgeBaseLister
-	priority int
+	vectorDB       *gorm.DB
+	kbRepo         knowledgeBaseLister
+	mode           string
+	topKMultiplier int
+	priority       int
 }
 
 // NewPgKeywordSearchChannel creates a PostgreSQL keyword recall channel.
 func NewPgKeywordSearchChannel(vectorDB *gorm.DB, kbRepo knowledgeBaseLister, priority int) *PgKeywordSearchChannel {
 	return &PgKeywordSearchChannel{vectorDB: vectorDB, kbRepo: kbRepo, priority: priority}
+}
+
+// SetKeywordOptions configures Java-compatible keyword search scope and candidate expansion.
+func (c *PgKeywordSearchChannel) SetKeywordOptions(mode string, topKMultiplier int) {
+	if c == nil {
+		return
+	}
+	c.mode = strings.ToLower(strings.TrimSpace(mode))
+	if topKMultiplier <= 0 {
+		topKMultiplier = 1
+	}
+	c.topKMultiplier = topKMultiplier
 }
 
 func (c *PgKeywordSearchChannel) Name() string            { return "KeywordSearch" }
@@ -133,14 +159,11 @@ func (c *PgKeywordSearchChannel) IsEnabled(sc SearchContext) bool {
 func (c *PgKeywordSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
 	start := time.Now()
 	query := strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion))
-	kbs, _, err := c.kbRepo.List(ctx, 1, 100)
+	kbs, err := c.resolveKnowledgeBases(ctx, sc)
 	if err != nil {
 		return SearchChannelResult{}, fmt.Errorf("list knowledge bases: %w", err)
 	}
-	topK := sc.TopK
-	if topK <= 0 {
-		topK = 10
-	}
+	topK := c.resolveTopK(sc.TopK)
 
 	type row struct {
 		ID             string  `gorm:"column:id"`
@@ -184,6 +207,83 @@ func (c *PgKeywordSearchChannel) Search(ctx context.Context, sc SearchContext) (
 		Chunks:      chunks,
 		LatencyMs:   time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func (c *PgKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context, sc SearchContext) ([]knowledgeModel.KnowledgeBase, error) {
+	if c == nil || c.kbRepo == nil {
+		return nil, nil
+	}
+	kbs, _, err := c.kbRepo.List(ctx, 1, 100)
+	if err != nil {
+		return nil, err
+	}
+
+	mode := c.mode
+	if mode == "" {
+		mode = "both"
+	}
+	intentCollections := keywordIntentCollections(sc)
+	switch mode {
+	case "global":
+		return kbs, nil
+	case "intent":
+		return filterKnowledgeBasesByCollections(kbs, intentCollections), nil
+	default:
+		filtered := filterKnowledgeBasesByCollections(kbs, intentCollections)
+		if len(filtered) > 0 {
+			return filtered, nil
+		}
+		return kbs, nil
+	}
+}
+
+func (c *PgKeywordSearchChannel) resolveTopK(topK int) int {
+	if topK <= 0 {
+		topK = 10
+	}
+	multiplier := 1
+	if c != nil && c.topKMultiplier > 0 {
+		multiplier = c.topKMultiplier
+	}
+	return topK * multiplier
+}
+
+func keywordIntentCollections(sc SearchContext) []string {
+	seen := make(map[string]bool)
+	collections := make([]string, 0)
+	for _, subIntent := range sc.Intents {
+		for _, nodeScore := range subIntent.NodeScores {
+			if nodeScore.Node.Kind != IntentKindKB {
+				continue
+			}
+			collectionName := strings.TrimSpace(nodeScore.Node.CollectionName)
+			if collectionName == "" || seen[collectionName] {
+				continue
+			}
+			seen[collectionName] = true
+			collections = append(collections, collectionName)
+		}
+	}
+	return collections
+}
+
+func filterKnowledgeBasesByCollections(kbs []knowledgeModel.KnowledgeBase, collections []string) []knowledgeModel.KnowledgeBase {
+	if len(kbs) == 0 || len(collections) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(collections))
+	for _, collection := range collections {
+		if strings.TrimSpace(collection) != "" {
+			allowed[collection] = true
+		}
+	}
+	filtered := make([]knowledgeModel.KnowledgeBase, 0, len(collections))
+	for _, kb := range kbs {
+		if allowed[strings.TrimSpace(kb.CollectionName)] {
+			filtered = append(filtered, kb)
+		}
+	}
+	return filtered
 }
 
 func firstSearchText(values ...string) string {

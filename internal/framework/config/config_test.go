@@ -187,6 +187,38 @@ ai:
 	}
 }
 
+func TestLoadParsesRAGSearchFusionConfig(t *testing.T) {
+	yaml := `
+rag:
+  search:
+    fusion:
+      strategy: rrf
+      rrf-k: 42
+      rerank-candidate-limit: 25
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.RAG.Search.Fusion.Strategy != "rrf" {
+		t.Fatalf("unexpected fusion strategy: %s", cfg.RAG.Search.Fusion.Strategy)
+	}
+	if cfg.RAG.Search.Fusion.RRFK != 42 {
+		t.Fatalf("unexpected rrf-k: %d", cfg.RAG.Search.Fusion.RRFK)
+	}
+	if cfg.RAG.Search.Fusion.RerankCandidateLimit != 25 {
+		t.Fatalf("unexpected rerank candidate limit: %d", cfg.RAG.Search.Fusion.RerankCandidateLimit)
+	}
+}
+
 func TestLoadRejectsInvalidMemorySummaryWindow(t *testing.T) {
 	yaml := `
 rag:

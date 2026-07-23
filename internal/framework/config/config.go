@@ -206,6 +206,7 @@ type RAGMCPServerConfig struct {
 
 type RAGSearchConfig struct {
 	Channels RAGSearchChannelsConfig `mapstructure:"channels"`
+	Fusion   RAGSearchFusionConfig   `mapstructure:"fusion"`
 }
 
 type RAGSearchChannelsConfig struct {
@@ -216,10 +217,18 @@ type RAGSearchChannelsConfig struct {
 }
 
 type RAGSearchChannelConfig struct {
-	Enabled             *bool   `mapstructure:"enabled"`
-	ConfidenceThreshold float64 `mapstructure:"confidence-threshold"`
-	TopKMultiplier      int     `mapstructure:"top-k-multiplier"`
-	MinIntentScore      float64 `mapstructure:"min-intent-score"`
+	Enabled                         *bool   `mapstructure:"enabled"`
+	ConfidenceThreshold             float64 `mapstructure:"confidence-threshold"`
+	SingleIntentSupplementThreshold float64 `mapstructure:"single-intent-supplement-threshold"`
+	TopKMultiplier                  int     `mapstructure:"top-k-multiplier"`
+	MinIntentScore                  float64 `mapstructure:"min-intent-score"`
+	Mode                            string  `mapstructure:"mode"`
+}
+
+type RAGSearchFusionConfig struct {
+	Strategy             string `mapstructure:"strategy"`
+	RRFK                 int    `mapstructure:"rrf-k"`
+	RerankCandidateLimit int    `mapstructure:"rerank-candidate-limit"`
 }
 
 type RAGGuidanceConfig struct {

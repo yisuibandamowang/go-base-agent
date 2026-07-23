@@ -260,7 +260,12 @@ func main() {
 		searchChannels = append(searchChannels, intentChannel)
 	}
 	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefault() {
-		searchChannels = append(searchChannels, rag.NewPgKeywordSearchChannel(gormDB, kbRepo, 5))
+		keywordChannel := rag.NewPgKeywordSearchChannel(gormDB, kbRepo, 5)
+		keywordChannel.SetKeywordOptions(
+			cfg.RAG.Search.Channels.Keyword.Mode,
+			cfg.RAG.Search.Channels.Keyword.TopKMultiplier,
+		)
+		searchChannels = append(searchChannels, keywordChannel)
 	}
 	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
 		vectorGlobalChannel := rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, vectorRetriever)
@@ -268,6 +273,7 @@ func main() {
 			cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault(),
 			cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
 			cfg.RAG.Search.Channels.VectorGlobal.TopKMultiplier,
+			cfg.RAG.Search.Channels.VectorGlobal.SingleIntentSupplementThreshold,
 		)
 		searchChannels = append(searchChannels, vectorGlobalChannel)
 	}
@@ -279,10 +285,15 @@ func main() {
 		webSearchCfg.TimeoutSeconds,
 		webSearchCfg.Enabled,
 	))
-	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, []rag.SearchResultPostProcessor{
-		&rag.DedupPostProcessor{},
-		rag.NewFusionPostProcessor(60),
-	}))
+	postProcessors := []rag.SearchResultPostProcessor{&rag.DedupPostProcessor{}}
+	fusionStrategy := strings.TrimSpace(cfg.RAG.Search.Fusion.Strategy)
+	if fusionStrategy == "" || strings.EqualFold(fusionStrategy, "rrf") {
+		postProcessors = append(postProcessors, rag.NewFusionPostProcessorWithLimit(
+			cfg.RAG.Search.Fusion.RRFK,
+			cfg.RAG.Search.Fusion.RerankCandidateLimit,
+		))
+	}
+	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors))
 	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
 	queryNormalizer := rag.NewDBQueryTermNormalizer(termMappingRepo)
 	queryNormalizer.SetCacheManager(queryTermCacheManager)
