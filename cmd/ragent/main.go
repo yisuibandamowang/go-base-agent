@@ -252,13 +252,24 @@ func main() {
 	vectorRetriever := rag.NewPgRetriever(vecStore, embService, kbRepo, 10)
 	searchChannels := make([]rag.SearchChannel, 0, 4)
 	if cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault() {
-		searchChannels = append(searchChannels, rag.NewPgIntentDirectedVectorSearchChannel(gormDB, vecStore, embService, kbRepo, 1))
+		intentChannel := rag.NewPgIntentDirectedVectorSearchChannel(gormDB, vecStore, embService, kbRepo, 1)
+		intentChannel.SetIntentOptions(
+			cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
+			cfg.RAG.Search.Channels.IntentDirected.TopKMultiplier,
+		)
+		searchChannels = append(searchChannels, intentChannel)
 	}
 	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefault() {
 		searchChannels = append(searchChannels, rag.NewPgKeywordSearchChannel(gormDB, kbRepo, 5))
 	}
 	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
-		searchChannels = append(searchChannels, rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, vectorRetriever))
+		vectorGlobalChannel := rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, vectorRetriever)
+		vectorGlobalChannel.SetVectorGlobalOptions(
+			cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault(),
+			cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
+			cfg.RAG.Search.Channels.VectorGlobal.TopKMultiplier,
+		)
+		searchChannels = append(searchChannels, vectorGlobalChannel)
 	}
 	webSearchCfg := cfg.RAG.Search.Channels.WebSearch
 	searchChannels = append(searchChannels, rag.NewYouComWebSearchChannel(

@@ -9,6 +9,15 @@ import (
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 )
 
+type recordingTopKRetriever struct {
+	topKs []int
+}
+
+func (r *recordingTopKRetriever) Retrieve(_ context.Context, _ string, topK int) ([]RetrievedChunk, error) {
+	r.topKs = append(r.topKs, topK)
+	return []RetrievedChunk{{ID: "chunk-1", Text: "vector result"}}, nil
+}
+
 func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
 	sc := SearchContext{
 		TopK: 10,
@@ -31,6 +40,37 @@ func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
 	}
 	if targets[1].collectionName != "collection_b" || targets[1].topK != 5 {
 		t.Fatalf("unexpected second target: %+v", targets[1])
+	}
+}
+
+func TestRetrieverSearchChannelVectorGlobalUsesConfidenceAndTopKMultiplier(t *testing.T) {
+	retriever := &recordingTopKRetriever{}
+	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, retriever)
+	channel.SetVectorGlobalOptions(true, 0.6, 3)
+
+	highConfidenceIntent := SearchContext{
+		OriginalQuestion: "会员等级规则",
+		TopK:             5,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "intent-1", CollectionName: "collection_a", Kind: IntentKindKB},
+				Score: 0.9,
+			}},
+		}},
+	}
+	if channel.IsEnabled(highConfidenceIntent) {
+		t.Fatalf("expected vector global channel to be disabled for high confidence intent")
+	}
+
+	if !channel.IsEnabled(SearchContext{OriginalQuestion: "会员等级规则", TopK: 5}) {
+		t.Fatalf("expected vector global channel to be enabled when no intents are resolved")
+	}
+	_, err := channel.Search(context.Background(), SearchContext{OriginalQuestion: "会员等级规则", TopK: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := retriever.topKs, []int{15}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("topK mismatch: got %v, want %v", got, want)
 	}
 }
 
@@ -85,6 +125,50 @@ func TestPgIntentDirectedSearchChannelUsesVectorSearchForIntentCollections(t *te
 	meta := result.Chunks[0].Metadata
 	if meta["kb_name"] != "会员知识库" || meta["collection_name"] != "collection_a" {
 		t.Fatalf("expected knowledge base metadata, got %+v", meta)
+	}
+}
+
+func TestPgIntentDirectedSearchChannelAppliesMinScoreAndTopKMultiplier(t *testing.T) {
+	emb := &recordingEmbeddingService{}
+	searcher := &recordingVectorSearcher{}
+	kb := knowledgeModel.KnowledgeBase{
+		Name:           "会员知识库",
+		EmbeddingModel: "emb-member",
+		CollectionName: "collection_high",
+	}
+	kb.ID = "kb-1"
+	channel := NewPgIntentDirectedVectorSearchChannel(nil, searcher, emb, fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{kb}}, 1)
+	channel.SetIntentOptions(0.4, 2)
+
+	lowScoreContext := SearchContext{
+		OriginalQuestion: "会员等级规则",
+		TopK:             10,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "low", CollectionName: "collection_high", TopK: 3, Kind: IntentKindKB},
+				Score: 0.2,
+			}},
+		}},
+	}
+	if channel.IsEnabled(lowScoreContext) {
+		t.Fatalf("expected low score intent below threshold to disable channel")
+	}
+
+	_, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "会员等级规则",
+		TopK:             10,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "high", CollectionName: "collection_high", TopK: 3, Kind: IntentKindKB},
+				Score: 0.8,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := searcher.topKs, []int{6}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("topK mismatch: got %v, want %v", got, want)
 	}
 }
 

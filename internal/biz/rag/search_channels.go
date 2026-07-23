@@ -17,10 +17,14 @@ import (
 
 // RetrieverSearchChannel adapts a Retriever as a SearchChannel.
 type RetrieverSearchChannel struct {
-	name      string
-	typ       SearchChannelType
-	priority  int
-	retriever Retriever
+	name                   string
+	typ                    SearchChannelType
+	priority               int
+	retriever              Retriever
+	vectorGlobalConfigured bool
+	intentDirectedEnabled  bool
+	confidenceThreshold    float64
+	topKMultiplier         int
 }
 
 // NewRetrieverSearchChannel creates a channel backed by a Retriever.
@@ -28,11 +32,35 @@ func NewRetrieverSearchChannel(name string, typ SearchChannelType, priority int,
 	return &RetrieverSearchChannel{name: name, typ: typ, priority: priority, retriever: retriever}
 }
 
+// SetVectorGlobalOptions configures Java-compatible vector global fallback behavior.
+func (c *RetrieverSearchChannel) SetVectorGlobalOptions(intentDirectedEnabled bool, confidenceThreshold float64, topKMultiplier int) {
+	if c == nil {
+		return
+	}
+	if topKMultiplier <= 0 {
+		topKMultiplier = 1
+	}
+	c.vectorGlobalConfigured = true
+	c.intentDirectedEnabled = intentDirectedEnabled
+	c.confidenceThreshold = confidenceThreshold
+	c.topKMultiplier = topKMultiplier
+}
+
 func (c *RetrieverSearchChannel) Name() string            { return c.name }
 func (c *RetrieverSearchChannel) Priority() int           { return c.priority }
 func (c *RetrieverSearchChannel) Type() SearchChannelType { return c.typ }
 func (c *RetrieverSearchChannel) IsEnabled(sc SearchContext) bool {
-	return c != nil && c.retriever != nil
+	if c == nil || c.retriever == nil {
+		return false
+	}
+	if c.typ != ChannelVectorGlobal || !c.vectorGlobalConfigured {
+		return true
+	}
+	if !c.intentDirectedEnabled {
+		return true
+	}
+	maxScore, ok := maxIntentScore(sc.Intents)
+	return !ok || maxScore < c.confidenceThreshold
 }
 
 func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
@@ -45,7 +73,7 @@ func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (
 		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
 	} else {
 		query := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
-		chunks, err = c.retriever.Retrieve(ctx, query, sc.TopK)
+		chunks, err = c.retriever.Retrieve(ctx, query, c.resolveTopK(sc.TopK))
 	}
 	if err != nil {
 		return SearchChannelResult{}, err
@@ -56,6 +84,31 @@ func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (
 		Chunks:      chunks,
 		LatencyMs:   time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func (c *RetrieverSearchChannel) resolveTopK(topK int) int {
+	if c == nil || c.typ != ChannelVectorGlobal || !c.vectorGlobalConfigured || topK <= 0 {
+		return topK
+	}
+	multiplier := c.topKMultiplier
+	if multiplier <= 0 {
+		multiplier = 1
+	}
+	return topK * multiplier
+}
+
+func maxIntentScore(intents []SubQuestionIntent) (float64, bool) {
+	found := false
+	maxScore := 0.0
+	for _, subIntent := range intents {
+		for _, nodeScore := range subIntent.NodeScores {
+			if !found || nodeScore.Score > maxScore {
+				maxScore = nodeScore.Score
+				found = true
+			}
+		}
+	}
+	return maxScore, found
 }
 
 // PgKeywordSearchChannel performs simple PostgreSQL content keyword recall.
@@ -148,6 +201,8 @@ type PgIntentDirectedSearchChannel struct {
 	vectorSearch VectorSearchService
 	emb          embedding.Service
 	kbRepo       knowledgeBaseLister
+	minScore     float64
+	topKMultiple int
 	priority     int
 }
 
@@ -161,19 +216,40 @@ func NewPgIntentDirectedVectorSearchChannel(vectorDB *gorm.DB, vectorSearch Vect
 	return &PgIntentDirectedSearchChannel{vectorDB: vectorDB, vectorSearch: vectorSearch, emb: emb, kbRepo: kbRepo, priority: priority}
 }
 
+// SetIntentOptions configures intent score filtering and per-intent TopK expansion.
+func (c *PgIntentDirectedSearchChannel) SetIntentOptions(minScore float64, topKMultiplier int) {
+	if c == nil {
+		return
+	}
+	c.minScore = minScore
+	if topKMultiplier <= 0 {
+		topKMultiplier = 1
+	}
+	c.topKMultiple = topKMultiplier
+}
+
 func (c *PgIntentDirectedSearchChannel) Name() string            { return "IntentDirectedSearch" }
 func (c *PgIntentDirectedSearchChannel) Priority() int           { return c.priority }
 func (c *PgIntentDirectedSearchChannel) Type() SearchChannelType { return ChannelIntentDirected }
 func (c *PgIntentDirectedSearchChannel) IsEnabled(sc SearchContext) bool {
 	hasBackend := c != nil && (c.vectorDB != nil || c.canVectorSearch())
-	return hasBackend && (len(intentDirectedTargetsFromContext(sc, 0)) > 0 || strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != "")
+	if !hasBackend {
+		return false
+	}
+	if len(sc.Intents) > 0 {
+		return len(c.intentDirectedTargets(sc)) > 0
+	}
+	return c.vectorDB != nil && strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != ""
 }
 
 func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
 	start := time.Now()
 	query := strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion))
-	targets := intentDirectedTargetsFromContext(sc, 0)
+	targets := c.intentDirectedTargets(sc)
 	if len(targets) == 0 {
+		if len(sc.Intents) > 0 {
+			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+		}
 		collections, err := c.matchIntentCollections(ctx, query)
 		if err != nil || len(collections) == 0 {
 			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
@@ -287,7 +363,26 @@ type intentDirectedTarget struct {
 	topK           int
 }
 
-func intentDirectedTargetsFromContext(sc SearchContext, minScore float64) []intentDirectedTarget {
+func (c *PgIntentDirectedSearchChannel) intentDirectedTargets(sc SearchContext) []intentDirectedTarget {
+	minScore := 0.0
+	topKMultiplier := 1
+	if c != nil {
+		minScore = c.minScore
+		if c.topKMultiple > 0 {
+			topKMultiplier = c.topKMultiple
+		}
+	}
+	return intentDirectedTargetsFromContext(sc, minScore, topKMultiplier)
+}
+
+func intentDirectedTargetsFromContext(sc SearchContext, minScore float64, topKMultipliers ...int) []intentDirectedTarget {
+	topKMultiplier := 1
+	if len(topKMultipliers) > 0 {
+		topKMultiplier = topKMultipliers[0]
+	}
+	if topKMultiplier <= 0 {
+		topKMultiplier = 1
+	}
 	seen := make(map[string]int)
 	targets := make([]intentDirectedTarget, 0)
 	for _, subIntent := range sc.Intents {
@@ -299,7 +394,7 @@ func intentDirectedTargetsFromContext(sc SearchContext, minScore float64) []inte
 			if collectionName == "" {
 				continue
 			}
-			topK := resolveIntentDirectedTopK(ns, sc.TopK)
+			topK := resolveIntentDirectedTopK(ns, sc.TopK) * topKMultiplier
 			if idx, ok := seen[collectionName]; ok {
 				if topK > targets[idx].topK {
 					targets[idx].topK = topK
