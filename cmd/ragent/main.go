@@ -296,6 +296,7 @@ func main() {
 	}
 	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors))
 	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
+	enrichedRetriever := rag.NewMetadataEnrichingRetriever(retriever, rag.NewDBChunkMetadataResolver(gormDB))
 	queryNormalizer := rag.NewDBQueryTermNormalizer(termMappingRepo)
 	queryNormalizer.SetCacheManager(queryTermCacheManager)
 	baseRewriter := rag.NewLLMRewriter(preferredLLMService,
@@ -319,7 +320,7 @@ func main() {
 	ragPipeline := rag.NewPipeline(llmService,
 		rag.NewDefaultPromptBuilder(),
 		llmRewriter,
-		retriever,
+		enrichedRetriever,
 		memSvc,
 	)
 	ragPipeline.SetMessageChunkSize(cfg.AI.Stream.MessageChunkSize)
