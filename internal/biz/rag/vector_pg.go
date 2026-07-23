@@ -134,21 +134,45 @@ func (s *PgVectorStore) searchCollections(ctx context.Context, collectionNames [
 	if len(collections) == 0 {
 		return nil, nil
 	}
-	type searchRow struct {
-		pgVectorRow
-		Score float64 `gorm:"column:score"`
-	}
 	var rows []searchRow
-	err := s.db.WithContext(ctx).Raw(
-		`SELECT *, 1 - (embedding <=> ?) AS score FROM t_knowledge_vector 
-		 WHERE collection_name IN ? 
-		 ORDER BY embedding <=> ? 
-		 LIMIT ?`,
-		vecToString(vec), collections, vecToString(vec), topK,
-	).Scan(&rows).Error
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		applyPgVectorSearchTuning(ctx, tx)
+		return tx.Raw(
+			`SELECT *, 1 - (embedding <=> ?) AS score FROM t_knowledge_vector 
+			 WHERE collection_name IN ? 
+			 ORDER BY embedding <=> ? 
+			 LIMIT ?`,
+			vecToString(vec), collections, vecToString(vec), topK,
+		).Scan(&rows).Error
+	})
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
 	}
+	return pgVectorRowsToChunks(rows), nil
+}
+
+type searchRow struct {
+	pgVectorRow
+	Score float64 `gorm:"column:score"`
+}
+
+func pgVectorSearchTuningStatements() []string {
+	return []string{
+		"SET hnsw.ef_search = 200",
+		"SET hnsw.iterative_scan = relaxed_order",
+	}
+}
+
+func applyPgVectorSearchTuning(ctx context.Context, tx *gorm.DB) {
+	if tx == nil {
+		return
+	}
+	for _, statement := range pgVectorSearchTuningStatements() {
+		_ = tx.WithContext(ctx).Exec(statement).Error
+	}
+}
+
+func pgVectorRowsToChunks(rows []searchRow) []VectorChunk {
 	chunks := make([]VectorChunk, 0, len(rows))
 	for _, r := range rows {
 		chunk := VectorChunk{
@@ -165,7 +189,7 @@ func (s *PgVectorStore) searchCollections(ctx context.Context, collectionNames [
 		applyStructuredMetadata(&chunk)
 		chunks = append(chunks, chunk)
 	}
-	return chunks, nil
+	return chunks
 }
 
 func buildVectorMetadata(docID string, chunk VectorChunk) string {

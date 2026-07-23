@@ -156,3 +156,19 @@ func TestStringToVecInvalidLiteral(t *testing.T) {
 		t.Fatalf("expected nil for invalid vector literal, got %+v", got)
 	}
 }
+
+func TestPgVectorSearchTuningStatementsMatchJavaDefaults(t *testing.T) {
+	statements := pgVectorSearchTuningStatements()
+	want := []string{
+		"SET hnsw.ef_search = 200",
+		"SET hnsw.iterative_scan = relaxed_order",
+	}
+	if len(statements) != len(want) {
+		t.Fatalf("expected %d tuning statements, got %v", len(want), statements)
+	}
+	for i := range want {
+		if statements[i] != want[i] {
+			t.Fatalf("statement %d mismatch: got %q, want %q", i, statements[i], want[i])
+		}
+	}
+}
