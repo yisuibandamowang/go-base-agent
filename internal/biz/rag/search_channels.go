@@ -9,6 +9,7 @@ import (
 	"time"
 
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
+	"go-base-agent/internal/infra/embedding"
 
 	"gorm.io/gorm"
 	"net/http"
@@ -143,8 +144,11 @@ func firstSearchText(values ...string) string {
 
 // PgIntentDirectedSearchChannel recalls chunks from intent-bound collections.
 type PgIntentDirectedSearchChannel struct {
-	vectorDB *gorm.DB
-	priority int
+	vectorDB     *gorm.DB
+	vectorSearch VectorSearchService
+	emb          embedding.Service
+	kbRepo       knowledgeBaseLister
+	priority     int
 }
 
 // NewPgIntentDirectedSearchChannel creates an intent-directed recall channel.
@@ -152,11 +156,17 @@ func NewPgIntentDirectedSearchChannel(vectorDB *gorm.DB, priority int) *PgIntent
 	return &PgIntentDirectedSearchChannel{vectorDB: vectorDB, priority: priority}
 }
 
+// NewPgIntentDirectedVectorSearchChannel creates an intent-directed channel backed by vector search.
+func NewPgIntentDirectedVectorSearchChannel(vectorDB *gorm.DB, vectorSearch VectorSearchService, emb embedding.Service, kbRepo knowledgeBaseLister, priority int) *PgIntentDirectedSearchChannel {
+	return &PgIntentDirectedSearchChannel{vectorDB: vectorDB, vectorSearch: vectorSearch, emb: emb, kbRepo: kbRepo, priority: priority}
+}
+
 func (c *PgIntentDirectedSearchChannel) Name() string            { return "IntentDirectedSearch" }
 func (c *PgIntentDirectedSearchChannel) Priority() int           { return c.priority }
 func (c *PgIntentDirectedSearchChannel) Type() SearchChannelType { return ChannelIntentDirected }
 func (c *PgIntentDirectedSearchChannel) IsEnabled(sc SearchContext) bool {
-	return c != nil && c.vectorDB != nil && (len(intentDirectedTargetsFromContext(sc, 0)) > 0 || strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != "")
+	hasBackend := c != nil && (c.vectorDB != nil || c.canVectorSearch())
+	return hasBackend && (len(intentDirectedTargetsFromContext(sc, 0)) > 0 || strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != "")
 }
 
 func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
@@ -172,6 +182,14 @@ func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchCon
 		for _, collection := range collections {
 			targets = append(targets, intentDirectedTarget{collectionName: collection, topK: sc.TopK})
 		}
+	}
+	if c.canVectorSearch() && len(targets) > 0 {
+		if chunks, searched := c.searchIntentVectors(ctx, query, targets); searched {
+			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
+		}
+	}
+	if c.vectorDB == nil {
+		return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
 	}
 	type row struct {
 		ID             string  `gorm:"column:id"`
@@ -213,6 +231,55 @@ func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchCon
 		}
 	}
 	return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
+}
+
+func (c *PgIntentDirectedSearchChannel) canVectorSearch() bool {
+	return c != nil && c.vectorSearch != nil && c.emb != nil && c.kbRepo != nil
+}
+
+func (c *PgIntentDirectedSearchChannel) searchIntentVectors(ctx context.Context, query string, targets []intentDirectedTarget) ([]RetrievedChunk, bool) {
+	kbs, _, err := c.kbRepo.List(ctx, 1, 100)
+	if err != nil {
+		return nil, false
+	}
+	kbByCollection := make(map[string]knowledgeModel.KnowledgeBase, len(kbs))
+	for _, kb := range kbs {
+		collectionName := strings.TrimSpace(kb.CollectionName)
+		if collectionName != "" {
+			kbByCollection[collectionName] = kb
+		}
+	}
+
+	chunks := make([]RetrievedChunk, 0)
+	searched := false
+	for _, target := range targets {
+		kb, ok := kbByCollection[target.collectionName]
+		if !ok {
+			continue
+		}
+		searched = true
+		topK := target.topK
+		if topK <= 0 {
+			topK = 10
+		}
+		vec, err := c.emb.EmbedWithModel(ctx, query, kb.EmbeddingModel)
+		if err != nil {
+			continue
+		}
+		vectorChunks, err := c.vectorSearch.Search(ctx, target.collectionName, vec, topK)
+		if err != nil {
+			continue
+		}
+		for _, chunk := range vectorChunks {
+			chunks = append(chunks, RetrievedChunk{
+				ID:       chunk.ChunkID,
+				Text:     chunk.Content,
+				Score:    chunk.Score,
+				Metadata: metadataWithKnowledgeBase(chunk.Metadata, kb),
+			})
+		}
+	}
+	return chunks, searched
 }
 
 type intentDirectedTarget struct {

@@ -49,11 +49,13 @@ func (l fakeKnowledgeBaseLister) List(context.Context, int, int) ([]knowledgeMod
 
 type recordingVectorSearcher struct {
 	collections []string
+	topKs       []int
 	results     []VectorChunk
 }
 
-func (s *recordingVectorSearcher) Search(_ context.Context, collectionName string, _ []float32, _ int) ([]VectorChunk, error) {
+func (s *recordingVectorSearcher) Search(_ context.Context, collectionName string, _ []float32, topK int) ([]VectorChunk, error) {
 	s.collections = append(s.collections, collectionName)
+	s.topKs = append(s.topKs, topK)
 	return s.results, nil
 }
 
