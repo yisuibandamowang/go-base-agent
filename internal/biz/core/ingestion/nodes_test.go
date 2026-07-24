@@ -54,10 +54,12 @@ func TestFetcherNode_ReadsURL(t *testing.T) {
 }
 
 type testParserRegistry struct {
-	doc *rag.ParsedDocument
+	doc     *rag.ParsedDocument
+	options map[string]string
 }
 
 func (r *testParserRegistry) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
+	r.options = options
 	return r.doc, nil
 }
 
@@ -90,6 +92,63 @@ func TestParserNode_ParsesAndCollectsAssets(t *testing.T) {
 	}
 	if ctx.Metadata["source"] != "parser" {
 		t.Fatalf("expected metadata merge, got %+v", ctx.Metadata)
+	}
+}
+
+func TestParserNode_RejectsDisallowedRuleType(t *testing.T) {
+	registry := &testParserRegistry{doc: &rag.ParsedDocument{
+		Blocks: []rag.Block{{Type: rag.BlockParagraph, Content: "正文"}},
+	}}
+	ctx := &rag.IngestionContext{
+		TaskID:   "task-1",
+		Source:   &rag.DocumentSource{Type: "file", Location: "/tmp/doc.txt", FileName: "doc.txt"},
+		RawBytes: []byte("hello"),
+		MimeType: "text/plain",
+	}
+	result := NewParserNode(registry).Execute(context.Background(), ctx, rag.NodeConfig{
+		Settings: map[string]any{
+			"rules": []any{
+				map[string]any{"mimeType": "PDF"},
+			},
+		},
+	})
+	if result.Success || !strings.Contains(result.ErrorMessage, "文件类型不符合要求") {
+		t.Fatalf("expected disallowed type error, got %+v", result)
+	}
+}
+
+func TestParserNode_PassesMatchedRuleOptions(t *testing.T) {
+	registry := &testParserRegistry{doc: &rag.ParsedDocument{
+		Blocks: []rag.Block{{Type: rag.BlockParagraph, Content: "正文"}},
+	}}
+	ctx := &rag.IngestionContext{
+		TaskID:   "task-1",
+		Source:   &rag.DocumentSource{Type: "file", Location: "/tmp/doc.md", FileName: "doc.md"},
+		RawBytes: []byte("# hello"),
+		MimeType: "text/markdown",
+	}
+	result := NewParserNode(registry).Execute(context.Background(), ctx, rag.NodeConfig{
+		Settings: map[string]any{
+			"rules": []any{
+				map[string]any{
+					"mimeType": "MARKDOWN",
+					"options": map[string]any{
+						"sourceFile": "from-rule.md",
+						"custom":     "enabled",
+						"maxDepth":   3,
+					},
+				},
+			},
+		},
+	})
+	if !result.Success {
+		t.Fatalf("unexpected parse result: %+v", result)
+	}
+	if registry.options["sourceFile"] != "from-rule.md" {
+		t.Fatalf("expected rule sourceFile not overwritten, got %+v", registry.options)
+	}
+	if registry.options["custom"] != "enabled" || registry.options["maxDepth"] != "3" || registry.options["documentId"] != "task-1" {
+		t.Fatalf("expected rule options to be passed to parser, got %+v", registry.options)
 	}
 }
 

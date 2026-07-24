@@ -21,6 +21,15 @@ type parserRegistry interface {
 	Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error)
 }
 
+type parserSettings struct {
+	Rules []parserRule `json:"rules"`
+}
+
+type parserRule struct {
+	MimeType string         `json:"mimeType"`
+	Options  map[string]any `json:"options"`
+}
+
 // FetcherNode loads document bytes from a local file or HTTP URL.
 type FetcherNode struct {
 	client *http.Client
@@ -138,11 +147,31 @@ func (n *ParserNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext,
 		fileName = nodeCtx.Source.FileName
 		sourceURL = nodeCtx.Source.Location
 	}
-	options := map[string]string{
-		"sourceFile": fileName,
-		"documentId": firstNonEmpty(nodeCtx.TaskID, nodeCtx.PipelineID, fileName),
-		"sourceURL":  sourceURL,
-		"sourceType": firstNonEmpty(sourceTypeOrDefault(nodeCtx.Source), "file"),
+	settings := parserSettingsFromConfig(config.Settings)
+	if err := validateParserSettings(settings, nodeCtx.MimeType, fileName); err != nil {
+		return rag.NodeResult{Success: false, ErrorMessage: err.Error()}
+	}
+	rule := matchParserRule(settings, nodeCtx.MimeType, fileName)
+	options := map[string]string{}
+	if rule != nil {
+		for k, v := range rule.Options {
+			if strings.TrimSpace(k) == "" {
+				continue
+			}
+			options[k] = stringifyAny(v)
+		}
+	}
+	if strings.TrimSpace(options["sourceFile"]) == "" && strings.TrimSpace(fileName) != "" {
+		options["sourceFile"] = fileName
+	}
+	if strings.TrimSpace(options["documentId"]) == "" {
+		options["documentId"] = firstNonEmpty(nodeCtx.TaskID, nodeCtx.PipelineID, fileName)
+	}
+	if strings.TrimSpace(options["sourceURL"]) == "" && strings.TrimSpace(sourceURL) != "" {
+		options["sourceURL"] = sourceURL
+	}
+	if strings.TrimSpace(options["sourceType"]) == "" {
+		options["sourceType"] = firstNonEmpty(sourceTypeOrDefault(nodeCtx.Source), "file")
 	}
 	parsed, err := n.registry.Parse(ctx, nodeCtx.RawBytes, nodeCtx.MimeType, options)
 	if err != nil {
@@ -688,6 +717,134 @@ func parseObjectResponse(response string) map[string]any {
 		return out
 	}
 	return map[string]any{}
+}
+
+func parserSettingsFromConfig(settings map[string]any) parserSettings {
+	var out parserSettings
+	_ = decodeSettings(settings, &out)
+	return out
+}
+
+func validateParserSettings(settings parserSettings, mimeType, fileName string) error {
+	if len(settings.Rules) == 0 {
+		return nil
+	}
+	resolvedType := resolveParserType(mimeType, fileName)
+	for _, rule := range settings.Rules {
+		if configured := normalizeParserType(rule.MimeType); configured != "" && (configured == "ALL" || strings.EqualFold(configured, resolvedType)) {
+			return nil
+		}
+	}
+	allowed := make([]string, 0, len(settings.Rules))
+	for _, rule := range settings.Rules {
+		if configured := normalizeParserType(rule.MimeType); configured != "" {
+			allowed = append(allowed, configured)
+		}
+	}
+	return fmt.Errorf("文件类型不符合要求。当前文件类型: %s，允许的类型: %s", resolvedType, strings.Join(uniqueStrings(allowed), ", "))
+}
+
+func matchParserRule(settings parserSettings, mimeType, fileName string) *parserRule {
+	if len(settings.Rules) == 0 {
+		return nil
+	}
+	resolvedType := resolveParserType(mimeType, fileName)
+	for i := range settings.Rules {
+		configured := normalizeParserType(settings.Rules[i].MimeType)
+		if configured != "" && (configured == "ALL" || strings.EqualFold(configured, resolvedType)) {
+			return &settings.Rules[i]
+		}
+	}
+	return nil
+}
+
+func resolveParserType(mimeType, fileName string) string {
+	if resolved := resolveParserTypeByName(fileName); resolved != "" {
+		return resolved
+	}
+	lower := strings.ToLower(strings.TrimSpace(mimeType))
+	switch {
+	case strings.Contains(lower, "pdf"):
+		return "PDF"
+	case strings.Contains(lower, "markdown"):
+		return "MARKDOWN"
+	case strings.Contains(lower, "word"), strings.Contains(lower, "msword"), strings.Contains(lower, "wordprocessingml"):
+		return "WORD"
+	case strings.Contains(lower, "excel"), strings.Contains(lower, "spreadsheetml"):
+		return "EXCEL"
+	case strings.Contains(lower, "powerpoint"), strings.Contains(lower, "presentation"):
+		return "PPT"
+	case strings.HasPrefix(lower, "image/"):
+		return "IMAGE"
+	case strings.HasPrefix(lower, "text/"):
+		return "TEXT"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func resolveParserTypeByName(fileName string) string {
+	lower := strings.ToLower(strings.TrimSpace(fileName))
+	switch {
+	case strings.HasSuffix(lower, ".pdf"):
+		return "PDF"
+	case strings.HasSuffix(lower, ".md"), strings.HasSuffix(lower, ".markdown"):
+		return "MARKDOWN"
+	case strings.HasSuffix(lower, ".doc"), strings.HasSuffix(lower, ".docx"):
+		return "WORD"
+	case strings.HasSuffix(lower, ".xls"), strings.HasSuffix(lower, ".xlsx"):
+		return "EXCEL"
+	case strings.HasSuffix(lower, ".ppt"), strings.HasSuffix(lower, ".pptx"):
+		return "PPT"
+	case strings.HasSuffix(lower, ".png"), strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"), strings.HasSuffix(lower, ".gif"), strings.HasSuffix(lower, ".bmp"), strings.HasSuffix(lower, ".webp"):
+		return "IMAGE"
+	case strings.HasSuffix(lower, ".txt"):
+		return "TEXT"
+	default:
+		return ""
+	}
+}
+
+func normalizeParserType(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	switch value := strings.ToUpper(strings.TrimSpace(raw)); value {
+	case "*", "ALL", "DEFAULT":
+		return "ALL"
+	case "MD", "MARKDOWN":
+		return "MARKDOWN"
+	case "DOC", "DOCX", "WORD":
+		return "WORD"
+	case "XLS", "XLSX", "EXCEL":
+		return "EXCEL"
+	case "PPT", "PPTX", "POWERPOINT":
+		return "PPT"
+	case "TXT", "TEXT":
+		return "TEXT"
+	case "PNG", "JPG", "JPEG", "GIF", "BMP", "WEBP", "IMAGE", "IMG":
+		return "IMAGE"
+	case "PDF":
+		return "PDF"
+	default:
+		return value
+	}
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func stringifyAny(value any) string {
