@@ -435,7 +435,8 @@ func (e *testEmbedder) EmbedBatchWithModel(ctx context.Context, texts []string, 
 func (e *testEmbedder) Dimension() int { return 3 }
 
 type recordingEmbedder struct {
-	texts []string
+	texts   []string
+	modelID string
 }
 
 func (e *recordingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -454,6 +455,7 @@ func (e *recordingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][
 	return out, nil
 }
 func (e *recordingEmbedder) EmbedBatchWithModel(ctx context.Context, texts []string, modelID string) ([][]float32, error) {
+	e.modelID = modelID
 	return e.EmbedBatch(ctx, texts)
 }
 func (e *recordingEmbedder) Dimension() int { return 3 }
@@ -506,5 +508,27 @@ func TestIndexerNode_EmbedsEmbeddingTextWhenPresent(t *testing.T) {
 	}
 	if len(embedder.texts) != 1 || embedder.texts[0] != "能力: 权益查询; 说明: 支持" {
 		t.Fatalf("expected embedding text to be used, got %+v", embedder.texts)
+	}
+}
+
+func TestIndexerNode_UsesConfiguredEmbeddingModel(t *testing.T) {
+	store := &testVectorStore{}
+	embedder := &recordingEmbedder{}
+	node := NewIndexerNode(embedder, store)
+	ctx := &rag.IngestionContext{
+		TaskID:        "task-9",
+		VectorSpaceID: "kb-col",
+		Chunks: []rag.VectorChunk{
+			{Content: "第一段", Index: 0},
+		},
+	}
+	result := node.Execute(context.Background(), ctx, rag.NodeConfig{
+		Settings: map[string]any{"embeddingModel": "emb-special"},
+	})
+	if !result.Success {
+		t.Fatalf("unexpected indexer result: %+v", result)
+	}
+	if embedder.modelID != "emb-special" {
+		t.Fatalf("expected configured embedding model, got %q", embedder.modelID)
 	}
 }

@@ -437,7 +437,7 @@ func (n *IndexerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 	if len(texts) == 0 {
 		return rag.NodeResult{Success: false, ErrorMessage: "所有分块内容均为空"}
 	}
-	embeddings, err := n.embedder.EmbedBatch(ctx, texts)
+	embeddings, err := n.embedder.EmbedBatchWithModel(ctx, texts, settings.EmbeddingModel)
 	if err != nil {
 		return rag.NodeResult{Success: false, ErrorMessage: fmt.Sprintf("向量化失败: %v", err)}
 	}
@@ -524,6 +524,7 @@ type chunkerSettings struct {
 }
 
 type indexerSettings struct {
+	EmbeddingModel string   `json:"embeddingModel"`
 	CollectionName string   `json:"collectionName"`
 	MetadataFields []string `json:"metadataFields"`
 }
