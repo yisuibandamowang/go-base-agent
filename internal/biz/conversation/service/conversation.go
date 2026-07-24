@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/db"
 	redislock "go-base-agent/internal/framework/lock"
+	"go-base-agent/internal/framework/mq"
 	"go-base-agent/internal/infra/chat"
 
 	"gorm.io/gorm"
@@ -21,11 +23,13 @@ import (
 
 // ConversationService 会话业务服务。
 type ConversationService struct {
-	convRepo      *repo.ConversationRepo
-	msgRepo       *repo.MessageRepo
-	fbRepo        *repo.FeedbackRepo
-	sumRepo       *repo.ConversationSummaryRepo
-	titleMaxChars int
+	convRepo           *repo.ConversationRepo
+	msgRepo            *repo.MessageRepo
+	fbRepo             *repo.FeedbackRepo
+	sumRepo            *repo.ConversationSummaryRepo
+	feedbackMQProducer mq.Producer
+	feedbackMQEnabled  bool
+	titleMaxChars      int
 }
 
 // NewConversationService 创建 ConversationService。
@@ -49,6 +53,12 @@ func (s *ConversationService) SetTitleMaxChars(maxChars int) {
 	if maxChars > 0 {
 		s.titleMaxChars = maxChars
 	}
+}
+
+// SetFeedbackMQProducer 设置消息反馈 MQ 生产者。
+func (s *ConversationService) SetFeedbackMQProducer(producer mq.Producer, enabled bool) {
+	s.feedbackMQProducer = producer
+	s.feedbackMQEnabled = enabled
 }
 
 // ListConversations 获取用户会话列表。
@@ -131,12 +141,90 @@ func (s *ConversationService) CreateFeedback(ctx context.Context, req struct {
 	if req.Vote != 1 && req.Vote != -1 {
 		return fmt.Errorf("反馈值必须为 1 或 -1")
 	}
-	msg, err := s.msgRepo.FindByIDAndUserID(ctx, req.MessageID, req.UserID)
-	if err != nil {
-		return fmt.Errorf("消息不存在: %w", err)
+	if s.publishFeedbackEvent(ctx, MessageFeedbackEvent{
+		MessageID:  req.MessageID,
+		UserID:     req.UserID,
+		Vote:       req.Vote,
+		Reason:     req.Reason,
+		Comment:    req.Comment,
+		SubmitTime: time.Now().UnixMilli(),
+	}, "消息反馈") {
+		return nil
 	}
-	if !strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
-		return fmt.Errorf("仅支持对助手消息反馈")
+	return s.createFeedbackSync(ctx, req)
+}
+
+// DeleteFeedback 删除消息反馈。
+func (s *ConversationService) DeleteFeedback(ctx context.Context, messageID, userID string) error {
+	if s.publishFeedbackEvent(ctx, MessageFeedbackEvent{
+		MessageID:  messageID,
+		UserID:     userID,
+		Cancelled:  true,
+		SubmitTime: time.Now().UnixMilli(),
+	}, "取消消息反馈") {
+		return nil
+	}
+	if s.fbRepo == nil {
+		return nil
+	}
+	msg, err := s.loadAssistantMessage(ctx, messageID, userID)
+	if err != nil {
+		return err
+	}
+	return s.upsertCancelledFeedback(ctx, msg, userID, time.Now())
+}
+
+// SubmitFeedbackByEvent 异步处理反馈事件。
+func (s *ConversationService) SubmitFeedbackByEvent(ctx context.Context, event MessageFeedbackEvent) error {
+	messageID := strings.TrimSpace(event.MessageID)
+	if messageID == "" {
+		return fmt.Errorf("消息ID不能为空")
+	}
+	userID := strings.TrimSpace(event.UserID)
+	if userID == "" {
+		return fmt.Errorf("用户ID不能为空")
+	}
+	msg, err := s.loadAssistantMessage(ctx, messageID, userID)
+	if err != nil {
+		return err
+	}
+	if event.Cancelled {
+		if s.fbRepo == nil {
+			return nil
+		}
+		return s.upsertCancelledFeedback(ctx, msg, userID, feedbackEventTime(event.SubmitTime))
+	}
+	if event.Vote != 1 && event.Vote != -1 {
+		return fmt.Errorf("反馈值必须为 1 或 -1")
+	}
+	if s.fbRepo == nil {
+		return fmt.Errorf("feedback repo is nil")
+	}
+	fb := &model.MessageFeedback{
+		MessageID:      messageID,
+		ConversationID: msg.ConversationID,
+		UserID:         userID,
+		Vote:           event.Vote,
+		Reason:         event.Reason,
+		Comment:        event.Comment,
+	}
+	return s.upsertActiveFeedback(ctx, fb, feedbackEventTime(event.SubmitTime))
+}
+
+func (s *ConversationService) createFeedbackSync(ctx context.Context, req struct {
+	MessageID      string
+	ConversationID string
+	UserID         string
+	Vote           int16
+	Reason         string
+	Comment        string
+}) error {
+	msg, err := s.loadAssistantMessage(ctx, req.MessageID, req.UserID)
+	if err != nil {
+		return err
+	}
+	if s.fbRepo == nil {
+		return fmt.Errorf("feedback repo is nil")
 	}
 	fb := &model.MessageFeedback{
 		MessageID:      req.MessageID,
@@ -146,15 +234,72 @@ func (s *ConversationService) CreateFeedback(ctx context.Context, req struct {
 		Reason:         req.Reason,
 		Comment:        req.Comment,
 	}
-	return s.fbRepo.Upsert(ctx, fb)
+	return s.upsertActiveFeedback(ctx, fb, time.Now())
 }
 
-// DeleteFeedback 删除消息反馈。
-func (s *ConversationService) DeleteFeedback(ctx context.Context, messageID, userID string) error {
+func (s *ConversationService) upsertActiveFeedback(ctx context.Context, fb *model.MessageFeedback, ts time.Time) error {
+	if s.fbRepo == nil {
+		return fmt.Errorf("feedback repo is nil")
+	}
+	fb.CreateTime = ts
+	fb.UpdateTime = ts
+	return s.fbRepo.UpsertActive(ctx, fb)
+}
+
+func (s *ConversationService) upsertCancelledFeedback(ctx context.Context, msg *model.Message, userID string, ts time.Time) error {
 	if s.fbRepo == nil {
 		return nil
 	}
-	return s.fbRepo.DeleteByMessageIDAndUserID(ctx, messageID, userID)
+	fb := &model.MessageFeedback{
+		MessageID:      msg.ID,
+		ConversationID: msg.ConversationID,
+		UserID:         userID,
+	}
+	fb.CreateTime = ts
+	fb.UpdateTime = ts
+	return s.fbRepo.UpsertCancelled(ctx, fb)
+}
+
+func feedbackEventTime(submitTime int64) time.Time {
+	if submitTime <= 0 {
+		return time.Now()
+	}
+	return time.UnixMilli(submitTime)
+}
+
+func (s *ConversationService) loadAssistantMessage(ctx context.Context, messageID, userID string) (*model.Message, error) {
+	if s.msgRepo == nil {
+		return nil, fmt.Errorf("message repo is nil")
+	}
+	msg, err := s.msgRepo.FindByIDAndUserID(ctx, messageID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("消息不存在: %w", err)
+	}
+	if !strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
+		return nil, fmt.Errorf("仅支持对助手消息反馈")
+	}
+	return msg, nil
+}
+
+func (s *ConversationService) publishFeedbackEvent(ctx context.Context, event MessageFeedbackEvent, bizDesc string) bool {
+	if !s.feedbackMQEnabled || s.feedbackMQProducer == nil {
+		return false
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		slog.Warn("failed to marshal feedback event, fallback to sync", "err", err)
+		return false
+	}
+	if _, err := s.feedbackMQProducer.Send(ctx, mq.Message{
+		Topic:   MessageFeedbackTopic,
+		Keys:    event.UserID + ":" + event.MessageID,
+		BizDesc: bizDesc,
+		Body:    body,
+	}); err != nil {
+		slog.Warn("failed to send feedback event, fallback to sync", "err", err)
+		return false
+	}
+	return true
 }
 
 // ConversationSummaryGenerator 生成会话摘要。

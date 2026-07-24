@@ -3,12 +3,15 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/conversation/model"
 	"go-base-agent/internal/framework/db"
+	"go-base-agent/internal/framework/snowflake"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ConversationRepo 会话数据访问层。
@@ -227,17 +230,55 @@ func NewFeedbackRepo(database *gorm.DB) *FeedbackRepo {
 	return &FeedbackRepo{db: database}
 }
 
-// Upsert 创建或更新反馈。
-func (r *FeedbackRepo) Upsert(ctx context.Context, fb *model.MessageFeedback) error {
-	return r.db.WithContext(ctx).
-		Where("message_id = ? AND user_id = ?", fb.MessageID, fb.UserID).
-		Assign(map[string]interface{}{
-			"vote":        fb.Vote,
-			"reason":      fb.Reason,
-			"comment":     fb.Comment,
-			"update_time": time.Now(),
-		}).
-		FirstOrCreate(fb).Error
+// UpsertActive 创建或更新有效反馈。
+func (r *FeedbackRepo) UpsertActive(ctx context.Context, fb *model.MessageFeedback) error {
+	return r.upsert(ctx, fb, 0, false)
+}
+
+// UpsertCancelled 创建或更新取消反馈的墓碑记录。
+func (r *FeedbackRepo) UpsertCancelled(ctx context.Context, fb *model.MessageFeedback) error {
+	return r.upsert(ctx, fb, 1, true)
+}
+
+func (r *FeedbackRepo) upsert(ctx context.Context, fb *model.MessageFeedback, deleted int16, cancelled bool) error {
+	if fb == nil {
+		return fmt.Errorf("feedback is nil")
+	}
+	if strings.TrimSpace(fb.ID) == "" {
+		fb.ID = snowflake.NextIDStr()
+	}
+	if fb.CreateTime.IsZero() {
+		fb.CreateTime = time.Now()
+	}
+	if fb.UpdateTime.IsZero() {
+		fb.UpdateTime = fb.CreateTime
+	}
+	vote := fb.Vote
+	reason := fb.Reason
+	comment := fb.Comment
+	if cancelled {
+		vote = 0
+		reason = ""
+		comment = ""
+	}
+	fb.Deleted = deleted
+	fb.Vote = vote
+	fb.Reason = reason
+	fb.Comment = comment
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "message_id"}, {Name: "user_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"conversation_id": clause.Expr{SQL: "excluded.conversation_id"},
+			"vote":            clause.Expr{SQL: "excluded.vote"},
+			"reason":          clause.Expr{SQL: "excluded.reason"},
+			"comment":         clause.Expr{SQL: "excluded.comment"},
+			"update_time":     clause.Expr{SQL: "excluded.update_time"},
+			"deleted":         clause.Expr{SQL: "excluded.deleted"},
+		}),
+		Where: clause.Where{Exprs: []clause.Expression{
+			clause.Expr{SQL: "t_message_feedback.update_time < excluded.update_time"},
+		}},
+	}).Create(fb).Error
 }
 
 // ListVotesByMessageIDs 查询指定消息的反馈值。

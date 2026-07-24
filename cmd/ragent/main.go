@@ -185,12 +185,22 @@ func main() {
 	}))
 	go documentScheduleSvc.Run(appCtx)
 
+	convRepo := conversationRepo.NewConversationRepo(gormDB)
+	msgRepo := conversationRepo.NewMessageRepo(gormDB)
+	fbRepo := conversationRepo.NewFeedbackRepo(gormDB)
+	sumRepo := conversationRepo.NewConversationSummaryRepo(gormDB)
+	convSvc := conversationService.NewConversationService(convRepo, msgRepo, fbRepo, sumRepo)
+	convSvc.SetTitleMaxChars(cfg.RAG.Memory.TitleMaxLength)
+	convSvc.SetFeedbackMQProducer(mqProducer, mqEnabled)
+	convHandler := conversationHandler.NewConversationHandler(convSvc)
+
 	if mqEnabled {
 		if err := knowledgeService.RegisterKnowledgeDocumentChunkConsumer(mqConsumer, docSvc); err != nil {
 			slog.Warn("register knowledge document chunk consumer failed, fallback to inline chunking", "err", err)
 			mqEnabled = false
 			kbSvc.SetMQProducer(nil, false)
 			docSvc.SetMQProducer(nil, false)
+			convSvc.SetFeedbackMQProducer(nil, false)
 		}
 		if mqEnabled {
 			if err := knowledgeService.RegisterKnowledgeBaseCleanupConsumer(mqConsumer, kbSvc); err != nil {
@@ -198,6 +208,13 @@ func main() {
 				mqEnabled = false
 				kbSvc.SetMQProducer(nil, false)
 				docSvc.SetMQProducer(nil, false)
+				convSvc.SetFeedbackMQProducer(nil, false)
+			}
+		}
+		if mqEnabled {
+			if err := conversationService.RegisterMessageFeedbackConsumer(mqConsumer, convSvc); err != nil {
+				slog.Warn("register message feedback consumer failed, fallback to inline feedback", "err", err)
+				convSvc.SetFeedbackMQProducer(nil, false)
 			}
 		}
 		if mqEnabled {
@@ -206,17 +223,10 @@ func main() {
 				mqEnabled = false
 				kbSvc.SetMQProducer(nil, false)
 				docSvc.SetMQProducer(nil, false)
+				convSvc.SetFeedbackMQProducer(nil, false)
 			}
 		}
 	}
-
-	convRepo := conversationRepo.NewConversationRepo(gormDB)
-	msgRepo := conversationRepo.NewMessageRepo(gormDB)
-	fbRepo := conversationRepo.NewFeedbackRepo(gormDB)
-	sumRepo := conversationRepo.NewConversationSummaryRepo(gormDB)
-	convSvc := conversationService.NewConversationService(convRepo, msgRepo, fbRepo, sumRepo)
-	convSvc.SetTitleMaxChars(cfg.RAG.Memory.TitleMaxLength)
-	convHandler := conversationHandler.NewConversationHandler(convSvc)
 
 	summaryGenerator := conversationService.NewLLMSummaryGenerator(preferredLLMService, "")
 	dbMemStore := conversationService.NewDBMemoryStore(
