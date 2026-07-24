@@ -56,6 +56,18 @@ func (r *KnowledgeBaseRepo) SoftDelete(ctx context.Context, id string) error {
 	return db.SoftDelete(r.gdb.WithContext(ctx), &kb)
 }
 
+// CountDocumentsByKBID 统计知识库下未删除文档数量。
+func (r *KnowledgeBaseRepo) CountDocumentsByKBID(ctx context.Context, kbID string) (int64, error) {
+	var count int64
+	if err := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.KnowledgeDocument{}).
+		Where("kb_id = ?", kbID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // List 分页查询知识库列表（仅未删除记录）。
 func (r *KnowledgeBaseRepo) List(ctx context.Context, page, size int) ([]model.KnowledgeBase, int64, error) {
 	var (

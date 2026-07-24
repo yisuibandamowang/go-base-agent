@@ -138,6 +138,7 @@ func main() {
 		slog.Warn("rustfs file store unavailable, fallback to memory", "err", err)
 		fileStore = knowledgeHandler.NewFileStore()
 	}
+	kbSvc.SetVectorStore(vecStore)
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, vecStore, fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)

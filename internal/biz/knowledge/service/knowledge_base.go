@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	auditService "go-base-agent/internal/biz/audit/service"
@@ -19,11 +20,21 @@ import (
 type KnowledgeBaseService struct {
 	repo          *repo.KnowledgeBaseRepo
 	auditRecorder *auditService.BizChangeLogService
+	vecCleaner    vectorSpaceCleaner
+}
+
+type vectorSpaceCleaner interface {
+	DropVectorSpace(ctx context.Context, collectionName string) error
 }
 
 // NewKnowledgeBaseService 创建 KnowledgeBaseService。
 func NewKnowledgeBaseService(repo *repo.KnowledgeBaseRepo) *KnowledgeBaseService {
 	return &KnowledgeBaseService{repo: repo}
+}
+
+// SetVectorStore 设置向量空间清理器。
+func (s *KnowledgeBaseService) SetVectorStore(cleaner vectorSpaceCleaner) {
+	s.vecCleaner = cleaner
 }
 
 // SetAuditRecorder 设置审计日志记录器。
@@ -124,8 +135,20 @@ func (s *KnowledgeBaseService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to find knowledge base for delete: %w", err)
 	}
 	before := toResp(kb)
+	docCount, err := s.repo.CountDocumentsByKBID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to count knowledge base documents: %w", err)
+	}
+	if docCount > 0 {
+		return fmt.Errorf("当前知识库下还有文档，请删除文档")
+	}
 	if err := s.repo.SoftDelete(ctx, id); err != nil {
 		return err
+	}
+	if s.vecCleaner != nil && strings.TrimSpace(kb.CollectionName) != "" {
+		if err := s.vecCleaner.DropVectorSpace(ctx, kb.CollectionName); err != nil {
+			return fmt.Errorf("failed to drop vector space: %w", err)
+		}
 	}
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeBase,

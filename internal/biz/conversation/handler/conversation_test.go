@@ -228,4 +228,22 @@ func TestConversationFeedbackVoteAndDelete(t *testing.T) {
 			t.Fatalf("expected code 0, got %v", resp["code"])
 		}
 	})
+
+	t.Run("path message feedback submit does not require conversation id", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/ragent/conversations/messages/"+msg.ID+"/feedback", strings.NewReader(`{"vote":1,"reason":"good"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["code"] != "0" {
+			t.Fatalf("expected code 0, got %v body=%s", resp["code"], w.Body.String())
+		}
+	})
 }

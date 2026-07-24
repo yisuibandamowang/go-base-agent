@@ -375,6 +375,89 @@ func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 	}
 }
 
+func TestConversationService_CreateFeedbackRejectsNonAssistantMessage(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.MessageFeedback{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+	if err := gdb.Create(&conversationModel.Message{
+		BaseModel:      db.BaseModel{ID: "msg-user"},
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Role:           "user",
+		Content:        "问题",
+	}).Error; err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	svc := NewConversationService(repo.NewConversationRepo(gdb), repo.NewMessageRepo(gdb), repo.NewFeedbackRepo(gdb), repo.NewConversationSummaryRepo(gdb))
+	err = svc.CreateFeedback(context.Background(), struct {
+		MessageID      string
+		ConversationID string
+		UserID         string
+		Vote           int16
+		Reason         string
+		Comment        string
+	}{
+		MessageID:      "msg-user",
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Vote:           1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "仅支持对助手消息反馈") {
+		t.Fatalf("expected assistant-only feedback error, got %v", err)
+	}
+}
+
+func TestConversationService_CreateFeedbackDerivesConversationIDFromMessage(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.MessageFeedback{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+	if err := gdb.Create(&conversationModel.Message{
+		BaseModel:      db.BaseModel{ID: "msg-assistant"},
+		ConversationID: "conv-real",
+		UserID:         "user-1",
+		Role:           "assistant",
+		Content:        "回答",
+	}).Error; err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	svc := NewConversationService(repo.NewConversationRepo(gdb), repo.NewMessageRepo(gdb), repo.NewFeedbackRepo(gdb), repo.NewConversationSummaryRepo(gdb))
+	if err := svc.CreateFeedback(context.Background(), struct {
+		MessageID      string
+		ConversationID string
+		UserID         string
+		Vote           int16
+		Reason         string
+		Comment        string
+	}{
+		MessageID:      "msg-assistant",
+		ConversationID: "conv-from-request",
+		UserID:         "user-1",
+		Vote:           -1,
+		Reason:         "bad",
+		Comment:        "not helpful",
+	}); err != nil {
+		t.Fatalf("create feedback: %v", err)
+	}
+
+	var feedback conversationModel.MessageFeedback
+	if err := gdb.Where("message_id = ? AND user_id = ?", "msg-assistant", "user-1").First(&feedback).Error; err != nil {
+		t.Fatalf("load feedback: %v", err)
+	}
+	if feedback.ConversationID != "conv-real" {
+		t.Fatalf("expected conversation id from message, got %q", feedback.ConversationID)
+	}
+}
+
 func TestConversationService_UpdateTitleValidatesAndTrims(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

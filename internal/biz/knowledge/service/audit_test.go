@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -12,17 +13,27 @@ import (
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
 	appctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/mq"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type capturingVectorSpaceCleaner struct {
+	dropCalls []string
+}
+
+func (c *capturingVectorSpaceCleaner) DropVectorSpace(_ context.Context, collectionName string) error {
+	c.dropCalls = append(c.dropCalls, collectionName)
+	return nil
+}
 
 func TestKnowledgeBaseService_RecordsAuditLogs(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &auditModel.BizChangeLog{}); err != nil {
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &auditModel.BizChangeLog{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -76,4 +87,149 @@ func TestKnowledgeBaseService_RecordsAuditLogs(t *testing.T) {
 	if logs[2].OperationType != auditService.OperationDelete || !strings.Contains(logs[2].BeforeSnapshot, "go 语言知识库 v2") {
 		t.Fatalf("unexpected delete audit log: %+v", logs[2])
 	}
+}
+
+func TestKnowledgeBaseService_DeleteBlocksWhenDocumentsExist(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	kb, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "有文档的知识库",
+		EmbeddingModel: "qwen-emb-8b",
+		CollectionName: "kb_with_docs",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create knowledge base: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocument{
+		KbID:      kb.ID,
+		DocName:   "doc-1",
+		FileURL:   "https://example.com/doc-1",
+		FileType:  "pdf",
+		Status:    "success",
+		CreatedBy: "admin-1",
+		UpdatedBy: "admin-1",
+	}).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+
+	if err := svc.Delete(ctx, kb.ID); err == nil {
+		t.Fatal("expected delete to be blocked while documents still exist")
+	}
+
+	var activeCount int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeBase{}).
+		Where("id = ? AND deleted = 0", kb.ID).
+		Count(&activeCount).Error; err != nil {
+		t.Fatalf("count active kb: %v", err)
+	}
+	if activeCount != 1 {
+		t.Fatalf("expected knowledge base to remain active, got %d", activeCount)
+	}
+}
+
+func TestKnowledgeBaseService_DeleteDropsVectorSpace(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	vecStore := &capturingVectorSpaceCleaner{}
+	svc.SetVectorStore(vecStore)
+
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	kb, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "清理向量的知识库",
+		EmbeddingModel: "qwen-emb-8b",
+		CollectionName: "kb_cleanup",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create knowledge base: %v", err)
+	}
+	if err := svc.Delete(ctx, kb.ID); err != nil {
+		t.Fatalf("delete knowledge base: %v", err)
+	}
+	if len(vecStore.dropCalls) != 1 || vecStore.dropCalls[0] != "kb_cleanup" {
+		t.Fatalf("expected vector space drop for kb_cleanup, got %+v", vecStore.dropCalls)
+	}
+}
+
+func TestKnowledgeBaseService_DeletePublishesCleanupEventWhenMQEnabled(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	producer := &capturingKnowledgeMQProducer{}
+	vecStore := &capturingVectorSpaceCleaner{}
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	svc.SetVectorStore(vecStore)
+	svc.SetMQProducer(producer, true)
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	kb, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "MQ 清理知识库",
+		EmbeddingModel: "qwen-emb-8b",
+		CollectionName: "kb_mq_cleanup",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create knowledge base: %v", err)
+	}
+	if err := svc.Delete(ctx, kb.ID); err != nil {
+		t.Fatalf("delete knowledge base: %v", err)
+	}
+	if len(vecStore.dropCalls) != 0 {
+		t.Fatalf("expected MQ path not to drop vector space inline, got %+v", vecStore.dropCalls)
+	}
+	if len(producer.messages) != 1 {
+		t.Fatalf("expected one cleanup event, got %+v", producer.messages)
+	}
+	msg := producer.messages[0]
+	if msg.Topic != KnowledgeBaseCleanupTopic || msg.Keys != kb.ID || msg.BizDesc != "知识库删除清理" {
+		t.Fatalf("unexpected mq message: %+v", msg)
+	}
+	var event KnowledgeBaseCleanupEvent
+	if err := json.Unmarshal(msg.Body, &event); err != nil {
+		t.Fatalf("decode cleanup event: %v", err)
+	}
+	if event.KBID != kb.ID || event.CollectionName != "kb_mq_cleanup" || event.Operator != "管理员" {
+		t.Fatalf("unexpected cleanup event: %+v", event)
+	}
+}
+
+type capturingKnowledgeMQProducer struct {
+	messages []mq.Message
+}
+
+func (p *capturingKnowledgeMQProducer) Send(ctx context.Context, msg mq.Message) (*mq.SendResult, error) {
+	p.messages = append(p.messages, msg)
+	return &mq.SendResult{MsgID: "msg-1", Status: "SEND_OK"}, nil
 }

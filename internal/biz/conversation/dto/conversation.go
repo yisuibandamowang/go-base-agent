@@ -31,7 +31,7 @@ type UpdateTitleReq struct {
 // FeedbackReq 消息反馈请求。
 type FeedbackReq struct {
 	MessageID      string `json:"messageId"`
-	ConversationID string `json:"conversationId" binding:"required"`
+	ConversationID string `json:"conversationId"`
 	Vote           int16  `json:"vote" binding:"required"`
 	Reason         string `json:"reason"`
 	Comment        string `json:"comment"`

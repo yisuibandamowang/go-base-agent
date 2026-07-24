@@ -122,9 +122,25 @@ func (s *ConversationService) CreateFeedback(ctx context.Context, req struct {
 	Reason         string
 	Comment        string
 }) error {
+	if strings.TrimSpace(req.MessageID) == "" {
+		return fmt.Errorf("消息ID不能为空")
+	}
+	if strings.TrimSpace(req.UserID) == "" {
+		return fmt.Errorf("用户ID不能为空")
+	}
+	if req.Vote != 1 && req.Vote != -1 {
+		return fmt.Errorf("反馈值必须为 1 或 -1")
+	}
+	msg, err := s.msgRepo.FindByIDAndUserID(ctx, req.MessageID, req.UserID)
+	if err != nil {
+		return fmt.Errorf("消息不存在: %w", err)
+	}
+	if !strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
+		return fmt.Errorf("仅支持对助手消息反馈")
+	}
 	fb := &model.MessageFeedback{
 		MessageID:      req.MessageID,
-		ConversationID: req.ConversationID,
+		ConversationID: msg.ConversationID,
 		UserID:         req.UserID,
 		Vote:           req.Vote,
 		Reason:         req.Reason,

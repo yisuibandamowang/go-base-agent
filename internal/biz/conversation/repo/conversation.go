@@ -100,6 +100,18 @@ func (r *MessageRepo) Create(ctx context.Context, msg *model.Message) error {
 	return r.db.WithContext(ctx).Create(msg).Error
 }
 
+// FindByIDAndUserID 根据消息 ID 和用户 ID 查询未删除消息。
+func (r *MessageRepo) FindByIDAndUserID(ctx context.Context, messageID, userID string) (*model.Message, error) {
+	var msg model.Message
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("id = ? AND user_id = ?", messageID, userID).
+		First(&msg).Error
+	if err != nil {
+		return nil, fmt.Errorf("find message: %w", err)
+	}
+	return &msg, nil
+}
+
 // LoadHistory 加载会话消息历史。
 func (r *MessageRepo) LoadHistory(ctx context.Context, conversationID, userID string, limit int) ([]model.Message, error) {
 	var msgs []model.Message

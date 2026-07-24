@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/biz/rag"
 	appctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/db"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -144,6 +146,60 @@ func (f *fakeIngestionTaskStarter) Create(ctx context.Context, req ingestionDto.
 	f.req = req
 	f.userID = userID
 	return f.resp, f.err
+}
+
+func TestDocumentService_StartChunkPublishesMQEventWhenEnabled(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate document table: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocument{
+		BaseModel: db.BaseModel{ID: "doc-1"},
+		KbID:      "kb-1",
+		DocName:   "doc.md",
+		FileURL:   "upload://doc.md",
+		FileType:  "md",
+		Status:    "pending",
+		CreatedBy: "user-1",
+	}).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+
+	producer := &capturingKnowledgeMQProducer{}
+	svc := &DocumentService{
+		docRepo: knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:      gdb,
+	}
+	svc.SetMQProducer(producer, true)
+
+	if err := svc.StartChunk(context.Background(), "doc-1", "operator-1"); err != nil {
+		t.Fatalf("start chunk: %v", err)
+	}
+
+	var doc knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&doc, "id = ?", "doc-1").Error; err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if doc.Status != "running" || doc.UpdatedBy != "operator-1" {
+		t.Fatalf("expected document to be marked running by operator, got status=%s updatedBy=%s", doc.Status, doc.UpdatedBy)
+	}
+	if len(producer.messages) != 1 {
+		t.Fatalf("expected one chunk event, got %+v", producer.messages)
+	}
+	msg := producer.messages[0]
+	if msg.Topic != KnowledgeDocumentChunkTopic || msg.Keys != "doc-1" || msg.BizDesc != "文档分块" {
+		t.Fatalf("unexpected mq message: %+v", msg)
+	}
+	var event KnowledgeDocumentChunkEvent
+	if err := json.Unmarshal(msg.Body, &event); err != nil {
+		t.Fatalf("decode chunk event: %v", err)
+	}
+	if event.DocID != "doc-1" || event.Operator != "operator-1" {
+		t.Fatalf("unexpected chunk event: %+v", event)
+	}
 }
 
 func TestDocumentService_PersistChunksAndVectorsReturnsVectorError(t *testing.T) {
