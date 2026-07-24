@@ -19,6 +19,21 @@ func (p *noopProducer) Send(ctx context.Context, msg Message) (*SendResult, erro
 	}, nil
 }
 
+func (p *noopProducer) SendInTransaction(ctx context.Context, msg Message, executor TransactionExecutor) (*SendResult, error) {
+	slog.Info("mq: noop transaction send", "topic", msg.Topic, "keys", msg.Keys, "desc", msg.BizDesc)
+	if executor != nil {
+		if err := executor(ctx, msg); err != nil {
+			return nil, err
+		}
+	}
+	return &SendResult{
+		MsgID:  uuid.New().String(),
+		Status: "NOOP_OK",
+	}, nil
+}
+
+func (p *noopProducer) RegisterTransactionChecker(topic string, checker TransactionChecker) {}
+
 type NoopConsumer struct {
 	handlers map[string]MessageHandler
 }

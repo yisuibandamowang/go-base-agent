@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,9 @@ import (
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
+	"go-base-agent/internal/biz/rag"
+	appctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/mq"
 
 	"gorm.io/gorm"
 )
@@ -21,10 +25,18 @@ type KnowledgeBaseService struct {
 	repo          *repo.KnowledgeBaseRepo
 	auditRecorder *auditService.BizChangeLogService
 	vecCleaner    vectorSpaceCleaner
+	fileDeleter   knowledgeSpaceDeleter
+	mqProducer    mq.Producer
+	mqEnabled     bool
 }
 
 type vectorSpaceCleaner interface {
+	EnsureVectorSpace(ctx context.Context, spec rag.VectorSpaceSpec) error
 	DropVectorSpace(ctx context.Context, collectionName string) error
+}
+
+type knowledgeSpaceDeleter interface {
+	DeleteKnowledgeSpace(ctx context.Context, collectionName string) error
 }
 
 // NewKnowledgeBaseService 创建 KnowledgeBaseService。
@@ -35,6 +47,17 @@ func NewKnowledgeBaseService(repo *repo.KnowledgeBaseRepo) *KnowledgeBaseService
 // SetVectorStore 设置向量空间清理器。
 func (s *KnowledgeBaseService) SetVectorStore(cleaner vectorSpaceCleaner) {
 	s.vecCleaner = cleaner
+}
+
+// SetFileDeleter 设置知识空间文件删除器。
+func (s *KnowledgeBaseService) SetFileDeleter(deleter knowledgeSpaceDeleter) {
+	s.fileDeleter = deleter
+}
+
+// SetMQProducer 设置知识库删除 MQ 生产者。
+func (s *KnowledgeBaseService) SetMQProducer(producer mq.Producer, enabled bool) {
+	s.mqProducer = producer
+	s.mqEnabled = enabled
 }
 
 // SetAuditRecorder 设置审计日志记录器。
@@ -62,6 +85,14 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, req dto.CreateKnowled
 
 	if err := s.repo.Create(ctx, kb); err != nil {
 		return nil, fmt.Errorf("failed to create knowledge base: %w", err)
+	}
+	if s.vecCleaner != nil {
+		if err := s.vecCleaner.EnsureVectorSpace(ctx, rag.VectorSpaceSpec{
+			SpaceID: rag.VectorSpaceID{Name: req.CollectionName},
+			Remark:  req.Name,
+		}); err != nil {
+			return nil, fmt.Errorf("failed to ensure vector space: %w", err)
+		}
 	}
 	resp := toResp(kb)
 	s.recordAudit(ctx, auditService.RecordReq{
@@ -142,12 +173,46 @@ func (s *KnowledgeBaseService) Delete(ctx context.Context, id string) error {
 	if docCount > 0 {
 		return fmt.Errorf("当前知识库下还有文档，请删除文档")
 	}
-	if err := s.repo.SoftDelete(ctx, id); err != nil {
-		return err
-	}
-	if s.vecCleaner != nil && strings.TrimSpace(kb.CollectionName) != "" {
-		if err := s.vecCleaner.DropVectorSpace(ctx, kb.CollectionName); err != nil {
-			return fmt.Errorf("failed to drop vector space: %w", err)
+	if s.mqEnabled && s.mqProducer != nil {
+		operator := "system"
+		if user := appctx.User(ctx); user != nil && strings.TrimSpace(user.Username) != "" {
+			operator = user.Username
+		}
+		event := KnowledgeBaseCleanupEvent{
+			KBID:           id,
+			CollectionName: kb.CollectionName,
+			Operator:       operator,
+		}
+		body, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("failed to marshal knowledge base cleanup event: %w", err)
+		}
+		if _, err := s.mqProducer.SendInTransaction(ctx, mq.Message{
+			Topic:   KnowledgeBaseCleanupTopic,
+			Keys:    id,
+			BizDesc: "知识库删除清理",
+			Body:    body,
+		}, func(txCtx context.Context, msg mq.Message) error {
+			if err := s.repo.SoftDelete(txCtx, id); err != nil {
+				return fmt.Errorf("failed to soft delete knowledge base: %w", err)
+			}
+			return nil
+		}); err != nil {
+			if restoreErr := s.repo.Restore(ctx, id); restoreErr != nil {
+				return fmt.Errorf("failed to send knowledge base cleanup event: %w; rollback delete failed: %v", err, restoreErr)
+			}
+			return fmt.Errorf("failed to send knowledge base cleanup event: %w", err)
+		}
+	} else {
+		if err := s.repo.SoftDelete(ctx, id); err != nil {
+			return err
+		}
+		if err := s.cleanupPhysicalResources(ctx, KnowledgeBaseCleanupEvent{
+			KBID:           id,
+			CollectionName: kb.CollectionName,
+			Operator:       "system",
+		}); err != nil {
+			return err
 		}
 	}
 	s.recordAudit(ctx, auditService.RecordReq{
@@ -157,6 +222,27 @@ func (s *KnowledgeBaseService) Delete(ctx context.Context, id string) error {
 		ActionDesc:     "删除知识库：" + before.Name,
 		BeforeSnapshot: before,
 	})
+	return nil
+}
+
+func (s *KnowledgeBaseService) cleanupPhysicalResources(ctx context.Context, event KnowledgeBaseCleanupEvent) error {
+	if strings.TrimSpace(event.CollectionName) == "" {
+		return nil
+	}
+	var firstErr error
+	if s.vecCleaner != nil {
+		if err := s.vecCleaner.DropVectorSpace(ctx, event.CollectionName); err != nil {
+			firstErr = fmt.Errorf("failed to drop vector space: %w", err)
+		}
+	}
+	if s.fileDeleter != nil {
+		if err := s.fileDeleter.DeleteKnowledgeSpace(ctx, event.CollectionName); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to delete knowledge space files: %w", err)
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
 	return nil
 }
 

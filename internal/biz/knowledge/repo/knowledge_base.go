@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/framework/db"
@@ -54,6 +55,25 @@ func (r *KnowledgeBaseRepo) SoftDelete(ctx context.Context, id string) error {
 	var kb model.KnowledgeBase
 	kb.ID = id
 	return db.SoftDelete(r.gdb.WithContext(ctx), &kb)
+}
+
+// Restore 恢复已软删除的知识库。
+func (r *KnowledgeBaseRepo) Restore(ctx context.Context, id string) error {
+	var kb model.KnowledgeBase
+	kb.ID = id
+	result := r.gdb.WithContext(ctx).Model(&kb).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"deleted":     0,
+			"update_time": time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // CountDocumentsByKBID 统计知识库下未删除文档数量。

@@ -14,8 +14,14 @@ type Message struct {
 	Body    []byte `json:"body"`
 }
 
+type TransactionExecutor func(ctx context.Context, msg Message) error
+
+type TransactionChecker func(ctx context.Context, msg Message) (bool, error)
+
 type Producer interface {
 	Send(ctx context.Context, msg Message) (*SendResult, error)
+	SendInTransaction(ctx context.Context, msg Message, executor TransactionExecutor) (*SendResult, error)
+	RegisterTransactionChecker(topic string, checker TransactionChecker)
 }
 
 type MessageHandler func(ctx context.Context, msg Message) error

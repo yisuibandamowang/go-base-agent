@@ -62,6 +62,8 @@ func main() {
 		slog.Error("failed to load config", "err", err)
 		os.Exit(1)
 	}
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
 
 	gormDB, err := db.NewDB(cfg.Database)
 	if err != nil {
@@ -110,10 +112,8 @@ func main() {
 	}
 
 	llmService, preferredLLMService, embService, rerankService, vlmService, hasVLM := setupAI(cfg, logger)
-	mqProducer, mqConsumer, shutdownMQ := setupMQ(cfg.RocketMQ)
+	mqProducer, mqConsumer, shutdownMQ, mqEnabled := setupMQ(cfg.RocketMQ)
 	defer shutdownMQ()
-	_ = mqProducer
-	_ = mqConsumer
 
 	userRepo := userRepoPkg.NewUserRepo(gormDB)
 	authSvc := userService.NewAuthService(userRepo, cfg.Auth)
@@ -139,11 +139,16 @@ func main() {
 		fileStore = knowledgeHandler.NewFileStore()
 	}
 	kbSvc.SetVectorStore(vecStore)
+	kbSvc.SetFileDeleter(fileStore)
+	kbSvc.SetMQProducer(mqProducer, mqEnabled)
 	docSvc := knowledgeService.NewDocumentService(docRepo, chunkRepo, kbRepo, gormDB, embService, vecStore, fileStore)
 	docSvc.SetAuditRecorder(auditSvc)
 	docSvc.SetScheduleRepo(scheduleRepo)
 	docSvc.SetScheduleMinIntervalSeconds(cfg.RAG.Knowledge.Schedule.MinIntervalSeconds)
 	docSvc.SetLLMService(llmService)
+	docSvc.SetMQProducer(mqProducer, mqEnabled)
+	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeDocumentChunkTopic, docSvc.CheckChunkTransaction)
+	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeBaseCleanupTopic, kbSvc.CheckCleanupTransaction)
 	if parserRegistry := buildDocumentParserRegistry(cfg, vlmService, hasVLM, fileStore); parserRegistry != nil {
 		docSvc.SetParserRegistry(parserRegistry)
 	}
@@ -153,6 +158,7 @@ func main() {
 	documentScheduleSvc := knowledgeService.NewDocumentScheduleService(
 		gormDB,
 		docRepo,
+		kbRepo,
 		scheduleRepo,
 		fileStore,
 		docSvc,
@@ -177,6 +183,32 @@ func main() {
 		AccessToken: cfg.RAG.Knowledge.Confluence.AccessToken,
 		MaxBytes:    50 << 20,
 	}))
+	go documentScheduleSvc.Run(appCtx)
+
+	if mqEnabled {
+		if err := knowledgeService.RegisterKnowledgeDocumentChunkConsumer(mqConsumer, docSvc); err != nil {
+			slog.Warn("register knowledge document chunk consumer failed, fallback to inline chunking", "err", err)
+			mqEnabled = false
+			kbSvc.SetMQProducer(nil, false)
+			docSvc.SetMQProducer(nil, false)
+		}
+		if mqEnabled {
+			if err := knowledgeService.RegisterKnowledgeBaseCleanupConsumer(mqConsumer, kbSvc); err != nil {
+				slog.Warn("register knowledge base cleanup consumer failed, fallback to inline cleanup", "err", err)
+				mqEnabled = false
+				kbSvc.SetMQProducer(nil, false)
+				docSvc.SetMQProducer(nil, false)
+			}
+		}
+		if mqEnabled {
+			if err := mqConsumer.Start(); err != nil {
+				slog.Warn("start mq consumer failed, fallback to inline knowledge tasks", "err", err)
+				mqEnabled = false
+				kbSvc.SetMQProducer(nil, false)
+				docSvc.SetMQProducer(nil, false)
+			}
+		}
+	}
 
 	convRepo := conversationRepo.NewConversationRepo(gormDB)
 	msgRepo := conversationRepo.NewMessageRepo(gormDB)
@@ -528,6 +560,7 @@ func main() {
 	<-quit
 
 	slog.Info("shutting down server...")
+	appCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -541,12 +574,12 @@ func main() {
 	slog.Info("server exited")
 }
 
-func setupMQ(cfg config.RocketMQConfig) (mq.Producer, mq.Consumer, func()) {
+func setupMQ(cfg config.RocketMQConfig) (mq.Producer, mq.Consumer, func(), bool) {
 	nameServers := splitCSV(cfg.NameServer)
 	if len(nameServers) == 0 {
 		producer := mq.NewNoopProducer()
 		consumer := mq.NewNoopConsumer()
-		return producer, consumer, func() {}
+		return producer, consumer, func() {}, false
 	}
 
 	producer, err := mq.NewRocketProducer(mq.RocketProducerConfig{
@@ -558,7 +591,7 @@ func setupMQ(cfg config.RocketMQConfig) (mq.Producer, mq.Consumer, func()) {
 		slog.Warn("rocketmq producer unavailable, fallback to noop", "err", err)
 		noopProducer := mq.NewNoopProducer()
 		noopConsumer := mq.NewNoopConsumer()
-		return noopProducer, noopConsumer, func() {}
+		return noopProducer, noopConsumer, func() {}, false
 	}
 
 	consumerGroup := cfg.Producer.Group
@@ -589,7 +622,12 @@ func setupMQ(cfg config.RocketMQConfig) (mq.Producer, mq.Consumer, func()) {
 			slog.Warn("mq consumer shutdown failed", "err", err)
 		}
 	}
-	return producer, consumer, shutdown
+	return producer, consumer, shutdown, consumer != nil && !isNoopConsumer(consumer)
+}
+
+func isNoopConsumer(consumer mq.Consumer) bool {
+	_, ok := consumer.(*mq.NoopConsumer)
+	return ok
 }
 
 func registerIntentRoutes(api *gin.RouterGroup, intentTreeHandler *intentHandler.IntentHandler) {

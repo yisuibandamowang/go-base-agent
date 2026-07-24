@@ -15,6 +15,7 @@ import (
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/framework/config"
+	"go-base-agent/internal/framework/db"
 
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
@@ -22,6 +23,10 @@ import (
 
 type scheduleFileWriter interface {
 	Put(docID string, name string, data []byte)
+}
+
+type scheduleKnowledgeFileWriter interface {
+	PutWithCollection(ctx context.Context, collectionName, docID, name string, data []byte) error
 }
 
 type scheduleChunkStarter interface {
@@ -38,6 +43,7 @@ const scheduleLeaseLostNote = "（调度锁已失效，未写回调度状态）"
 type DocumentScheduleService struct {
 	db                *gorm.DB
 	docRepo           *repo.KnowledgeDocumentRepo
+	kbRepo            *repo.KnowledgeBaseRepo
 	scheduleRepo      *repo.KnowledgeDocumentScheduleRepo
 	fileStore         scheduleFileWriter
 	chunkStarter      scheduleChunkStarter
@@ -49,10 +55,13 @@ type DocumentScheduleService struct {
 	lockRenewObserver func(scheduleID string, lockUntil time.Time)
 }
 
+const scheduleRunningRecoveryTimeout = 10 * time.Minute
+
 // NewDocumentScheduleService 创建文档定时刷新服务。
 func NewDocumentScheduleService(
 	db *gorm.DB,
 	docRepo *repo.KnowledgeDocumentRepo,
+	kbRepo *repo.KnowledgeBaseRepo,
 	scheduleRepo *repo.KnowledgeDocumentScheduleRepo,
 	fileStore scheduleFileWriter,
 	chunkStarter scheduleChunkStarter,
@@ -65,6 +74,7 @@ func NewDocumentScheduleService(
 	return &DocumentScheduleService{
 		db:           db,
 		docRepo:      docRepo,
+		kbRepo:       kbRepo,
 		scheduleRepo: scheduleRepo,
 		fileStore:    fileStore,
 		chunkStarter: chunkStarter,
@@ -98,12 +108,20 @@ func (s *DocumentScheduleService) Run(ctx context.Context) {
 	if delay <= 0 {
 		delay = 10 * time.Second
 	}
+	recoveryTicker := time.NewTicker(time.Minute)
+	defer recoveryTicker.Stop()
 	ticker := time.NewTicker(delay)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-recoveryTicker.C:
+			if recovered, err := s.RecoverStuckRunningDocuments(ctx); err != nil {
+				slog.Warn("knowledge document running recovery failed", "err", err)
+			} else if recovered > 0 {
+				slog.Warn("reset stuck running documents", "count", recovered, "timeout", scheduleRunningRecoveryTimeout.String())
+			}
 		case <-ticker.C:
 			if _, err := s.ScanDue(ctx); err != nil {
 				slog.Warn("knowledge document schedule scan failed", "err", err)
@@ -132,6 +150,26 @@ func (s *DocumentScheduleService) ScanDue(ctx context.Context) (int, error) {
 		}
 	}
 	return len(schedules), nil
+}
+
+// RecoverStuckRunningDocuments 将超时卡在 running 的文档重置为 failed。
+func (s *DocumentScheduleService) RecoverStuckRunningDocuments(ctx context.Context) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	cutoff := s.now().Add(-scheduleRunningRecoveryTimeout)
+	result := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.KnowledgeDocument{}).
+		Where("status = ? AND update_time < ?", "running", cutoff).
+		Updates(map[string]any{
+			"status":      "failed",
+			"updated_by":  "system",
+			"update_time": s.now(),
+		})
+	if result.Error != nil {
+		return 0, fmt.Errorf("recover stuck running documents: %w", result.Error)
+	}
+	return result.RowsAffected, nil
 }
 
 func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model.KnowledgeDocumentSchedule, startedAt time.Time) error {
@@ -173,7 +211,17 @@ func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model
 	if doc.Status == "running" {
 		return s.markSkipped(ctx, schedule, startedAt, "文档正在分块中，跳过本次调度", remoteDoc, contentHash)
 	}
-	s.fileStore.Put(doc.ID, fileName, remoteDoc.Content)
+	if writer, ok := s.fileStore.(scheduleKnowledgeFileWriter); ok && s.kbRepo != nil {
+		if kb, err := s.kbRepo.FindByID(ctx, doc.KbID); err == nil && kb != nil && strings.TrimSpace(kb.CollectionName) != "" {
+			if err := writer.PutWithCollection(ctx, kb.CollectionName, doc.ID, fileName, remoteDoc.Content); err != nil {
+				return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("save file content: %w", err), remoteDoc)
+			}
+		} else {
+			s.fileStore.Put(doc.ID, fileName, remoteDoc.Content)
+		}
+	} else {
+		s.fileStore.Put(doc.ID, fileName, remoteDoc.Content)
+	}
 	if err := s.updateDocumentAfterFetch(ctx, doc, remoteDoc, fileName); err != nil {
 		return s.markFailed(ctx, schedule, startedAt, err, remoteDoc)
 	}

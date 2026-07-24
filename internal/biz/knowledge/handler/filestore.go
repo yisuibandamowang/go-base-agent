@@ -24,10 +24,11 @@ type FileStore struct {
 }
 
 type fileStoreBackend interface {
-	Put(ctx context.Context, docID, name string, data []byte) error
-	Get(ctx context.Context, docID string) (*storedFile, bool, error)
-	Read(ctx context.Context, docID string) ([]byte, error)
-	Delete(ctx context.Context, docID string) error
+	Put(ctx context.Context, collectionName, docID, name string, data []byte) error
+	Get(ctx context.Context, collectionName, docID string) (*storedFile, bool, error)
+	Read(ctx context.Context, collectionName, docID string) ([]byte, error)
+	Delete(ctx context.Context, collectionName, docID string) error
+	DeleteKnowledgeSpace(ctx context.Context, collectionName string) error
 }
 
 type memoryFileBackend struct {
@@ -88,12 +89,17 @@ func (s *FileStore) Put(docID string, name string, data []byte) {
 	}
 }
 
-// PutWithContext stores a file and returns storage errors to the caller.
-func (s *FileStore) PutWithContext(ctx context.Context, docID string, name string, data []byte) error {
+// PutWithCollection stores a file under the given knowledge collection.
+func (s *FileStore) PutWithCollection(ctx context.Context, collectionName, docID, name string, data []byte) error {
 	if s == nil || s.backend == nil {
 		return fmt.Errorf("file store backend is nil")
 	}
-	return s.backend.Put(ctx, docID, name, data)
+	return s.backend.Put(ctx, collectionName, docID, name, data)
+}
+
+// PutWithContext stores a file and returns storage errors to the caller.
+func (s *FileStore) PutWithContext(ctx context.Context, docID string, name string, data []byte) error {
+	return s.PutWithCollection(ctx, "", docID, name, data)
 }
 
 // Get retrieves a file.
@@ -101,7 +107,7 @@ func (s *FileStore) Get(docID string) (*storedFile, bool) {
 	if s == nil || s.backend == nil {
 		return nil, false
 	}
-	f, ok, err := s.backend.Get(context.Background(), docID)
+	f, ok, err := s.backend.Get(context.Background(), "", docID)
 	if err != nil {
 		slog.Warn("file store get failed", "docId", docID, "err", err)
 		return nil, false
@@ -109,12 +115,28 @@ func (s *FileStore) Get(docID string) (*storedFile, bool) {
 	return f, ok
 }
 
+// GetWithCollection retrieves a file from a knowledge collection.
+func (s *FileStore) GetWithCollection(ctx context.Context, collectionName, docID string) (*storedFile, bool, error) {
+	if s == nil || s.backend == nil {
+		return nil, false, fmt.Errorf("file store backend is nil")
+	}
+	return s.backend.Get(ctx, collectionName, docID)
+}
+
 // Read implements service.FileReader for chunk processing.
 func (s *FileStore) Read(docID string) ([]byte, error) {
 	if s == nil || s.backend == nil {
 		return nil, fmt.Errorf("file store backend is nil")
 	}
-	return s.backend.Read(context.Background(), docID)
+	return s.backend.Read(context.Background(), "", docID)
+}
+
+// ReadWithCollection reads a file from a knowledge collection.
+func (s *FileStore) ReadWithCollection(ctx context.Context, collectionName, docID string) ([]byte, error) {
+	if s == nil || s.backend == nil {
+		return nil, fmt.Errorf("file store backend is nil")
+	}
+	return s.backend.Read(ctx, collectionName, docID)
 }
 
 // Delete removes a stored file.
@@ -122,22 +144,38 @@ func (s *FileStore) Delete(ctx context.Context, docID string) error {
 	if s == nil || s.backend == nil {
 		return fmt.Errorf("file store backend is nil")
 	}
-	return s.backend.Delete(ctx, docID)
+	return s.backend.Delete(ctx, "", docID)
 }
 
-func (s *memoryFileBackend) Put(ctx context.Context, docID string, name string, data []byte) error {
+// DeleteWithCollection removes a stored file from a knowledge collection.
+func (s *FileStore) DeleteWithCollection(ctx context.Context, collectionName, docID string) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("file store backend is nil")
+	}
+	return s.backend.Delete(ctx, collectionName, docID)
+}
+
+// DeleteKnowledgeSpace removes all stored files for a knowledge collection.
+func (s *FileStore) DeleteKnowledgeSpace(ctx context.Context, collectionName string) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("file store backend is nil")
+	}
+	return s.backend.DeleteKnowledgeSpace(ctx, collectionName)
+}
+
+func (s *memoryFileBackend) Put(ctx context.Context, collectionName, docID string, name string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	copied := make([]byte, len(data))
 	copy(copied, data)
-	s.files[docID] = &storedFile{Name: name, Data: copied, ContentType: "application/octet-stream"}
+	s.files[s.objectKey(collectionName, docID)] = &storedFile{Name: name, Data: copied, ContentType: "application/octet-stream"}
 	return nil
 }
 
-func (s *memoryFileBackend) Get(ctx context.Context, docID string) (*storedFile, bool, error) {
+func (s *memoryFileBackend) Get(ctx context.Context, collectionName, docID string) (*storedFile, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	f, ok := s.files[docID]
+	f, ok := s.files[s.objectKey(collectionName, docID)]
 	if !ok {
 		return nil, false, nil
 	}
@@ -146,25 +184,52 @@ func (s *memoryFileBackend) Get(ctx context.Context, docID string) (*storedFile,
 	return &storedFile{Name: f.Name, ContentType: f.ContentType, Data: data}, true, nil
 }
 
-func (s *memoryFileBackend) Read(ctx context.Context, docID string) ([]byte, error) {
-	f, ok, err := s.Get(ctx, docID)
+func (s *memoryFileBackend) Read(ctx context.Context, collectionName, docID string) ([]byte, error) {
+	f, ok, err := s.Get(ctx, collectionName, docID)
 	if err != nil || !ok {
 		return nil, err
 	}
 	return f.Data, nil
 }
 
-func (s *memoryFileBackend) Delete(ctx context.Context, docID string) error {
+func (s *memoryFileBackend) Delete(ctx context.Context, collectionName, docID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.files, docID)
+	delete(s.files, s.objectKey(collectionName, docID))
 	return nil
+}
+
+func (s *memoryFileBackend) DeleteKnowledgeSpace(ctx context.Context, collectionName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := s.collectionPrefix(collectionName)
+	for key := range s.files {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.files, key)
+		}
+	}
+	return nil
+}
+
+func (s *memoryFileBackend) objectKey(collectionName, docID string) string {
+	if strings.TrimSpace(collectionName) == "" {
+		return path.Join("documents", strings.TrimSpace(docID))
+	}
+	return path.Join("documents", strings.TrimSpace(collectionName), strings.TrimSpace(docID))
+}
+
+func (s *memoryFileBackend) collectionPrefix(collectionName string) string {
+	if strings.TrimSpace(collectionName) == "" {
+		return "documents/"
+	}
+	return path.Join("documents", strings.TrimSpace(collectionName)) + "/"
 }
 
 type s3API interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 }
 
 type s3FileBackend struct {
@@ -172,8 +237,8 @@ type s3FileBackend struct {
 	bucket string
 }
 
-func (s *s3FileBackend) Put(ctx context.Context, docID, name string, data []byte) error {
-	key := s.objectKey(docID)
+func (s *s3FileBackend) Put(ctx context.Context, collectionName, docID, name string, data []byte) error {
+	key := s.objectKey(collectionName, docID)
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
@@ -189,8 +254,8 @@ func (s *s3FileBackend) Put(ctx context.Context, docID, name string, data []byte
 	return nil
 }
 
-func (s *s3FileBackend) Get(ctx context.Context, docID string) (*storedFile, bool, error) {
-	key := s.objectKey(docID)
+func (s *s3FileBackend) Get(ctx context.Context, collectionName, docID string) (*storedFile, bool, error) {
+	key := s.objectKey(collectionName, docID)
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -217,16 +282,16 @@ func (s *s3FileBackend) Get(ctx context.Context, docID string) (*storedFile, boo
 	return &storedFile{Name: name, ContentType: contentType, Data: data}, true, nil
 }
 
-func (s *s3FileBackend) Read(ctx context.Context, docID string) ([]byte, error) {
-	f, ok, err := s.Get(ctx, docID)
+func (s *s3FileBackend) Read(ctx context.Context, collectionName, docID string) ([]byte, error) {
+	f, ok, err := s.Get(ctx, collectionName, docID)
 	if err != nil || !ok {
 		return nil, err
 	}
 	return f.Data, nil
 }
 
-func (s *s3FileBackend) Delete(ctx context.Context, docID string) error {
-	key := s.objectKey(docID)
+func (s *s3FileBackend) Delete(ctx context.Context, collectionName, docID string) error {
+	key := s.objectKey(collectionName, docID)
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -237,6 +302,47 @@ func (s *s3FileBackend) Delete(ctx context.Context, docID string) error {
 	return nil
 }
 
-func (s *s3FileBackend) objectKey(docID string) string {
-	return path.Join("documents", strings.TrimSpace(docID))
+func (s *s3FileBackend) DeleteKnowledgeSpace(ctx context.Context, collectionName string) error {
+	prefix := s.collectionPrefix(collectionName)
+	var token *string
+	for {
+		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return fmt.Errorf("list objects %s prefix %s: %w", s.bucket, prefix, err)
+		}
+		for _, obj := range out.Contents {
+			if obj.Key == nil || *obj.Key == "" {
+				continue
+			}
+			if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(s.bucket),
+				Key:    obj.Key,
+			}); err != nil {
+				return fmt.Errorf("delete object %s/%s: %w", s.bucket, *obj.Key, err)
+			}
+		}
+		if out.IsTruncated == nil || !*out.IsTruncated {
+			break
+		}
+		token = out.NextContinuationToken
+	}
+	return nil
+}
+
+func (s *s3FileBackend) objectKey(collectionName, docID string) string {
+	if strings.TrimSpace(collectionName) == "" {
+		return path.Join("documents", strings.TrimSpace(docID))
+	}
+	return path.Join("documents", strings.TrimSpace(collectionName), strings.TrimSpace(docID))
+}
+
+func (s *s3FileBackend) collectionPrefix(collectionName string) string {
+	if strings.TrimSpace(collectionName) == "" {
+		return "documents/"
+	}
+	return path.Join("documents", strings.TrimSpace(collectionName)) + "/"
 }

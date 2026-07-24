@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	knowledgeDto "go-base-agent/internal/biz/knowledge/dto"
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
+	"go-base-agent/internal/biz/rag"
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/mq"
 
@@ -20,7 +22,13 @@ import (
 )
 
 type capturingVectorSpaceCleaner struct {
-	dropCalls []string
+	ensureCalls []string
+	dropCalls   []string
+}
+
+func (c *capturingVectorSpaceCleaner) EnsureVectorSpace(_ context.Context, spec rag.VectorSpaceSpec) error {
+	c.ensureCalls = append(c.ensureCalls, spec.SpaceID.Name)
+	return nil
 }
 
 func (c *capturingVectorSpaceCleaner) DropVectorSpace(_ context.Context, collectionName string) error {
@@ -175,6 +183,41 @@ func TestKnowledgeBaseService_DeleteDropsVectorSpace(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseService_CreateEnsuresVectorSpace(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	vecStore := &capturingVectorSpaceCleaner{}
+	svc.SetVectorStore(vecStore)
+
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	kb, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "创建时确保向量空间",
+		EmbeddingModel: "qwen-emb-8b",
+		CollectionName: "kb_ensure",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create knowledge base: %v", err)
+	}
+	if kb == nil {
+		t.Fatal("expected knowledge base response")
+	}
+	if len(vecStore.ensureCalls) != 1 || vecStore.ensureCalls[0] != "kb_ensure" {
+		t.Fatalf("expected vector space ensure for kb_ensure, got %+v", vecStore.ensureCalls)
+	}
+}
+
 func TestKnowledgeBaseService_DeletePublishesCleanupEventWhenMQEnabled(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -225,6 +268,46 @@ func TestKnowledgeBaseService_DeletePublishesCleanupEventWhenMQEnabled(t *testin
 	}
 }
 
+func TestKnowledgeBaseService_DeleteRollsBackWhenMQSendFails(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	svc.SetMQProducer(failingKnowledgeMQProducer{}, true)
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	kb, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "回滚删除的知识库",
+		EmbeddingModel: "qwen-emb-8b",
+		CollectionName: "kb_mq_fail",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create knowledge base: %v", err)
+	}
+	if err := svc.Delete(ctx, kb.ID); err == nil {
+		t.Fatal("expected delete to fail when mq send fails")
+	}
+
+	var activeCount int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeBase{}).
+		Where("id = ? AND deleted = 0", kb.ID).
+		Count(&activeCount).Error; err != nil {
+		t.Fatalf("count active kb: %v", err)
+	}
+	if activeCount != 1 {
+		t.Fatalf("expected knowledge base delete to roll back, got %d", activeCount)
+	}
+}
+
 type capturingKnowledgeMQProducer struct {
 	messages []mq.Message
 }
@@ -233,3 +316,28 @@ func (p *capturingKnowledgeMQProducer) Send(ctx context.Context, msg mq.Message)
 	p.messages = append(p.messages, msg)
 	return &mq.SendResult{MsgID: "msg-1", Status: "SEND_OK"}, nil
 }
+
+func (p *capturingKnowledgeMQProducer) SendInTransaction(ctx context.Context, msg mq.Message, executor mq.TransactionExecutor) (*mq.SendResult, error) {
+	p.messages = append(p.messages, msg)
+	if executor != nil {
+		if err := executor(ctx, msg); err != nil {
+			return nil, err
+		}
+	}
+	return &mq.SendResult{MsgID: "msg-1", Status: "SEND_OK"}, nil
+}
+
+func (p *capturingKnowledgeMQProducer) RegisterTransactionChecker(topic string, checker mq.TransactionChecker) {
+}
+
+type failingKnowledgeMQProducer struct{}
+
+func (failingKnowledgeMQProducer) Send(context.Context, mq.Message) (*mq.SendResult, error) {
+	return nil, fmt.Errorf("send failed")
+}
+
+func (failingKnowledgeMQProducer) SendInTransaction(context.Context, mq.Message, mq.TransactionExecutor) (*mq.SendResult, error) {
+	return nil, fmt.Errorf("send failed")
+}
+
+func (failingKnowledgeMQProducer) RegisterTransactionChecker(string, mq.TransactionChecker) {}

@@ -32,6 +32,29 @@ func (c *fakeRocketProducerClient) SendSync(ctx context.Context, msgs ...*primit
 	return c.result, c.err
 }
 
+type fakeRocketTransactionProducerClient struct {
+	started  bool
+	shutdown bool
+	sent     []*primitive.Message
+	result   *primitive.TransactionSendResult
+	err      error
+}
+
+func (c *fakeRocketTransactionProducerClient) Start() error {
+	c.started = true
+	return nil
+}
+
+func (c *fakeRocketTransactionProducerClient) Shutdown() error {
+	c.shutdown = true
+	return nil
+}
+
+func (c *fakeRocketTransactionProducerClient) SendMessageInTransaction(ctx context.Context, msg *primitive.Message) (*primitive.TransactionSendResult, error) {
+	c.sent = append(c.sent, msg)
+	return c.result, c.err
+}
+
 type fakeRocketPushConsumerClient struct {
 	started     bool
 	shutdown    bool
@@ -96,6 +119,89 @@ func TestRocketProducer_SendReturnsClientError(t *testing.T) {
 	_, err := producer.Send(context.Background(), Message{Topic: "topic-a"})
 	if err == nil || err.Error() != "rocketmq send sync: broker unavailable" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRocketProducer_SendInTransactionStartsAndMapsMessage(t *testing.T) {
+	sendClient := &fakeRocketProducerClient{result: &primitive.SendResult{MsgID: "msg-1", Status: primitive.SendOK}}
+	txClient := &fakeRocketTransactionProducerClient{result: &primitive.TransactionSendResult{
+		SendResult: &primitive.SendResult{MsgID: "msg-1", Status: primitive.SendOK},
+		State:      primitive.CommitMessageState,
+	}}
+	producer := NewRocketProducerWithClients(sendClient, txClient)
+
+	result, err := producer.SendInTransaction(context.Background(), Message{
+		Topic:   "topic-a",
+		Keys:    "key-a",
+		BizDesc: "事务消息",
+		Body:    []byte(`{"id":1}`),
+	}, func(ctx context.Context, msg Message) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("transaction send failed: %v", err)
+	}
+	if !sendClient.started || !txClient.started {
+		t.Fatal("expected both producers to start lazily before first send")
+	}
+	if result.MsgID != "msg-1" || result.Status != "SEND_OK" {
+		t.Fatalf("unexpected send result: %+v", result)
+	}
+	if len(txClient.sent) != 1 {
+		t.Fatalf("expected one transaction message, got %d", len(txClient.sent))
+	}
+	if txClient.sent[0].GetProperty(transactionExecutionIDKey) == "" {
+		t.Fatal("expected transaction execution id to be attached to message")
+	}
+}
+
+func TestRocketTransactionListenerDispatchesExecutorAndChecker(t *testing.T) {
+	producer := newRocketProducer(nil, nil)
+	execCalled := false
+	producer.registerTransactionExecution("txn-1", transactionExecution{
+		ctx: context.Background(),
+		executor: func(ctx context.Context, msg Message) error {
+			execCalled = true
+			if msg.Topic != "topic-a" || msg.Keys != "key-a" {
+				t.Fatalf("unexpected executor message: %+v", msg)
+			}
+			return nil
+		},
+	})
+	execState := producer.transaction.ExecuteLocalTransaction(&primitive.Message{
+		Topic: "topic-a",
+		Body:  []byte(`{"id":1}`),
+	})
+	if execState != primitive.RollbackMessageState {
+		t.Fatalf("expected rollback without txn id, got %v", execState)
+	}
+	msg := primitive.NewMessage("topic-a", []byte(`{"id":1}`))
+	msg.WithKeys([]string{"key-a"})
+	msg.WithProperty(transactionExecutionIDKey, "txn-1")
+	execState = producer.transaction.ExecuteLocalTransaction(msg)
+	if execState != primitive.CommitMessageState {
+		t.Fatalf("expected commit, got %v", execState)
+	}
+	if !execCalled {
+		t.Fatal("expected executor to be called")
+	}
+
+	producer.RegisterTransactionChecker("topic-a", func(ctx context.Context, msg Message) (bool, error) {
+		if msg.Topic != "topic-a" || msg.Keys != "key-a" {
+			t.Fatalf("unexpected checker message: %+v", msg)
+		}
+		return true, nil
+	})
+	checkMsg := &primitive.MessageExt{
+		Message: primitive.Message{
+			Topic: "topic-a",
+			Body:  []byte(`{"id":1}`),
+		},
+	}
+	checkMsg.WithKeys([]string{"key-a"})
+	checkState := producer.transaction.CheckLocalTransaction(checkMsg)
+	if checkState != primitive.CommitMessageState {
+		t.Fatalf("expected commit from checker, got %v", checkState)
 	}
 }
 

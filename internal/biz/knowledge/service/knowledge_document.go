@@ -22,7 +22,9 @@ import (
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/repo"
 	"go-base-agent/internal/biz/rag"
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/db"
+	"go-base-agent/internal/framework/mq"
 	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
 
@@ -45,6 +47,8 @@ type DocumentService struct {
 	parserRegistry             *parser.Registry
 	llm                        chat.LLMService
 	scheduleMinIntervalSeconds int
+	mqProducer                 mq.Producer
+	mqEnabled                  bool
 }
 
 type knowledgeBaseFinder interface {
@@ -62,6 +66,14 @@ type vectorStore interface {
 // FileReader reads file content for chunk processing.
 type FileReader interface {
 	Read(docID string) ([]byte, error)
+}
+
+type knowledgeFileCollectionReader interface {
+	ReadWithCollection(ctx context.Context, collectionName, docID string) ([]byte, error)
+}
+
+type knowledgeFileCollectionDeleter interface {
+	DeleteWithCollection(ctx context.Context, collectionName, docID string) error
 }
 
 type fileDeleter interface {
@@ -122,6 +134,33 @@ func (s *DocumentService) SetLLMService(llm chat.LLMService) {
 // SetScheduleMinIntervalSeconds 设置文档调度最小周期秒数。
 func (s *DocumentService) SetScheduleMinIntervalSeconds(seconds int) {
 	s.scheduleMinIntervalSeconds = seconds
+}
+
+// GetKnowledgeBase 返回知识库详情，供文件存储按 collection 组织对象 key。
+func (s *DocumentService) GetKnowledgeBase(ctx context.Context, kbID string) (*dto.KnowledgeBaseResp, error) {
+	if s == nil || s.kbRepo == nil {
+		return nil, fmt.Errorf("knowledge base repo is nil")
+	}
+	kb, err := s.kbRepo.FindByID(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	return &dto.KnowledgeBaseResp{
+		ID:             kb.ID,
+		Name:           kb.Name,
+		EmbeddingModel: kb.EmbeddingModel,
+		CollectionName: kb.CollectionName,
+		CreatedBy:      kb.CreatedBy,
+		UpdatedBy:      kb.UpdatedBy,
+		CreateTime:     kb.CreateTime.Format(time.RFC3339),
+		UpdateTime:     kb.UpdateTime.Format(time.RFC3339),
+	}, nil
+}
+
+// SetMQProducer 设置文档分块 MQ 生产者。
+func (s *DocumentService) SetMQProducer(producer mq.Producer, enabled bool) {
+	s.mqProducer = producer
+	s.mqEnabled = enabled
 }
 
 // CreateDocument 创建文档记录，状态为 pending。
@@ -244,7 +283,76 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 	if doc.Status == "running" {
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
-	// CAS 更新状态：仅当非 running 时更新
+	if async {
+		if s.mqEnabled && s.mqProducer != nil {
+			operator := userID
+			if user := appctx.User(ctx); user != nil && strings.TrimSpace(user.Username) != "" {
+				operator = user.Username
+			}
+			event := KnowledgeDocumentChunkEvent{
+				DocID:    docID,
+				Operator: operator,
+			}
+			body, err := json.Marshal(event)
+			if err != nil {
+				return fmt.Errorf("failed to marshal chunk event: %w", err)
+			}
+			_, err = s.mqProducer.SendInTransaction(ctx, mq.Message{
+				Topic:   KnowledgeDocumentChunkTopic,
+				Keys:    docID,
+				BizDesc: "文档分块",
+				Body:    body,
+			}, func(txCtx context.Context, msg mq.Message) error {
+				return s.db.WithContext(txCtx).Transaction(func(tx *gorm.DB) error {
+					result := tx.Model(&model.KnowledgeDocument{}).
+						Where("id = ? AND status != ?", docID, "running").
+						Updates(map[string]interface{}{
+							"status":      "running",
+							"updated_by":  userID,
+							"update_time": time.Now(),
+						})
+					if result.Error != nil {
+						return fmt.Errorf("failed to update document chunk status: %w", result.Error)
+					}
+					if result.RowsAffected == 0 {
+						return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
+					}
+					var updatedDoc model.KnowledgeDocument
+					if err := tx.WithContext(txCtx).Scopes(db.NotDeletedScope()).Where("id = ?", docID).First(&updatedDoc).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							return fmt.Errorf("文档不存在")
+						}
+						return fmt.Errorf("failed to load document after chunk start: %w", err)
+					}
+					if err := s.syncDocumentScheduleIfExistsTx(txCtx, tx, &updatedDoc); err != nil {
+						return err
+					}
+					return nil
+				})
+			})
+			if err != nil {
+				return fmt.Errorf("failed to send chunk event: %w", err)
+			}
+			return nil
+		}
+		result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
+			Where("id = ? AND status != ?", docID, "running").
+			Updates(map[string]interface{}{
+				"status":      "running",
+				"updated_by":  userID,
+				"update_time": time.Now(),
+			})
+		if result.Error != nil {
+			return fmt.Errorf("failed to update document chunk status: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
+		}
+		go func() {
+			_ = s.executeChunk(context.Background(), docID)
+		}()
+		return nil
+	}
 	result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
 		Where("id = ? AND status != ?", docID, "running").
 		Updates(map[string]interface{}{
@@ -252,16 +360,69 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 			"updated_by":  userID,
 			"update_time": time.Now(),
 		})
+	if result.Error != nil {
+		return fmt.Errorf("failed to update document chunk status: %w", result.Error)
+	}
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
-	if async {
-		go func() {
-			_ = s.executeChunk(context.Background(), docID)
-		}()
+	return s.executeChunk(ctx, docID)
+}
+
+func (s *DocumentService) collectionNameForKB(ctx context.Context, kbID string) string {
+	if s == nil || s.kbRepo == nil {
+		return ""
+	}
+	kb, err := s.kbRepo.FindByID(ctx, kbID)
+	if err != nil || kb == nil {
+		return ""
+	}
+	return strings.TrimSpace(kb.CollectionName)
+}
+
+func (s *DocumentService) readDocumentBytes(ctx context.Context, doc *model.KnowledgeDocument) ([]byte, error) {
+	if s.fileStore == nil {
+		return nil, fmt.Errorf("file store is nil")
+	}
+	if reader, ok := s.fileStore.(knowledgeFileCollectionReader); ok {
+		if collectionName := s.collectionNameForKB(ctx, doc.KbID); collectionName != "" {
+			if data, err := reader.ReadWithCollection(ctx, collectionName, doc.ID); err == nil {
+				return data, nil
+			}
+		}
+	}
+	return s.fileStore.Read(doc.ID)
+}
+
+func (s *DocumentService) deleteDocumentFile(ctx context.Context, doc *model.KnowledgeDocument) error {
+	if s.fileStore == nil {
 		return nil
 	}
-	return s.executeChunk(ctx, docID)
+	if deleter, ok := s.fileStore.(knowledgeFileCollectionDeleter); ok {
+		if collectionName := s.collectionNameForKB(ctx, doc.KbID); collectionName != "" {
+			if err := deleter.DeleteWithCollection(ctx, collectionName, doc.ID); err == nil {
+				return nil
+			}
+		}
+	}
+	if deleter, ok := s.fileStore.(fileDeleter); ok {
+		return deleter.Delete(ctx, doc.ID)
+	}
+	return nil
+}
+
+func (s *DocumentService) resetChunkStatus(ctx context.Context, docID, userID string) error {
+	result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
+		Where("id = ? AND status = ?", docID, "running").
+		Updates(map[string]interface{}{
+			"status":      "pending",
+			"updated_by":  userID,
+			"update_time": time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
 }
 
 // executeChunk 执行分块任务（对应 Java runChunkTask）。
@@ -442,7 +603,7 @@ func (s *DocumentService) documentIngestionNodes() []rag.IngestionNode {
 func (s *DocumentService) newDocumentIngestionContext(ctx context.Context, req ingestionDto.CreateTaskReq, doc *model.KnowledgeDocument, kb *model.KnowledgeBase) (*rag.IngestionContext, error) {
 	var rawBytes []byte
 	if s.fileStore != nil {
-		data, err := s.fileStore.Read(doc.ID)
+		data, err := s.readDocumentBytes(ctx, doc)
 		if err != nil {
 			return nil, fmt.Errorf("读取文件内容失败: %w", err)
 		}
@@ -557,7 +718,7 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 	extractStart := time.Now()
 
 	// 1. 读取文件内容
-	fileBytes, err := s.fileStore.Read(doc.ID)
+	fileBytes, err := s.readDocumentBytes(ctx, doc)
 	if err != nil {
 		return 0, 0, 0, nil, fmt.Errorf("读取文件内容失败: %w", err)
 	}
@@ -1111,10 +1272,8 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, id string) error {
 			return fmt.Errorf("delete document vectors: %w", err)
 		}
 	}
-	if deleter, ok := s.fileStore.(fileDeleter); ok {
-		if err := deleter.Delete(ctx, id); err != nil {
-			slog.Warn("delete document stored file failed", "docId", id, "err", err)
-		}
+	if err := s.deleteDocumentFile(ctx, doc); err != nil {
+		slog.Warn("delete document stored file failed", "docId", id, "err", err)
 	}
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeDocument,

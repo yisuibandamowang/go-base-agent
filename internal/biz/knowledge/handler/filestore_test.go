@@ -12,19 +12,23 @@ type failingFileBackend struct {
 	err error
 }
 
-func (f failingFileBackend) Put(ctx context.Context, docID, name string, data []byte) error {
+func (f failingFileBackend) Put(ctx context.Context, collectionName, docID, name string, data []byte) error {
 	return f.err
 }
 
-func (f failingFileBackend) Get(ctx context.Context, docID string) (*storedFile, bool, error) {
+func (f failingFileBackend) Get(ctx context.Context, collectionName, docID string) (*storedFile, bool, error) {
 	return nil, false, f.err
 }
 
-func (f failingFileBackend) Read(ctx context.Context, docID string) ([]byte, error) {
+func (f failingFileBackend) Read(ctx context.Context, collectionName, docID string) ([]byte, error) {
 	return nil, f.err
 }
 
-func (f failingFileBackend) Delete(ctx context.Context, docID string) error {
+func (f failingFileBackend) Delete(ctx context.Context, collectionName, docID string) error {
+	return f.err
+}
+
+func (f failingFileBackend) DeleteKnowledgeSpace(ctx context.Context, collectionName string) error {
 	return f.err
 }
 
@@ -84,5 +88,27 @@ func TestFileStoreDeleteReturnsBackendError(t *testing.T) {
 	err := store.Delete(context.Background(), "doc-1")
 	if !errors.Is(err, expected) {
 		t.Fatalf("expected backend error, got %v", err)
+	}
+}
+
+func TestFileStoreDeleteKnowledgeSpaceRemovesCollectionObjects(t *testing.T) {
+	store := NewFileStore()
+	if err := store.PutWithCollection(context.Background(), "kb-a", "doc-1", "a.md", []byte("alpha")); err != nil {
+		t.Fatalf("put kb-a doc-1: %v", err)
+	}
+	if err := store.PutWithCollection(context.Background(), "kb-b", "doc-2", "b.md", []byte("beta")); err != nil {
+		t.Fatalf("put kb-b doc-2: %v", err)
+	}
+
+	if err := store.DeleteKnowledgeSpace(context.Background(), "kb-a"); err != nil {
+		t.Fatalf("delete knowledge space: %v", err)
+	}
+	if _, ok, err := store.GetWithCollection(context.Background(), "kb-a", "doc-1"); err != nil {
+		t.Fatalf("get kb-a doc-1: %v", err)
+	} else if ok {
+		t.Fatal("expected kb-a doc to be deleted")
+	}
+	if data, err := store.ReadWithCollection(context.Background(), "kb-b", "doc-2"); err != nil || string(data) != "beta" {
+		t.Fatalf("expected kb-b doc to remain, data=%q err=%v", string(data), err)
 	}
 }

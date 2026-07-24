@@ -203,7 +203,7 @@ func TestRegisterIntentRoutesIncludesTermMappingDetailCompatibilityPath(t *testi
 }
 
 func TestSetupMQ_FallsBackToNoopWhenNameServerMissing(t *testing.T) {
-	producer, consumer, shutdown := setupMQ(config.RocketMQConfig{})
+	producer, consumer, shutdown, enabled := setupMQ(config.RocketMQConfig{})
 	defer shutdown()
 
 	if _, ok := producer.(interface {
@@ -213,6 +213,9 @@ func TestSetupMQ_FallsBackToNoopWhenNameServerMissing(t *testing.T) {
 	}
 	if _, ok := consumer.(*mq.NoopConsumer); !ok {
 		t.Fatalf("expected noop consumer without name server, got %T", consumer)
+	}
+	if enabled {
+		t.Fatal("expected mq to be disabled without name server")
 	}
 }
 
