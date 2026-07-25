@@ -13,6 +13,9 @@ import (
 	adminRepo "go-base-agent/internal/biz/admin/repo"
 	adminService "go-base-agent/internal/biz/admin/service"
 	conversationModel "go-base-agent/internal/biz/conversation/model"
+	userModel "go-base-agent/internal/biz/user/model"
+	frameworkctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/middleware"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
@@ -114,6 +117,85 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 			t.Fatalf("unexpected detail response: %s", w.Body.String())
 		}
 	})
+}
+
+func TestUserManagementRoutesRequireAdminRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	seeded := &userModel.User{Username: "target", Password: "pwd", Role: "user"}
+	if err := gdb.Create(seeded).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	svc := adminService.NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	h := adminHandler.NewAdminHandler(svc)
+	r := gin.New()
+	api := r.Group("/api/ragent", middleware.Auth(staticTokenParser{
+		users: map[string]*frameworkctx.LoginUser{
+			"user-token": {UserID: "user-1", Username: "normal", Role: "user"},
+		},
+	}))
+	api.GET("/users", h.ListUsers)
+	api.POST("/users", h.CreateUser)
+	api.PUT("/users/:id", h.UpdateUser)
+	api.DELETE("/users/:id", h.DeleteUser)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/ragent/users"},
+		{name: "create", method: http.MethodPost, path: "/api/ragent/users", body: `{"username":"created","password":"pwd"}`},
+		{name: "update", method: http.MethodPut, path: "/api/ragent/users/" + seeded.ID, body: `{"role":"admin"}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/ragent/users/" + seeded.ID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer user-token")
+			if tt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp["code"] == "0" || !strings.Contains(w.Body.String(), "无权限") {
+				t.Fatalf("expected non-admin request to be rejected, got %s", w.Body.String())
+			}
+		})
+	}
+}
+
+type staticTokenParser struct {
+	users map[string]*frameworkctx.LoginUser
+}
+
+func (p staticTokenParser) ParseToken(token string) (*frameworkctx.LoginUser, error) {
+	if user, ok := p.users[token]; ok {
+		return user, nil
+	}
+	return nil, nil
+}
+
+func (p staticTokenParser) TokenName() string {
+	return "Authorization"
 }
 
 func TestDashboardTrendsPassesQueryParameters(t *testing.T) {

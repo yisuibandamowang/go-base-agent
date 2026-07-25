@@ -3,10 +3,12 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"go-base-agent/internal/biz/admin/dto"
 	"go-base-agent/internal/biz/admin/service"
 	"go-base-agent/internal/framework/convention"
+	"go-base-agent/internal/framework/middleware"
 
 	"github.com/gin-gonic/gin"
 )
@@ -170,6 +172,9 @@ func (h *AdminHandler) DeleteSampleQuestion(c *gin.Context) {
 
 // ListUsers GET /api/ragent/admin/users
 func (h *AdminHandler) ListUsers(c *gin.Context) {
+	if !requireAdmin(c) {
+		return
+	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
 	users, total, err := h.svc.ListUsers(c.Request.Context(), page, size)
@@ -182,6 +187,9 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 
 // CreateUser POST /api/ragent/admin/users
 func (h *AdminHandler) CreateUser(c *gin.Context) {
+	if !requireAdmin(c) {
+		return
+	}
 	var req dto.CreateUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
@@ -197,6 +205,9 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 
 // UpdateUser PUT /api/ragent/admin/users/:id
 func (h *AdminHandler) UpdateUser(c *gin.Context) {
+	if !requireAdmin(c) {
+		return
+	}
 	id := c.Param("id")
 	var req dto.UpdateUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -213,10 +224,26 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 
 // DeleteUser DELETE /api/ragent/admin/users/:id
 func (h *AdminHandler) DeleteUser(c *gin.Context) {
+	if !requireAdmin(c) {
+		return
+	}
 	id := c.Param("id")
 	if err := h.svc.DeleteUser(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
+}
+
+func requireAdmin(c *gin.Context) bool {
+	user := middleware.GetLoginUser(c)
+	if user == nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "请先登录"))
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(user.Role), "admin") {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "无权限"))
+		return false
+	}
+	return true
 }

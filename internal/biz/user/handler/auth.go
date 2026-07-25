@@ -38,6 +38,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 // Logout POST /api/ragent/auth/logout
 func (h *AuthHandler) Logout(c *gin.Context) {
+	if err := h.svc.Logout(c.Request.Context(), middleware.GetAuthToken(c)); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 

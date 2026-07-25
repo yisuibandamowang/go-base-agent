@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -9,12 +10,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const keyLoginUser = "loginUser"
+const (
+	keyLoginUser = "loginUser"
+	keyAuthToken = "authToken"
+)
 
 // TokenParser 定义 token 解析接口，由 auth service 实现。
 type TokenParser interface {
 	ParseToken(tokenStr string) (*framework.LoginUser, error)
 	TokenName() string
+}
+
+type contextTokenParser interface {
+	ParseTokenWithContext(ctx context.Context, tokenStr string) (*framework.LoginUser, error)
 }
 
 // Auth 创建 JWT 认证中间件。
@@ -28,9 +36,10 @@ func Auth(parser TokenParser) gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		c.Set(keyAuthToken, token)
 
-		user, err := parser.ParseToken(token)
-		if err != nil {
+		user, err := parseToken(c.Request.Context(), parser, token)
+		if err != nil || user == nil {
 			c.Next()
 			return
 		}
@@ -43,6 +52,13 @@ func Auth(parser TokenParser) gin.HandlerFunc {
 	}
 }
 
+func parseToken(ctx context.Context, parser TokenParser, token string) (*framework.LoginUser, error) {
+	if contextual, ok := parser.(contextTokenParser); ok {
+		return contextual.ParseTokenWithContext(ctx, token)
+	}
+	return parser.ParseToken(token)
+}
+
 // GetLoginUser 从 gin.Context 获取当前登录用户。
 func GetLoginUser(c *gin.Context) *framework.LoginUser {
 	v, _ := c.Get(keyLoginUser)
@@ -50,6 +66,13 @@ func GetLoginUser(c *gin.Context) *framework.LoginUser {
 		return nil
 	}
 	return v.(*framework.LoginUser)
+}
+
+// GetAuthToken returns the token extracted by Auth middleware.
+func GetAuthToken(c *gin.Context) string {
+	v, _ := c.Get(keyAuthToken)
+	token, _ := v.(string)
+	return token
 }
 
 // RequireAuth 创建需要登录的中间件，未登录返回 401。

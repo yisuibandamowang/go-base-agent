@@ -35,6 +35,7 @@ import (
 	userHandler "go-base-agent/internal/biz/user/handler"
 	userRepoPkg "go-base-agent/internal/biz/user/repo"
 	userService "go-base-agent/internal/biz/user/service"
+	"go-base-agent/internal/framework/cache"
 	"go-base-agent/internal/framework/config"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/db"
@@ -116,7 +117,7 @@ func main() {
 	defer shutdownMQ()
 
 	userRepo := userRepoPkg.NewUserRepo(gormDB)
-	authSvc := userService.NewAuthService(userRepo, cfg.Auth)
+	authSvc := userService.NewAuthService(userRepo, cfg.Auth, cache.New(rdb))
 	authHandler := userHandler.NewAuthHandler(authSvc)
 	auditSvc := auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB))
 
