@@ -1509,6 +1509,9 @@ func (s *DocumentService) ToggleChunk(ctx context.Context, chunkID string, enabl
 	if err != nil {
 		return err
 	}
+	if doc.Status == "running" {
+		return fmt.Errorf("文档正在分块处理中，暂不支持修改 Chunk 状态")
+	}
 	if enabled == 1 && doc.Enabled != 1 {
 		return fmt.Errorf("文档未启用，无法启用 Chunk")
 	}
@@ -1560,6 +1563,9 @@ func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, i
 	doc, err := s.docRepo.FindByID(ctx, docID)
 	if err != nil {
 		return err
+	}
+	if doc.Status == "running" {
+		return fmt.Errorf("文档正在分块处理中，暂不支持批量修改 Chunk 状态")
 	}
 	if enabled == 1 && doc.Enabled != 1 {
 		return fmt.Errorf("文档未启用，无法启用 Chunk")

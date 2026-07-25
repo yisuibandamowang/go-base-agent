@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -344,7 +345,7 @@ func (h *DocumentHandler) ToggleChunk(c *gin.Context) {
 func (h *DocumentHandler) BatchToggleChunks(c *gin.Context) {
 	docID := c.Param("docId")
 	var req dto.BatchEnableChunksReq
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
 		return
 	}
@@ -443,14 +444,21 @@ func (h *DocumentHandler) Preview(c *gin.Context) {
 // File GET /knowledge-base/docs/:docId/file
 func (h *DocumentHandler) File(c *gin.Context) {
 	docID := c.Param("docId")
-	f, ok := h.fileStore.Get(docID)
-	if ok {
-		contentType := f.ContentType
-		if contentType == "" {
-			contentType = detectMIME(f.Name)
+	if h.fileStore != nil {
+		if h.svc != nil {
+			if doc, err := h.svc.GetDocument(c.Request.Context(), docID); err == nil && doc != nil {
+				if kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), doc.KbID); err == nil && kb != nil {
+					if f, ok, err := h.fileStore.GetWithCollection(c.Request.Context(), kb.CollectionName, docID); err == nil && ok {
+						sendStoredFile(c, f)
+						return
+					}
+				}
+			}
 		}
-		c.Data(http.StatusOK, contentType, f.Data)
-		return
+		if f, ok := h.fileStore.Get(docID); ok {
+			sendStoredFile(c, f)
+			return
+		}
 	}
 	// Fallback: return chunk content as inline text
 	content, err := h.svc.PreviewDocument(c.Request.Context(), docID)
@@ -459,6 +467,17 @@ func (h *DocumentHandler) File(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(content))
+}
+
+func sendStoredFile(c *gin.Context, f *storedFile) {
+	contentType := f.ContentType
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = detectMIME(f.Name)
+	}
+	if strings.TrimSpace(f.Name) != "" {
+		c.Header("Content-Disposition", `inline; filename="`+url.QueryEscape(f.Name)+`"`)
+	}
+	c.Data(http.StatusOK, contentType, f.Data)
 }
 
 func detectMIME(name string) string {
@@ -486,7 +505,13 @@ func detectMIME(name string) string {
 		return "text/markdown; charset=utf-8"
 	case ".xml":
 		return "application/xml; charset=utf-8"
-	case ".txt", ".csv", ".json":
+	case ".csv":
+		return "text/csv; charset=utf-8"
+	case ".xls":
+		return "application/vnd.ms-excel"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".txt", ".json":
 		return "text/plain; charset=utf-8"
 	default:
 		return "text/plain; charset=utf-8"

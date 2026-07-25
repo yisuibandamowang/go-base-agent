@@ -1552,6 +1552,72 @@ func TestDocumentService_BatchToggleChunksRequiresEnabledDocument(t *testing.T) 
 	}
 }
 
+func TestDocumentService_ToggleChunkRejectsRunningDocument(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 1, FileType: "md", Status: "running", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+	}
+	err = svc.ToggleChunk(context.Background(), chunk.ID, 0)
+	if err == nil || !strings.Contains(err.Error(), "文档正在分块处理中") {
+		t.Fatalf("expected running document validation error, got %v", err)
+	}
+}
+
+func TestDocumentService_BatchToggleChunksRejectsRunningDocument(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 1, FileType: "md", Status: "running", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+	}
+	err = svc.BatchToggleChunks(context.Background(), doc.ID, []string{chunk.ID}, 0)
+	if err == nil || !strings.Contains(err.Error(), "文档正在分块处理中") {
+		t.Fatalf("expected running document validation error, got %v", err)
+	}
+}
+
 func TestDocumentService_ToggleChunkSyncsVectors(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

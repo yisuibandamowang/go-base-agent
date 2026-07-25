@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -217,5 +218,104 @@ func TestBatchToggleChunksAcceptsJavaChunkIDsAndValueQuery(t *testing.T) {
 	}
 	if enabled != 0 {
 		t.Fatalf("expected chunk disabled by Java-compatible payload, got %d", enabled)
+	}
+}
+
+func TestBatchToggleChunksMissingBodyReturnsBusinessValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	doc := &model.KnowledgeDocument{KbID: kb.ID, DocName: "doc.md", FileURL: "upload://doc.md", FileType: "md", Status: "success", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	svc := service.NewDocumentService(repo.NewKnowledgeDocumentRepo(gdb), repo.NewKnowledgeChunkRepo(gdb), repo.NewKnowledgeBaseRepo(gdb), gdb, nil, nil, nil)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.PATCH("/api/ragent/knowledge-base/docs/:docId/chunks/batch-enable", h.BatchToggleChunks)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/ragent/knowledge-base/docs/"+doc.ID+"/chunks/batch-enable?value=false", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"code":"B000001"`) || !strings.Contains(body, "请指定需要操作的 Chunk") {
+		t.Fatalf("expected business validation error, got %s", body)
+	}
+	if strings.Contains(body, "参数校验失败") {
+		t.Fatalf("expected handler to allow missing body and delegate to service, got %s", body)
+	}
+}
+
+func TestDocumentFileReadsStoredObjectFromKnowledgeCollection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	doc := &model.KnowledgeDocument{KbID: kb.ID, DocName: "会员说明.md", FileURL: "upload://会员说明.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	fileStore := NewFileStore()
+	if err := fileStore.PutWithCollection(context.Background(), kb.CollectionName, doc.ID, doc.DocName, []byte("# 原始文件\n会员权益")); err != nil {
+		t.Fatalf("put collection file: %v", err)
+	}
+	svc := service.NewDocumentService(repo.NewKnowledgeDocumentRepo(gdb), repo.NewKnowledgeChunkRepo(gdb), repo.NewKnowledgeBaseRepo(gdb), gdb, nil, nil, nil)
+	h := NewDocumentHandler(svc, fileStore)
+	r := gin.New()
+	r.GET("/api/ragent/knowledge-base/docs/:docId/file", h.File)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/knowledge-base/docs/"+doc.ID+"/file", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := w.Body.String(); body != "# 原始文件\n会员权益" {
+		t.Fatalf("expected stored original file, got %q", body)
+	}
+	if contentType := w.Header().Get("Content-Type"); !strings.Contains(contentType, "text/markdown") {
+		t.Fatalf("expected markdown content type, got %q", contentType)
+	}
+}
+
+func TestDetectMIMEAlignsJavaDocumentFileTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		want string
+	}{
+		{name: "csv", file: "会员数据.csv", want: "text/csv"},
+		{name: "xls", file: "会员数据.xls", want: "application/vnd.ms-excel"},
+		{name: "xlsx", file: "会员数据.xlsx", want: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectMIME(tt.file); !strings.Contains(got, tt.want) {
+				t.Fatalf("expected %s content type to contain %q, got %q", tt.file, tt.want, got)
+			}
+		})
 	}
 }
