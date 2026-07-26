@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/admin/model"
@@ -146,20 +147,39 @@ func (r *SampleQuestionRepo) Create(ctx context.Context, sq *model.SampleQuestio
 }
 
 // List 分页查询示例问题。
-func (r *SampleQuestionRepo) List(ctx context.Context, page, size int) ([]model.SampleQuestion, int64, error) {
+func (r *SampleQuestionRepo) List(ctx context.Context, page, size int, keyword string) ([]model.SampleQuestion, int64, error) {
 	var (
 		items []model.SampleQuestion
 		total int64
 	)
 	query := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.SampleQuestion{})
+	if keyword = strings.TrimSpace(keyword); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where("title LIKE ? OR description LIKE ? OR question LIKE ?", like, like, like)
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count sample questions: %w", err)
 	}
-	err := query.Scopes(db.Paginate(page, size)).Order("create_time DESC").Find(&items).Error
+	err := query.Scopes(db.Paginate(page, size)).Order("update_time DESC").Find(&items).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("list sample questions: %w", err)
 	}
 	return items, total, nil
+}
+
+// ListRandom 随机查询示例问题。
+func (r *SampleQuestionRepo) ListRandom(ctx context.Context, limit int) ([]model.SampleQuestion, error) {
+	var items []model.SampleQuestion
+	if limit < 1 {
+		limit = 3
+	}
+	if err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Order("RANDOM()").
+		Limit(limit).
+		Find(&items).Error; err != nil {
+		return nil, fmt.Errorf("list random sample questions: %w", err)
+	}
+	return items, nil
 }
 
 // FindByID 根据 ID 查询。

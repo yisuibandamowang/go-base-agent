@@ -59,6 +59,93 @@ func TestAdminService_CreateUserRecordsAuditLog(t *testing.T) {
 	}
 }
 
+func TestAdminService_ProtectsDefaultAdminUser(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	defaultAdmin := &userModel.User{Username: "admin", Password: "pwd", Role: "admin"}
+	if err := gdb.Create(defaultAdmin).Error; err != nil {
+		t.Fatalf("seed default admin: %v", err)
+	}
+
+	svc := NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	ctx := context.Background()
+
+	if _, err := svc.CreateUser(ctx, adminDto.CreateUserReq{
+		Username: " ADMIN ",
+		Password: "secret",
+		Role:     "user",
+	}); err == nil || !strings.Contains(err.Error(), "默认管理员用户名不可用") {
+		t.Fatalf("expected default admin username create to be rejected, got %v", err)
+	}
+
+	newName := "root"
+	if _, err := svc.UpdateUser(ctx, defaultAdmin.ID, adminDto.UpdateUserReq{
+		Username: &newName,
+	}); err == nil || !strings.Contains(err.Error(), "默认管理员不允许修改或删除") {
+		t.Fatalf("expected default admin update to be rejected, got %v", err)
+	}
+
+	if err := svc.DeleteUser(ctx, defaultAdmin.ID); err == nil || !strings.Contains(err.Error(), "默认管理员不允许修改或删除") {
+		t.Fatalf("expected default admin delete to be rejected, got %v", err)
+	}
+}
+
+func TestAdminService_UserRoleAndUsernameValidationAlignsJava(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	alice := &userModel.User{Username: "alice", Password: "pwd", Role: "user"}
+	bob := &userModel.User{Username: "bob", Password: "pwd", Role: "user"}
+	if err := gdb.Create(alice).Error; err != nil {
+		t.Fatalf("seed alice: %v", err)
+	}
+	if err := gdb.Create(bob).Error; err != nil {
+		t.Fatalf("seed bob: %v", err)
+	}
+
+	svc := NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	ctx := context.Background()
+
+	if _, err := svc.CreateUser(ctx, adminDto.CreateUserReq{
+		Username: "charlie",
+		Password: "pwd",
+		Role:     "manager",
+	}); err == nil || !strings.Contains(err.Error(), "角色类型不合法") {
+		t.Fatalf("expected invalid create role to be rejected, got %v", err)
+	}
+
+	if _, err := svc.CreateUser(ctx, adminDto.CreateUserReq{
+		Username: " alice ",
+		Password: "pwd",
+		Role:     "user",
+	}); err == nil || !strings.Contains(err.Error(), "用户名已存在") {
+		t.Fatalf("expected duplicate create username to be rejected, got %v", err)
+	}
+
+	invalidRole := "manager"
+	if _, err := svc.UpdateUser(ctx, bob.ID, adminDto.UpdateUserReq{
+		Role: &invalidRole,
+	}); err == nil || !strings.Contains(err.Error(), "角色类型不合法") {
+		t.Fatalf("expected invalid update role to be rejected, got %v", err)
+	}
+
+	duplicateName := "alice"
+	if _, err := svc.UpdateUser(ctx, bob.ID, adminDto.UpdateUserReq{
+		Username: &duplicateName,
+	}); err == nil || !strings.Contains(err.Error(), "用户名已存在") {
+		t.Fatalf("expected duplicate update username to be rejected, got %v", err)
+	}
+}
+
 func TestAdminService_GetDashboardSupportsWindowOverviewShape(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -235,6 +322,92 @@ func TestAdminService_SampleQuestionRecordsAuditLogs(t *testing.T) {
 	}
 	if logs[2].OperationType != auditService.OperationDelete || !strings.Contains(logs[2].BeforeSnapshot, "如何续费会员") {
 		t.Fatalf("unexpected delete audit log: %+v", logs[2])
+	}
+}
+
+func TestAdminService_SampleQuestionCreateTrimsAndRejectsBlankQuestion(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&adminModel.SampleQuestion{}, &auditModel.BizChangeLog{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc := NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	svc.SetAuditRecorder(auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gdb)))
+
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	created, err := svc.CreateSampleQuestion(ctx, adminDto.CreateSampleQuestionReq{
+		Title:       "  标题  ",
+		Description: "  描述  ",
+		Question:    "  怎么开通会员？  ",
+	})
+	if err != nil {
+		t.Fatalf("create sample question: %v", err)
+	}
+	if created.Title != "标题" || created.Description != "描述" || created.Question != "怎么开通会员？" {
+		t.Fatalf("expected trimmed sample question, got %+v", created)
+	}
+
+	if _, err := svc.CreateSampleQuestion(ctx, adminDto.CreateSampleQuestionReq{
+		Question: "   ",
+	}); err == nil || !strings.Contains(err.Error(), "示例问题内容不能为空") {
+		t.Fatalf("expected blank question validation, got %v", err)
+	}
+}
+
+func TestAdminService_SampleQuestionListUsesKeywordAndUpdateOrder(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&adminModel.SampleQuestion{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Now()
+	records := []adminModel.SampleQuestion{
+		{Title: "A", Description: "会员权益", Question: "如何开通会员？"},
+		{Title: "B", Description: "普通", Question: "如何续费会员？"},
+		{Title: "C", Description: "普通", Question: "如何查看积分？"},
+	}
+	for i := range records {
+		if err := gdb.Create(&records[i]).Error; err != nil {
+			t.Fatalf("seed sample question %d: %v", i, err)
+		}
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[0].ID).
+		Updates(map[string]any{"update_time": now.Add(-2 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update time a: %v", err)
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[1].ID).
+		Updates(map[string]any{"update_time": now}).Error; err != nil {
+		t.Fatalf("update time b: %v", err)
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[2].ID).
+		Updates(map[string]any{"update_time": now.Add(-1 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update time c: %v", err)
+	}
+
+	svc := NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	items, total, err := svc.ListSampleQuestions(context.Background(), 1, 2, "会员")
+	if err != nil {
+		t.Fatalf("list sample questions: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("expected 2 matched questions, got %d", total)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 records on first page, got %d", len(items))
+	}
+	if items[0].ID != records[1].ID || items[1].ID != records[0].ID {
+		t.Fatalf("expected update_time desc ordering, got %+v", items)
 	}
 }
 

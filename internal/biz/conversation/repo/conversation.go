@@ -131,6 +131,26 @@ func (r *MessageRepo) LoadHistory(ctx context.Context, conversationID, userID st
 	return msgs, nil
 }
 
+// LoadLatestHistory 加载最新的会话消息历史，并按创建时间升序返回。
+func (r *MessageRepo) LoadLatestHistory(ctx context.Context, conversationID, userID string, limit int) ([]model.Message, error) {
+	if limit <= 0 {
+		return r.LoadHistory(ctx, conversationID, userID, 0)
+	}
+	var msgs []model.Message
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
+		Order("create_time DESC").
+		Limit(limit).
+		Find(&msgs).Error
+	if err != nil {
+		return nil, fmt.Errorf("load latest message history: %w", err)
+	}
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
 // LoadHistorySince 加载指定消息ID之后的消息。
 func (r *MessageRepo) LoadHistorySince(ctx context.Context, conversationID, userID, sinceID string) ([]model.Message, error) {
 	var msgs []model.Message

@@ -93,7 +93,7 @@ func searchKBTool(vectorDB *gorm.DB, emb embedding.Service, kbRepo *repo.Knowled
 				return errorContent(fmt.Sprintf("向量化失败: %v", err)), nil
 			}
 
-			kbs, _, err := kbRepo.List(ctx, 1, 100)
+			kbs, _, err := kbRepo.List(ctx, 1, 100, "")
 			if err != nil {
 				return errorContent(fmt.Sprintf("查询知识库失败: %v", err)), nil
 			}
@@ -178,7 +178,7 @@ func listKBsTool(kbRepo *repo.KnowledgeBaseRepo) *Tool {
 		Properties:  map[string]propDesc{},
 		Required:    nil,
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
-			kbs, _, err := kbRepo.List(ctx, 1, 100)
+			kbs, _, err := kbRepo.List(ctx, 1, 100, "")
 			if err != nil {
 				return errorContent(fmt.Sprintf("查询知识库失败: %v", err)), nil
 			}

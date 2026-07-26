@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +19,158 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	remoteBody := []byte("# 远端文档\n会员权益说明")
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		_, _ = w.Write(remoteBody)
+	}))
+	defer remote.Close()
+
+	svc := service.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+	fileStore := NewFileStore()
+	h := NewDocumentHandler(svc, fileStore)
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("sourceType", "url"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("sourceLocation", remote.URL+"/guide.md"); err != nil {
+		t.Fatalf("write sourceLocation: %v", err)
+	}
+	if err := writer.WriteField("chunkStrategy", "fixed_size"); err != nil {
+		t.Fatalf("write chunkStrategy: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kb.ID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Code string `json:"code"`
+		Data struct {
+			ID       string `json:"id"`
+			DocName  string `json:"docName"`
+			FileType string `json:"fileType"`
+			FileSize int64  `json:"fileSize"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if resp.Code != "0" {
+		t.Fatalf("expected success, got %s", w.Body.String())
+	}
+	if resp.Data.DocName != "guide.md" || resp.Data.FileType != "md" || resp.Data.FileSize != int64(len(remoteBody)) {
+		t.Fatalf("expected remote file metadata, got %s", w.Body.String())
+	}
+	stored, err := fileStore.ReadWithCollection(context.Background(), kb.CollectionName, resp.Data.ID)
+	if err != nil {
+		t.Fatalf("read stored remote file: %v", err)
+	}
+	if string(stored) != string(remoteBody) {
+		t.Fatalf("expected stored remote body %q, got %q", string(remoteBody), string(stored))
+	}
+}
+
+func TestUploadPipelineDocumentRequiresPipelineID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	svc := service.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "doc.md")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("# 文档")); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := writer.WriteField("sourceType", "file"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("processMode", "pipeline"); err != nil {
+		t.Fatalf("write processMode: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kb.ID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] == "0" || !strings.Contains(w.Body.String(), "使用Pipeline模式时，必须指定Pipeline ID") {
+		t.Fatalf("expected missing pipeline id failure, got %s", w.Body.String())
+	}
+	var count int64
+	if err := gdb.Model(&model.KnowledgeDocument{}).Where("kb_id = ? AND deleted = 0", kb.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count docs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected failed upload not to create document, got %d", count)
+	}
+}
 
 func TestCreateChunkCreatesStoredChunk(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -65,6 +219,64 @@ func TestCreateChunkCreatesStoredChunk(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected one stored chunk, got %d", count)
+	}
+}
+
+func TestUpdateChunkReturnsJavaStyleEmptySuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	doc := &model.KnowledgeDocument{KbID: kb.ID, DocName: "doc.md", FileURL: "upload://doc.md", FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	chunk := &model.KnowledgeChunk{KbID: kb.ID, DocID: doc.ID, ChunkIndex: 0, Content: "旧内容", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
+	svc := service.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.PUT("/api/ragent/knowledge-base/docs/:docId/chunks/:chunkId", h.UpdateChunk)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/ragent/knowledge-base/docs/"+doc.ID+"/chunks/"+chunk.ID, strings.NewReader(`{"content":"新内容"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] != "0" || resp["data"] != nil {
+		t.Fatalf("expected empty success response, got %s", w.Body.String())
+	}
+	var stored model.KnowledgeChunk
+	if err := gdb.First(&stored, "id = ?", chunk.ID).Error; err != nil {
+		t.Fatalf("load chunk: %v", err)
+	}
+	if stored.Content != "新内容" {
+		t.Fatalf("expected updated content, got %+v", stored)
 	}
 }
 

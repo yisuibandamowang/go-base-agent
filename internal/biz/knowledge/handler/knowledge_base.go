@@ -34,13 +34,13 @@ func (h *KnowledgeBaseHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success(resp.ID))
 }
 
 // List GET /knowledge-base
 func (h *KnowledgeBaseHandler) List(c *gin.Context) {
 	page, size := pagination(c)
-	records, total, err := h.svc.List(c.Request.Context(), page, size)
+	records, total, err := h.svc.List(c.Request.Context(), page, size, c.Query("name"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
@@ -67,12 +67,12 @@ func (h *KnowledgeBaseHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
 		return
 	}
-	resp, err := h.svc.Update(c.Request.Context(), id, req, userID(c))
+	_, err := h.svc.Update(c.Request.Context(), id, req, userID(c))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // Delete DELETE /knowledge-base/:id

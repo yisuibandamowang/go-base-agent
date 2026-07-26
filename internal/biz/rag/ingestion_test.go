@@ -147,11 +147,18 @@ func TestIngestionEngine_ConditionFalseSkipsNodeAndContinues(t *testing.T) {
 		},
 	}
 
-	if err := engine.Execute(context.Background(), &IngestionContext{}, pipeline); err != nil {
+	runCtx := &IngestionContext{}
+	if err := engine.Execute(context.Background(), runCtx, pipeline); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(calls) != 1 || calls[0] != "n2" {
 		t.Fatalf("expected skipped fetcher and executed parser, got %+v", calls)
+	}
+	if len(runCtx.Logs) != 2 {
+		t.Fatalf("expected skipped and executed node logs, got %+v", runCtx.Logs)
+	}
+	if runCtx.Logs[0].Message != "Skipped: 条件未满足" || runCtx.Logs[0].ErrorMessage != "" || !runCtx.Logs[0].Success {
+		t.Fatalf("expected Java-style skipped log, got %+v", runCtx.Logs[0])
 	}
 }
 

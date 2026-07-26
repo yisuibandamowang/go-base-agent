@@ -32,8 +32,33 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 	if err := gdb.AutoMigrate(&adminModel.SampleQuestion{}); err != nil {
 		t.Fatalf("migrate sample questions: %v", err)
 	}
-	if err := gdb.Create(&adminModel.SampleQuestion{Title: "t1", Question: "q1"}).Error; err != nil {
-		t.Fatalf("seed sample question: %v", err)
+	now := time.Now()
+	records := []adminModel.SampleQuestion{
+		{Title: "A", Description: "会员权益", Question: "如何开通会员？"},
+		{Title: "B", Description: "普通", Question: "如何续费会员？"},
+		{Title: "C", Description: "普通", Question: "如何查看积分？"},
+		{Title: "D", Description: "普通", Question: "如何使用礼品卡？"},
+	}
+	for i := range records {
+		if err := gdb.Create(&records[i]).Error; err != nil {
+			t.Fatalf("seed sample question %d: %v", i, err)
+		}
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[0].ID).
+		Updates(map[string]any{"update_time": now.Add(-3 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update time a: %v", err)
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[1].ID).
+		Updates(map[string]any{"update_time": now}).Error; err != nil {
+		t.Fatalf("update time b: %v", err)
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[2].ID).
+		Updates(map[string]any{"update_time": now.Add(-1 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update time c: %v", err)
+	}
+	if err := gdb.Model(&adminModel.SampleQuestion{}).Where("id = ?", records[3].ID).
+		Updates(map[string]any{"update_time": now.Add(-2 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update time d: %v", err)
 	}
 
 	adminRepoObj := adminRepo.NewAdminRepo(gdb)
@@ -43,38 +68,13 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 
 	r := gin.New()
 	r.GET("/api/ragent/rag/sample-questions", h.ListRAGSampleQuestions)
-	r.GET("/api/ragent/sample-questions", h.ListRAGSampleQuestions)
+	r.GET("/api/ragent/sample-questions", h.ListSampleQuestions)
 	r.GET("/api/ragent/sample-questions/:id", h.GetSampleQuestion)
 	r.GET("/api/ragent/admin/sample-questions", h.ListSampleQuestions)
 
-	for _, path := range []string{
-		"/api/ragent/rag/sample-questions",
-		"/api/ragent/sample-questions",
-	} {
-		t.Run(path+" returns array data for chat page", func(t *testing.T) {
-			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, path, nil)
-			r.ServeHTTP(w, req)
-
-			if w.Code != http.StatusOK {
-				t.Fatalf("expected 200, got %d", w.Code)
-			}
-			var resp map[string]interface{}
-			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			if resp["code"] != "0" {
-				t.Fatalf("expected code 0, got %v", resp["code"])
-			}
-			if _, ok := resp["data"].([]interface{}); !ok {
-				t.Fatalf("expected data array for chat page, got %T: %s", resp["data"], w.Body.String())
-			}
-		})
-	}
-
-	t.Run("admin sample questions keeps paged data", func(t *testing.T) {
+	t.Run("sample questions page uses current and keyword", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/ragent/admin/sample-questions", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/sample-questions?current=1&size=1&keyword=会员", nil)
 		r.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
@@ -86,20 +86,45 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 		}
 		data, ok := resp["data"].(map[string]interface{})
 		if !ok {
-			t.Fatalf("expected data object for admin page, got %T: %s", resp["data"], w.Body.String())
+			t.Fatalf("expected page object, got %T: %s", resp["data"], w.Body.String())
 		}
-		if _, ok := data["records"].([]interface{}); !ok {
-			t.Fatalf("expected data.records array for admin page, got %T: %s", data["records"], w.Body.String())
+		if data["current"] != float64(1) || data["size"] != float64(1) || data["total"] != float64(2) {
+			t.Fatalf("unexpected page metadata: %s", w.Body.String())
+		}
+		recordsData, ok := data["records"].([]interface{})
+		if !ok || len(recordsData) != 1 {
+			t.Fatalf("expected one record on first page, got %s", w.Body.String())
+		}
+		first, ok := recordsData[0].(map[string]interface{})
+		if !ok || first["id"] != records[1].ID {
+			t.Fatalf("expected newest matching record first, got %s", w.Body.String())
+		}
+	})
+
+	t.Run("rag sample questions returns default three items", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/sample-questions", nil)
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		data, ok := resp["data"].([]interface{})
+		if !ok {
+			t.Fatalf("expected array data, got %T: %s", resp["data"], w.Body.String())
+		}
+		if len(data) != 3 {
+			t.Fatalf("expected 3 random sample questions, got %d: %s", len(data), w.Body.String())
 		}
 	})
 
 	t.Run("sample question detail returns original record", func(t *testing.T) {
-		var seeded adminModel.SampleQuestion
-		if err := gdb.First(&seeded).Error; err != nil {
-			t.Fatalf("load seeded sample question: %v", err)
-		}
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/ragent/sample-questions/"+seeded.ID, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/sample-questions/"+records[0].ID, nil)
 		r.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
@@ -113,7 +138,7 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected detail object, got %T: %s", resp["data"], w.Body.String())
 		}
-		if data["id"] != seeded.ID || data["question"] != "q1" {
+		if data["id"] != records[0].ID || data["question"] != records[0].Question {
 			t.Fatalf("unexpected detail response: %s", w.Body.String())
 		}
 	})
@@ -180,6 +205,73 @@ func TestUserManagementRoutesRequireAdminRole(t *testing.T) {
 				t.Fatalf("expected non-admin request to be rejected, got %s", w.Body.String())
 			}
 		})
+	}
+}
+
+func TestUserListUsesJavaStyleCurrentKeywordAndUpdateTimeOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	olderAdmin := &userModel.User{Username: "older-admin", Password: "pwd", Role: "user"}
+	newerRoleAdmin := &userModel.User{Username: "alice", Password: "pwd", Role: "admin"}
+	ignoredUser := &userModel.User{Username: "bob", Password: "pwd", Role: "user"}
+	for _, u := range []*userModel.User{olderAdmin, newerRoleAdmin, ignoredUser} {
+		if err := gdb.Create(u).Error; err != nil {
+			t.Fatalf("seed user %s: %v", u.Username, err)
+		}
+	}
+	now := time.Now()
+	if err := gdb.Model(&userModel.User{}).Where("id = ?", olderAdmin.ID).
+		Updates(map[string]any{"create_time": now, "update_time": now.Add(-2 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update older admin time: %v", err)
+	}
+	if err := gdb.Model(&userModel.User{}).Where("id = ?", newerRoleAdmin.ID).
+		Updates(map[string]any{"create_time": now.Add(-3 * time.Hour), "update_time": now}).Error; err != nil {
+		t.Fatalf("update newer role admin time: %v", err)
+	}
+
+	svc := adminService.NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	h := adminHandler.NewAdminHandler(svc)
+	r := gin.New()
+	api := r.Group("/api/ragent", middleware.Auth(staticTokenParser{
+		users: map[string]*frameworkctx.LoginUser{
+			"admin-token": {UserID: "admin-1", Username: "admin", Role: "admin"},
+		},
+	}))
+	api.GET("/users", h.ListUsers)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/users?current=1&size=1&keyword=admin", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected page data, got %T: %s", resp["data"], w.Body.String())
+	}
+	if data["current"] != float64(1) || data["size"] != float64(1) || data["total"] != float64(2) {
+		t.Fatalf("unexpected page metadata: %s", w.Body.String())
+	}
+	records, ok := data["records"].([]interface{})
+	if !ok || len(records) != 1 {
+		t.Fatalf("expected one record, got %s", w.Body.String())
+	}
+	first, ok := records[0].(map[string]interface{})
+	if !ok || first["id"] != newerRoleAdmin.ID {
+		t.Fatalf("expected newest update_time matching user first, got %s", w.Body.String())
 	}
 }
 

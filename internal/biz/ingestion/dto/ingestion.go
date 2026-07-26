@@ -60,6 +60,8 @@ type CreateTaskReq struct {
 	Source        DocumentSourceReq `json:"source" binding:"required"`
 	Metadata      map[string]any    `json:"metadata"`
 	VectorSpaceID any               `json:"vectorSpaceId"`
+	RawBytes      []byte            `json:"-"`
+	MimeType      string            `json:"-"`
 }
 
 // IngestionResultResp 是摄取任务执行结果。

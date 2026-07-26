@@ -33,7 +33,17 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(&dto.LoginResp{Token: token}))
+	user, err := h.svc.ParseTokenWithContext(c.Request.Context(), token)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(&dto.LoginResp{
+		UserID: user.UserID,
+		Role:   user.Role,
+		Token:  token,
+		Avatar: user.Avatar,
+	}))
 }
 
 // Logout POST /api/ragent/auth/logout
@@ -53,6 +63,7 @@ func (h *AuthHandler) CurrentUser(c *gin.Context) {
 		return
 	}
 	resp := &dto.UserInfoResp{
+		UserID:   user.UserID,
 		ID:       user.UserID,
 		Username: user.Username,
 		Role:     user.Role,
@@ -69,14 +80,19 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 	var req struct {
-		OldPassword string `json:"oldPassword"`
-		NewPassword string `json:"newPassword"`
+		CurrentPassword string `json:"currentPassword"`
+		OldPassword     string `json:"oldPassword"`
+		NewPassword     string `json:"newPassword"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败"))
 		return
 	}
-	if err := h.svc.ChangePassword(c.Request.Context(), user.UserID, req.OldPassword, req.NewPassword); err != nil {
+	currentPassword := req.CurrentPassword
+	if currentPassword == "" {
+		currentPassword = req.OldPassword
+	}
+	if err := h.svc.ChangePassword(c.Request.Context(), user.UserID, currentPassword, req.NewPassword); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}

@@ -35,7 +35,6 @@ func TestIntentService_RecordsNodeAuditLogs(t *testing.T) {
 	})
 
 	created, err := svc.CreateNode(ctx, dto.CreateIntentReq{
-		KbID:       "kb-1",
 		IntentCode: "member.query",
 		Name:       "会员查询",
 		Level:      1,
@@ -230,5 +229,56 @@ func TestIntentService_RecordsTermMappingAuditLogs(t *testing.T) {
 	if logs[2].OperationType != auditService.OperationDelete ||
 		!strings.Contains(logs[2].BeforeSnapshot, `"targetTerm":"贵宾会员"`) {
 		t.Fatalf("unexpected delete audit log: %+v", logs[2])
+	}
+}
+
+func TestIntentService_CreateTermMappingAppliesJavaDefaultsAndTrim(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.QueryTermMapping{}); err != nil {
+		t.Fatalf("migrate mappings: %v", err)
+	}
+
+	svc := NewIntentService(repo.NewIntentRepo(gdb), repo.NewTermMappingRepo(gdb), gdb)
+	created, err := svc.CreateTermMapping(context.Background(), dto.CreateTermMappingReq{
+		SourceTerm: "  VIP  ",
+		TargetTerm: "  会员  ",
+		Remark:     "  常用说法  ",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create term mapping: %v", err)
+	}
+
+	if created.SourceTerm != "VIP" || created.TargetTerm != "会员" || created.Remark != "常用说法" {
+		t.Fatalf("expected trimmed fields, got %+v", created)
+	}
+	if created.MatchType != 1 || created.Priority != 0 || created.Enabled != 1 {
+		t.Fatalf("expected Java defaults matchType=1 priority=0 enabled=1, got %+v", created)
+	}
+}
+
+func TestIntentService_UpdateTermMappingRejectsBlankTerms(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.QueryTermMapping{}); err != nil {
+		t.Fatalf("migrate mappings: %v", err)
+	}
+	mapping := &model.QueryTermMapping{SourceTerm: "VIP", TargetTerm: "会员", MatchType: 1, Enabled: 1}
+	if err := gdb.Create(mapping).Error; err != nil {
+		t.Fatalf("seed mapping: %v", err)
+	}
+
+	svc := NewIntentService(repo.NewIntentRepo(gdb), repo.NewTermMappingRepo(gdb), gdb)
+	blankSource := "   "
+	if _, err := svc.UpdateTermMapping(context.Background(), mapping.ID, dto.UpdateTermMappingReq{SourceTerm: &blankSource}, "admin-1"); err == nil || !strings.Contains(err.Error(), "原始词不能为空") {
+		t.Fatalf("expected blank source term validation, got %v", err)
+	}
+	blankTarget := "   "
+	if _, err := svc.UpdateTermMapping(context.Background(), mapping.ID, dto.UpdateTermMappingReq{TargetTerm: &blankTarget}, "admin-1"); err == nil || !strings.Contains(err.Error(), "目标词不能为空") {
+		t.Fatalf("expected blank target term validation, got %v", err)
 	}
 }

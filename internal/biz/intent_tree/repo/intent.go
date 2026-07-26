@@ -48,6 +48,18 @@ func (r *IntentRepo) FindByIntentCode(ctx context.Context, intentCode string) (*
 	return &node, nil
 }
 
+// ExistsByIntentCode 查询未删除节点中指定 intent_code 是否存在。
+func (r *IntentRepo) ExistsByIntentCode(ctx context.Context, intentCode string) (bool, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.IntentNode{}).
+		Where("intent_code = ?", intentCode).
+		Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count intent node by code: %w", err)
+	}
+	return count > 0, nil
+}
+
 // ListByParent 查询指定父节点下的子节点列表。
 func (r *IntentRepo) ListByParent(ctx context.Context, parentCode string) ([]model.IntentNode, error) {
 	var nodes []model.IntentNode
@@ -179,6 +191,11 @@ func (r *TermMappingRepo) SoftDelete(ctx context.Context, id string) error {
 
 // ListByDomain 按领域查询映射列表。
 func (r *TermMappingRepo) ListByDomain(ctx context.Context, domain string, page, size int) ([]model.QueryTermMapping, int64, error) {
+	return r.ListByDomainAndKeyword(ctx, domain, "", page, size)
+}
+
+// ListByDomainAndKeyword 按领域和关键词查询映射列表。
+func (r *TermMappingRepo) ListByDomainAndKeyword(ctx context.Context, domain, keyword string, page, size int) ([]model.QueryTermMapping, int64, error) {
 	var (
 		mappings []model.QueryTermMapping
 		total    int64
@@ -187,11 +204,15 @@ func (r *TermMappingRepo) ListByDomain(ctx context.Context, domain string, page,
 	if domain != "" {
 		query = query.Where("domain = ?", domain)
 	}
+	if keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where("(source_term LIKE ? OR target_term LIKE ?)", like, like)
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count term mappings: %w", err)
 	}
 	err := query.Scopes(db.Paginate(page, size)).
-		Order("priority ASC, create_time DESC").
+		Order("priority ASC, update_time DESC").
 		Find(&mappings).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("list term mappings: %w", err)

@@ -9,9 +9,9 @@ type CreateKnowledgeBaseReq struct {
 
 // UpdateKnowledgeBaseReq 更新知识库请求。
 type UpdateKnowledgeBaseReq struct {
-	Name           string `json:"name" binding:"required"`
-	EmbeddingModel string `json:"embeddingModel" binding:"required"`
-	CollectionName string `json:"collectionName" binding:"required"`
+	Name           string `json:"name"`
+	EmbeddingModel string `json:"embeddingModel"`
+	CollectionName string `json:"collectionName"`
 }
 
 // KnowledgeBaseResp 知识库响应。
@@ -20,6 +20,7 @@ type KnowledgeBaseResp struct {
 	Name           string `json:"name"`
 	EmbeddingModel string `json:"embeddingModel"`
 	CollectionName string `json:"collectionName"`
+	DocumentCount  int64  `json:"documentCount"`
 	CreatedBy      string `json:"createdBy"`
 	UpdatedBy      string `json:"updatedBy"`
 	CreateTime     string `json:"createTime"`

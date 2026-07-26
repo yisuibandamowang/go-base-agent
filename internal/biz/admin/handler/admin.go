@@ -96,9 +96,9 @@ func (h *AdminHandler) TraceNodes(c *gin.Context) {
 
 // ListSampleQuestions GET /api/ragent/admin/sample-questions
 func (h *AdminHandler) ListSampleQuestions(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	page, _ := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
-	items, total, err := h.svc.ListSampleQuestions(c.Request.Context(), page, size)
+	items, total, err := h.svc.ListSampleQuestions(c.Request.Context(), page, size, c.Query("keyword"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
@@ -108,8 +108,7 @@ func (h *AdminHandler) ListSampleQuestions(c *gin.Context) {
 
 // ListRAGSampleQuestions GET /api/ragent/rag/sample-questions
 func (h *AdminHandler) ListRAGSampleQuestions(c *gin.Context) {
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
-	items, _, err := h.svc.ListSampleQuestions(c.Request.Context(), 1, size)
+	items, err := h.svc.ListRandomSampleQuestions(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
@@ -139,7 +138,7 @@ func (h *AdminHandler) CreateSampleQuestion(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success(resp.ID))
 }
 
 // UpdateSampleQuestion PUT /api/ragent/admin/sample-questions/:id
@@ -150,12 +149,12 @@ func (h *AdminHandler) UpdateSampleQuestion(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
 		return
 	}
-	resp, err := h.svc.UpdateSampleQuestion(c.Request.Context(), id, req)
+	_, err := h.svc.UpdateSampleQuestion(c.Request.Context(), id, req)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // DeleteSampleQuestion DELETE /api/ragent/admin/sample-questions/:id
@@ -175,9 +174,9 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 	if !requireAdmin(c) {
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	page, _ := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
-	users, total, err := h.svc.ListUsers(c.Request.Context(), page, size)
+	users, total, err := h.svc.ListUsers(c.Request.Context(), page, size, c.Query("keyword"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return

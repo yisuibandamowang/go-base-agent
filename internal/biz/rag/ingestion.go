@@ -116,6 +116,7 @@ type PipelineDefinition struct {
 type NodeResult struct {
 	Success        bool
 	ShouldContinue bool
+	Message        string
 	ErrorMessage   string
 }
 
@@ -182,7 +183,7 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 		visited[current.NodeID] = true
 
 		if !current.Enabled {
-			ctx2.appendNodeLog(current, NodeResult{Success: true, ShouldContinue: true, ErrorMessage: "DISABLED"}, 0)
+			ctx2.appendNodeLog(current, NodeResult{Success: true, ShouldContinue: true, Message: "Skipped: DISABLED"}, 0)
 			next, err := nextNode(nodeMap, current)
 			if err != nil {
 				ctx2.fail(err)
@@ -197,7 +198,7 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 		}
 		if e.conditionEvaluator != nil && !e.conditionEvaluator.Evaluate(ctx2, current.Condition) {
 			slog.Info("ingestion node skipped by condition", "nodeId", current.NodeID, "nodeType", current.NodeType)
-			ctx2.appendNodeLog(current, NodeResult{Success: true, ShouldContinue: true, ErrorMessage: "条件未满足"}, 0)
+			ctx2.appendNodeLog(current, NodeResult{Success: true, ShouldContinue: true, Message: "Skipped: 条件未满足"}, 0)
 			next, err := nextNode(nodeMap, current)
 			if err != nil {
 				ctx2.fail(err)
@@ -223,7 +224,7 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 		result := node.Execute(ctx, ctx2, current)
 		ctx2.appendNodeLog(current, result, time.Since(start).Milliseconds())
 		if !result.Success {
-			err := fmt.Errorf("node %s failed: %s", current.NodeID, result.ErrorMessage)
+			err := fmt.Errorf("node %s failed: %s", current.NodeID, nodeResultMessage(result))
 			ctx2.fail(err)
 			return err
 		}
@@ -249,19 +250,25 @@ func (c *IngestionContext) appendNodeLog(config NodeConfig, result NodeResult, d
 	if c == nil {
 		return
 	}
-	message := result.ErrorMessage
-	if message == "" {
-		message = "OK"
-	}
 	c.Logs = append(c.Logs, NodeLog{
 		NodeID:       config.NodeID,
 		NodeType:     NormalizeIngestionNodeType(config.NodeType),
-		Message:      message,
+		Message:      nodeResultMessage(result),
 		DurationMs:   durationMs,
 		Success:      result.Success,
 		ErrorMessage: result.ErrorMessage,
 		Output:       extractIngestionNodeOutput(c, config),
 	})
+}
+
+func nodeResultMessage(result NodeResult) string {
+	if strings.TrimSpace(result.Message) != "" {
+		return result.Message
+	}
+	if strings.TrimSpace(result.ErrorMessage) != "" {
+		return result.ErrorMessage
+	}
+	return "OK"
 }
 
 func (c *IngestionContext) fail(err error) {

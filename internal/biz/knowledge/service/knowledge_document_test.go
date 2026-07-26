@@ -12,6 +12,7 @@ import (
 	auditModel "go-base-agent/internal/biz/audit/model"
 	auditRepo "go-base-agent/internal/biz/audit/repo"
 	auditService "go-base-agent/internal/biz/audit/service"
+	"go-base-agent/internal/biz/core/parser"
 	ingestionDto "go-base-agent/internal/biz/ingestion/dto"
 	ingestionModel "go-base-agent/internal/biz/ingestion/model"
 	ingestionService "go-base-agent/internal/biz/ingestion/service"
@@ -21,6 +22,7 @@ import (
 	"go-base-agent/internal/biz/rag"
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/db"
+	"go-base-agent/internal/infra/chat"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -77,6 +79,42 @@ type fakeKnowledgeBaseFinder struct {
 
 func (f fakeKnowledgeBaseFinder) FindByID(context.Context, string) (*knowledgeModel.KnowledgeBase, error) {
 	return f.kb, nil
+}
+
+func newDocumentServiceTestContext(t *testing.T) (*gorm.DB, *knowledgeModel.KnowledgeBase, *DocumentService) {
+	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeChunk{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+	); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection_a",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	svc := &DocumentService{
+		docRepo:      knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo:    knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		scheduleRepo: knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		kbRepo:       knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:           gdb,
+		emb:          fakeEmbeddingService{},
+		vecStore:     &capturingVectorStore{},
+		fileStore:    fakeFileReader{},
+	}
+	return gdb, kb, svc
 }
 
 type failingVectorStore struct {
@@ -140,12 +178,27 @@ type fakeIngestionTaskStarter struct {
 	userID string
 	resp   *ingestionDto.IngestionResultResp
 	err    error
+	delay  time.Duration
 }
 
 func (f *fakeIngestionTaskStarter) Create(ctx context.Context, req ingestionDto.CreateTaskReq, userID string) (*ingestionDto.IngestionResultResp, error) {
 	f.req = req
 	f.userID = userID
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	return f.resp, f.err
+}
+
+type fakeIngestionPipelineGetter struct {
+	err error
+}
+
+func (f fakeIngestionPipelineGetter) Get(context.Context, string) (*ingestionDto.PipelineResp, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &ingestionDto.PipelineResp{ID: "pipe-1", Name: "默认流水线"}, nil
 }
 
 func TestDocumentService_StartChunkPublishesMQEventWhenEnabled(t *testing.T) {
@@ -274,6 +327,60 @@ func TestDocumentService_RunPipelineProcessCreatesIngestionTask(t *testing.T) {
 	}
 }
 
+func TestDocumentService_ExecuteChunkRecordsPipelineDuration(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeDocumentChunkLog{}); err != nil {
+		t.Fatalf("migrate tables: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:        "kb-1",
+		DocName:     "会员Agent说明.md",
+		FileType:    "md",
+		ProcessMode: "pipeline",
+		PipelineID:  "pipe-1",
+		Status:      "running",
+		CreatedBy:   "user-1",
+	}
+	doc.ID = "doc-1"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	starter := &fakeIngestionTaskStarter{
+		delay: 5 * time.Millisecond,
+		resp: &ingestionDto.IngestionResultResp{
+			TaskID:     "task-1",
+			PipelineID: "pipe-1",
+			Status:     "completed",
+			ChunkCount: 2,
+		},
+	}
+	svc := &DocumentService{
+		docRepo: knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:      gdb,
+	}
+	svc.SetIngestionTaskStarter(starter)
+
+	if err := svc.executeChunk(context.Background(), doc.ID); err != nil {
+		t.Fatalf("execute pipeline chunk: %v", err)
+	}
+	logs, _, err := svc.GetChunkLogs(context.Background(), doc.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("get chunk logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected one chunk log, got %d", len(logs))
+	}
+	if logs[0].ChunkDuration <= 0 {
+		t.Fatalf("expected pipeline execution duration to be recorded as chunkDuration, got %+v", logs[0])
+	}
+	if logs[0].OtherDuration >= logs[0].TotalDuration {
+		t.Fatalf("expected pipeline other duration to exclude chunk duration, got %+v", logs[0])
+	}
+}
+
 func TestDocumentService_CreateDocumentStoresPipelineMode(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -312,6 +419,161 @@ func TestDocumentService_CreateDocumentStoresPipelineMode(t *testing.T) {
 	}
 	if resp.SourceType != "file" {
 		t.Fatalf("expected local_file source type to normalize to file, got %+v", resp)
+	}
+}
+
+func TestDocumentService_CreateDocumentRejectsInvalidProcessMode(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+
+	_, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:     "会员Agent说明.md",
+		FileURL:     "upload://会员Agent说明.md",
+		FileType:    "md",
+		SourceType:  "file",
+		ProcessMode: "legacy",
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "不支持的处理模式") {
+		t.Fatalf("expected unsupported process mode rejection, got %v", err)
+	}
+
+	var count int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Count(&count).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no document created, got %d", count)
+	}
+}
+
+func TestDocumentService_CreateDocumentRejectsInvalidChunkConfig(t *testing.T) {
+	_, kb, svc := newDocumentServiceTestContext(t)
+
+	_, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:       "会员Agent说明.md",
+		FileURL:       "upload://会员Agent说明.md",
+		FileType:      "md",
+		SourceType:    "file",
+		ProcessMode:   "chunk",
+		ChunkStrategy: "fixed_size",
+		ChunkConfig:   `{"chunkSize":512}`,
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "分块参数缺少必要字段: overlapSize") {
+		t.Fatalf("expected missing chunk config field rejection, got %v", err)
+	}
+
+	_, err = svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:       "会员Agent说明.md",
+		FileURL:       "upload://会员Agent说明.md",
+		FileType:      "md",
+		SourceType:    "file",
+		ProcessMode:   "chunk",
+		ChunkStrategy: "fixed_size",
+		ChunkConfig:   `{bad json}`,
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "分块参数JSON格式不合法") {
+		t.Fatalf("expected invalid chunk config json rejection, got %v", err)
+	}
+}
+
+func TestDocumentService_UpdateDocumentValidatesProcessModeAndChunkConfig(t *testing.T) {
+	_, kb, svc := newDocumentServiceTestContext(t)
+	created, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:    "会员Agent说明.md",
+		FileURL:    "upload://会员Agent说明.md",
+		FileType:   "md",
+		SourceType: "file",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	_, err = svc.UpdateDocument(context.Background(), created.ID, knowledgeDto.UpdateDocumentReq{
+		DocName:     "会员Agent说明.md",
+		ProcessMode: "pipeline",
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "使用Pipeline模式时，必须指定Pipeline ID") {
+		t.Fatalf("expected missing pipeline id rejection, got %v", err)
+	}
+
+	_, err = svc.UpdateDocument(context.Background(), created.ID, knowledgeDto.UpdateDocumentReq{
+		DocName:       "会员Agent说明.md",
+		ProcessMode:   "chunk",
+		ChunkStrategy: "structure_aware",
+		ChunkConfig:   `{"targetChars":1400}`,
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "分块参数缺少必要字段: overlapChars") {
+		t.Fatalf("expected missing structure aware field rejection, got %v", err)
+	}
+}
+
+func TestDocumentService_ValidatesPipelineExists(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	svc.SetIngestionPipelineGetter(fakeIngestionPipelineGetter{err: errors.New("not found")})
+
+	_, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:     "会员Agent说明.md",
+		FileURL:     "upload://会员Agent说明.md",
+		FileType:    "md",
+		SourceType:  "file",
+		ProcessMode: "pipeline",
+		PipelineID:  "missing-pipe",
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "指定的Pipeline不存在: missing-pipe") {
+		t.Fatalf("expected missing pipeline rejection, got %v", err)
+	}
+
+	var count int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Count(&count).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no document created, got %d", count)
+	}
+
+	svc.SetIngestionPipelineGetter(fakeIngestionPipelineGetter{})
+	created, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:     "会员Agent说明.md",
+		FileURL:     "upload://会员Agent说明.md",
+		FileType:    "md",
+		SourceType:  "file",
+		ProcessMode: "pipeline",
+		PipelineID:  "pipe-1",
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create with existing pipeline: %v", err)
+	}
+
+	svc.SetIngestionPipelineGetter(fakeIngestionPipelineGetter{err: errors.New("not found")})
+	_, err = svc.UpdateDocument(context.Background(), created.ID, knowledgeDto.UpdateDocumentReq{
+		DocName:     "会员Agent说明.md",
+		ProcessMode: "pipeline",
+		PipelineID:  "missing-pipe",
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "指定的Pipeline不存在: missing-pipe") {
+		t.Fatalf("expected update missing pipeline rejection, got %v", err)
+	}
+}
+
+func TestDocumentService_CreateDocumentRejectsUnsupportedFileType(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	svc.SetParserRegistry(parser.DefaultRegistry())
+
+	_, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:    "installer.exe",
+		FileURL:    "upload://installer.exe",
+		FileType:   "exe",
+		SourceType: "file",
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "暂不支持的文件类型") {
+		t.Fatalf("expected unsupported file type rejection, got %v", err)
+	}
+
+	var count int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Count(&count).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no document created, got %d", count)
 	}
 }
 
@@ -441,6 +703,168 @@ func TestDocumentService_ExecuteIngestionPipelineTaskRunsCoreNodes(t *testing.T)
 	}
 }
 
+func TestDocumentService_ExecuteIngestionPipelineTaskReturnsKeywordsAndQuestionsMetadata(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent说明.md",
+		FileType:   "md",
+		Status:     "running",
+		CreatedBy:  "user-1",
+		SourceType: "file",
+	}
+	doc.ID = "doc-1"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:        gdb,
+		kbRepo:    fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{EmbeddingModel: "emb-1", CollectionName: "collection_a"}},
+		emb:       pipelineEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+		fileStore: fakeFileReader{data: []byte("# 会员 Agent\n支持权益查询。\n支持积分查询。")},
+		llm:       &pipelineLLMService{responses: []string{`["会员","积分"]`, `["会员权益怎么查?"]`}},
+	}
+
+	result, err := svc.ExecuteIngestionPipelineTask(context.Background(), ingestionDto.CreateTaskReq{
+		PipelineID: "pipe-1",
+		Source: ingestionDto.DocumentSourceReq{
+			Type:     "file",
+			FileName: "会员Agent说明.md",
+		},
+		Metadata: map[string]any{"docId": "doc-1"},
+	}, []ingestionModel.IngestionPipelineNode{
+		{PipelineID: "pipe-1", NodeID: "parser", NodeType: "parser", NextNodeID: "enhancer"},
+		{PipelineID: "pipe-1", NodeID: "enhancer", NodeType: "enhancer", NextNodeID: "chunker", SettingsJSON: `{"tasks":[{"type":"keywords"},{"type":"questions"}]}`},
+		{PipelineID: "pipe-1", NodeID: "chunker", NodeType: "chunker", NextNodeID: "indexer", SettingsJSON: `{"chunkSize":128}`},
+		{PipelineID: "pipe-1", NodeID: "indexer", NodeType: "indexer"},
+	})
+	if err != nil {
+		t.Fatalf("execute pipeline task: %v", err)
+	}
+	keywords, ok := result.Metadata["keywords"].([]string)
+	if !ok || len(keywords) != 2 || keywords[0] != "会员" {
+		t.Fatalf("expected keywords metadata, got %+v", result.Metadata)
+	}
+	questions, ok := result.Metadata["questions"].([]string)
+	if !ok || len(questions) != 1 || questions[0] != "会员权益怎么查?" {
+		t.Fatalf("expected questions metadata, got %+v", result.Metadata)
+	}
+}
+
+func TestDocumentService_ExecuteIngestionPipelineTaskPrefersRequestRawBytes(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent说明.md",
+		FileType:   "md",
+		Status:     "running",
+		CreatedBy:  "user-1",
+		SourceType: "file",
+	}
+	doc.ID = "doc-1"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:        gdb,
+		kbRepo:    fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{EmbeddingModel: "emb-1", CollectionName: "collection_a"}},
+		emb:       pipelineEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+		fileStore: fakeFileReader{data: []byte("# 旧内容\n不应该被解析。")},
+	}
+
+	result, err := svc.ExecuteIngestionPipelineTask(context.Background(), ingestionDto.CreateTaskReq{
+		PipelineID: "pipe-1",
+		Source: ingestionDto.DocumentSourceReq{
+			Type:     "file",
+			FileName: "会员Agent说明.md",
+		},
+		Metadata: map[string]any{"docId": "doc-1"},
+		RawBytes: []byte("# 上传内容\n应该被解析。"),
+		MimeType: "text/markdown",
+	}, []ingestionModel.IngestionPipelineNode{
+		{PipelineID: "pipe-1", NodeID: "parser", NodeType: "parser", NextNodeID: "chunker"},
+		{PipelineID: "pipe-1", NodeID: "chunker", NodeType: "chunker", SettingsJSON: `{"chunkSize":128}`},
+	})
+	if err != nil {
+		t.Fatalf("execute pipeline task: %v", err)
+	}
+	nodeByID := make(map[string]ingestionService.TaskNodeExecutionResult, len(result.Nodes))
+	for _, node := range result.Nodes {
+		nodeByID[node.NodeID] = node
+	}
+	if !strings.Contains(fmt.Sprint(nodeByID["parser"].Output["rawText"]), "上传内容") {
+		t.Fatalf("expected parser to use request raw bytes, got %+v", result.Nodes)
+	}
+}
+
+func TestDocumentService_ExecuteIngestionPipelineTaskMarksConditionSkippedNode(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:       "kb-1",
+		DocName:    "会员Agent说明.md",
+		FileType:   "md",
+		Status:     "running",
+		CreatedBy:  "user-1",
+		SourceType: "file",
+	}
+	doc.ID = "doc-1"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:        gdb,
+		kbRepo:    fakeKnowledgeBaseFinder{kb: &knowledgeModel.KnowledgeBase{EmbeddingModel: "emb-1", CollectionName: "collection_a"}},
+		emb:       pipelineEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+		fileStore: fakeFileReader{data: []byte("# 会员 Agent\n支持权益查询。")},
+	}
+
+	result, err := svc.ExecuteIngestionPipelineTask(context.Background(), ingestionDto.CreateTaskReq{
+		PipelineID: "pipe-1",
+		Source:     ingestionDto.DocumentSourceReq{Type: "file", FileName: "会员Agent说明.md"},
+		Metadata:   map[string]any{"docId": "doc-1"},
+	}, []ingestionModel.IngestionPipelineNode{
+		{PipelineID: "pipe-1", NodeID: "parser", NodeType: "parser", NextNodeID: "enhancer"},
+		{PipelineID: "pipe-1", NodeID: "enhancer", NodeType: "enhancer", ConditionJSON: `false`, NextNodeID: "chunker"},
+		{PipelineID: "pipe-1", NodeID: "chunker", NodeType: "chunker", SettingsJSON: `{"chunkSize":128}`},
+	})
+	if err != nil {
+		t.Fatalf("execute pipeline task: %v", err)
+	}
+	nodeByID := make(map[string]ingestionService.TaskNodeExecutionResult, len(result.Nodes))
+	for _, node := range result.Nodes {
+		nodeByID[node.NodeID] = node
+	}
+	if nodeByID["enhancer"].Status != "success" || nodeByID["enhancer"].Message != "Skipped: 条件未满足" {
+		t.Fatalf("expected skipped enhancer log to be carried in result, got %+v", nodeByID["enhancer"])
+	}
+}
+
 type pipelineEmbeddingService struct{}
 
 func (pipelineEmbeddingService) Embed(context.Context, string) ([]float32, error) {
@@ -465,6 +889,32 @@ func (pipelineEmbeddingService) EmbedBatchWithModel(ctx context.Context, texts [
 
 func (pipelineEmbeddingService) Dimension() int {
 	return 2
+}
+
+type pipelineLLMService struct {
+	responses []string
+	calls     int
+}
+
+func (s *pipelineLLMService) Chat(context.Context, chat.Request) (string, error) {
+	return s.next(), nil
+}
+
+func (s *pipelineLLMService) ChatWithModel(context.Context, chat.Request, string) (string, error) {
+	return s.next(), nil
+}
+
+func (s *pipelineLLMService) StreamChat(context.Context, chat.Request, chat.StreamCallback) (chat.StreamHandle, error) {
+	panic("unused")
+}
+
+func (s *pipelineLLMService) next() string {
+	if s.calls >= len(s.responses) {
+		return ""
+	}
+	resp := s.responses[s.calls]
+	s.calls++
+	return resp
 }
 
 func TestDocumentService_RecordsAuditLogs(t *testing.T) {
@@ -672,6 +1122,22 @@ func TestDocumentService_CreateDocumentKeepsScheduleForURLSource(t *testing.T) {
 	}
 }
 
+func TestDocumentService_CreateDocumentRejectsEnabledScheduleWithoutCron(t *testing.T) {
+	_, kb, svc := newDocumentServiceTestContext(t)
+
+	_, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:         "会员Agent说明.md",
+		FileURL:         "https://example.com/member-agent.md",
+		FileType:        "md",
+		SourceType:      "url",
+		SourceLocation:  "https://example.com/member-agent.md",
+		ScheduleEnabled: 1,
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "定时表达式不能为空") {
+		t.Fatalf("expected missing schedule cron rejection, got %v", err)
+	}
+}
+
 func TestDocumentService_CreateDocumentRejectsTooShortScheduleCron(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -775,6 +1241,31 @@ func TestDocumentService_UpdateDocumentRejectsTooShortScheduleCron(t *testing.T)
 	}, "admin-1")
 	if err == nil || !strings.Contains(err.Error(), "定时周期不能小于") {
 		t.Fatalf("expected too-short cron rejection on update, got %v", err)
+	}
+}
+
+func TestDocumentService_UpdateDocumentRejectsEnabledScheduleWithoutCron(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:           kb.ID,
+		DocName:        "会员Agent说明.md",
+		FileURL:        "https://example.com/member-agent.md",
+		FileType:       "md",
+		SourceType:     "url",
+		SourceLocation: "https://example.com/member-agent.md",
+		Status:         "success",
+		CreatedBy:      "admin-1",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+
+	_, err := svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
+		DocName:         "会员Agent说明.md",
+		ScheduleEnabled: ptrInt16(1),
+	}, "admin-1")
+	if err == nil || !strings.Contains(err.Error(), "启用定时拉取时必须设置定时表达式") {
+		t.Fatalf("expected missing update schedule cron rejection, got %v", err)
 	}
 }
 
@@ -971,14 +1462,14 @@ func TestDocumentService_RecordsChunkAuditLogs(t *testing.T) {
 	}
 
 	updatedContent := "更新后的内容"
-	updated, err := svc.UpdateChunk(ctx, created.ID, knowledgeDto.UpdateChunkReq{
+	updated, err := svc.UpdateChunk(ctx, doc.ID, created.ID, knowledgeDto.UpdateChunkReq{
 		Content: updatedContent,
 	}, "admin-1")
 	if err != nil {
 		t.Fatalf("update chunk: %v", err)
 	}
 
-	if err := svc.DeleteChunk(ctx, updated.ID); err != nil {
+	if err := svc.DeleteChunk(ctx, doc.ID, updated.ID); err != nil {
 		t.Fatalf("delete chunk: %v", err)
 	}
 
@@ -1279,6 +1770,54 @@ func TestDocumentService_DeleteDocumentDeletesStoredFileQuietly(t *testing.T) {
 	}
 	if len(fileStore.deletedDocIDs) != 1 || fileStore.deletedDocIDs[0] != doc.ID {
 		t.Fatalf("expected stored file delete invoked, got %+v", fileStore.deletedDocIDs)
+	}
+}
+
+func TestDocumentService_GetChunkLogsReturnsPipelineNameAndOtherDuration(t *testing.T) {
+	gdb, _, svc := newDocumentServiceTestContext(t)
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocumentChunkLog{}); err != nil {
+		t.Fatalf("migrate chunk log: %v", err)
+	}
+	svc.SetIngestionPipelineGetter(fakeIngestionPipelineGetter{})
+	now := time.Now()
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocumentChunkLog{
+		DocID:           "doc-1",
+		Status:          "success",
+		ProcessMode:     "chunk",
+		ExtractDuration: 10,
+		ChunkDuration:   20,
+		EmbedDuration:   30,
+		PersistDuration: 15,
+		TotalDuration:   100,
+		CreateTime:      now,
+	}).Error; err != nil {
+		t.Fatalf("create chunk log: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocumentChunkLog{
+		DocID:           "doc-1",
+		Status:          "success",
+		ProcessMode:     "pipeline",
+		PipelineID:      "pipe-1",
+		ChunkDuration:   20,
+		PersistDuration: 15,
+		TotalDuration:   100,
+		CreateTime:      now.Add(time.Second),
+	}).Error; err != nil {
+		t.Fatalf("create pipeline log: %v", err)
+	}
+
+	logs, total, err := svc.GetChunkLogs(context.Background(), "doc-1", 1, 10)
+	if err != nil {
+		t.Fatalf("get chunk logs: %v", err)
+	}
+	if total != 2 || len(logs) != 2 {
+		t.Fatalf("expected 2 logs, total=%d len=%d", total, len(logs))
+	}
+	if logs[0].PipelineName != "默认流水线" || logs[0].OtherDuration != 65 {
+		t.Fatalf("expected pipeline name and pipeline other duration, got %+v", logs[0])
+	}
+	if logs[1].PipelineName != "" || logs[1].OtherDuration != 25 {
+		t.Fatalf("expected chunk other duration, got %+v", logs[1])
 	}
 }
 
@@ -1658,6 +2197,169 @@ func TestDocumentService_ToggleChunkSyncsVectors(t *testing.T) {
 	}
 	if len(vecStore.deletedChunkIDs) != 1 || vecStore.deletedChunkIDs[0] != chunk.ID {
 		t.Fatalf("expected vector delete on disable, got %+v", vecStore.deletedChunkIDs)
+	}
+}
+
+func TestDocumentService_CreateChunkRejectsRunningOrDisabledDocument(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	runningDoc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "running.md", Enabled: 1, FileType: "md", Status: "running", CreatedBy: "tester"}
+	if err := gdb.Create(runningDoc).Error; err != nil {
+		t.Fatalf("create running doc: %v", err)
+	}
+	disabledDoc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "disabled.md", Enabled: 0, FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(disabledDoc).Error; err != nil {
+		t.Fatalf("create disabled doc: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", disabledDoc.ID).Update("enabled", 0).Error; err != nil {
+		t.Fatalf("disable document: %v", err)
+	}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+	}
+
+	if _, err := svc.CreateChunk(context.Background(), runningDoc.ID, knowledgeDto.CreateChunkReq{Content: "新增内容"}, "tester"); err == nil || !strings.Contains(err.Error(), "文档正在分块处理中") {
+		t.Fatalf("expected running document create chunk to fail, got %v", err)
+	}
+	if _, err := svc.CreateChunk(context.Background(), disabledDoc.ID, knowledgeDto.CreateChunkReq{Content: "新增内容"}, "tester"); err == nil || !strings.Contains(err.Error(), "文档未启用") {
+		t.Fatalf("expected disabled document create chunk to fail, got %v", err)
+	}
+}
+
+func TestDocumentService_CreateUpdateDeleteChunkSyncsVectorAndDocumentCount(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "会员Agent说明.md", Enabled: 1, FileType: "md", Status: "success", ChunkCount: 0, CreatedBy: "tester"}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	vecStore := &capturingVectorStore{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  vecStore,
+	}
+
+	index := 7
+	created, err := svc.CreateChunk(context.Background(), doc.ID, knowledgeDto.CreateChunkReq{
+		ChunkID: "manual-chunk-1",
+		Index:   &index,
+		Content: "  第一段 内容  ",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+	if created.ID != "manual-chunk-1" || created.ChunkIndex != 7 || created.Content != "第一段 内容" {
+		t.Fatalf("expected Java create chunk fields, got %+v", created)
+	}
+	if len(vecStore.indexedChunks) != 1 || vecStore.indexedChunks[0].ChunkID != created.ID {
+		t.Fatalf("expected vector index on create, got %+v", vecStore.indexedChunks)
+	}
+	var storedDoc knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&storedDoc, "id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("load doc after create: %v", err)
+	}
+	if storedDoc.ChunkCount != 1 {
+		t.Fatalf("expected chunk count 1 after create, got %d", storedDoc.ChunkCount)
+	}
+
+	updated, err := svc.UpdateChunk(context.Background(), doc.ID, created.ID, knowledgeDto.UpdateChunkReq{
+		Content: "更新 后 内容",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("update chunk: %v", err)
+	}
+	if updated.ContentHash == created.ContentHash || updated.CharCount != len([]rune("更新 后 内容")) || updated.TokenCount != 3 {
+		t.Fatalf("expected refreshed content metadata, got %+v", updated)
+	}
+	if len(vecStore.updatedChunks) != 1 || vecStore.updatedChunks[0].Content != "更新 后 内容" {
+		t.Fatalf("expected vector update on content update, got %+v", vecStore.updatedChunks)
+	}
+
+	if err := svc.DeleteChunk(context.Background(), doc.ID, created.ID); err != nil {
+		t.Fatalf("delete chunk: %v", err)
+	}
+	if len(vecStore.deletedChunkIDs) != 1 || vecStore.deletedChunkIDs[0] != created.ID {
+		t.Fatalf("expected vector delete on chunk delete, got %+v", vecStore.deletedChunkIDs)
+	}
+	if err := gdb.First(&storedDoc, "id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("load doc after delete: %v", err)
+	}
+	if storedDoc.ChunkCount != 0 {
+		t.Fatalf("expected chunk count 0 after delete, got %d", storedDoc.ChunkCount)
+	}
+}
+
+func TestDocumentService_UpdateDeleteChunkRejectsRunningDocumentAndWrongDoc(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}, &knowledgeModel.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	runningDoc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "running.md", Enabled: 1, FileType: "md", Status: "running", CreatedBy: "tester"}
+	otherDoc := &knowledgeModel.KnowledgeDocument{KbID: kb.ID, DocName: "other.md", Enabled: 1, FileType: "md", Status: "success", CreatedBy: "tester"}
+	if err := gdb.Create(runningDoc).Error; err != nil {
+		t.Fatalf("create running doc: %v", err)
+	}
+	if err := gdb.Create(otherDoc).Error; err != nil {
+		t.Fatalf("create other doc: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{KbID: kb.ID, DocID: runningDoc.ID, ChunkIndex: 0, Content: "第一段内容", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("create chunk: %v", err)
+	}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		chunkRepo: knowledgeRepo.NewKnowledgeChunkRepo(gdb),
+		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:        gdb,
+		emb:       fakeEmbeddingService{},
+		vecStore:  &capturingVectorStore{},
+	}
+
+	if _, err := svc.UpdateChunk(context.Background(), runningDoc.ID, chunk.ID, knowledgeDto.UpdateChunkReq{Content: "更新内容"}, "tester"); err == nil || !strings.Contains(err.Error(), "文档正在分块处理中") {
+		t.Fatalf("expected running document update chunk to fail, got %v", err)
+	}
+	if err := svc.DeleteChunk(context.Background(), runningDoc.ID, chunk.ID); err == nil || !strings.Contains(err.Error(), "文档正在分块处理中") {
+		t.Fatalf("expected running document delete chunk to fail, got %v", err)
+	}
+	if _, err := svc.UpdateChunk(context.Background(), otherDoc.ID, chunk.ID, knowledgeDto.UpdateChunkReq{Content: "更新内容"}, "tester"); err == nil || !strings.Contains(err.Error(), "不属于该文档") {
+		t.Fatalf("expected wrong doc update chunk to fail, got %v", err)
+	}
+	if err := svc.DeleteChunk(context.Background(), otherDoc.ID, chunk.ID); err == nil || !strings.Contains(err.Error(), "不属于该文档") {
+		t.Fatalf("expected wrong doc delete chunk to fail, got %v", err)
 	}
 }
 

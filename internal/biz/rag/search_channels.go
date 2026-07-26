@@ -234,7 +234,7 @@ func (c *PgKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context, sc S
 	if c == nil || c.kbRepo == nil {
 		return nil, nil
 	}
-	kbs, _, err := c.kbRepo.List(ctx, 1, 100)
+	kbs, _, err := c.kbRepo.List(ctx, 1, 100, "")
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +435,7 @@ func (c *PgIntentDirectedSearchChannel) canVectorSearch() bool {
 }
 
 func (c *PgIntentDirectedSearchChannel) searchIntentVectors(ctx context.Context, query string, targets []intentDirectedTarget) ([]RetrievedChunk, bool) {
-	kbs, _, err := c.kbRepo.List(ctx, 1, 100)
+	kbs, _, err := c.kbRepo.List(ctx, 1, 100, "")
 	if err != nil {
 		return nil, false
 	}

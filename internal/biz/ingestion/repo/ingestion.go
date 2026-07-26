@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/ingestion/model"
@@ -18,6 +19,11 @@ type PipelineRepo struct {
 
 // NewPipelineRepo 创建 PipelineRepo。
 func NewPipelineRepo(database *gorm.DB) *PipelineRepo {
+	return &PipelineRepo{db: database}
+}
+
+// WithDB 返回绑定指定数据库会话的 PipelineRepo。
+func (r *PipelineRepo) WithDB(database *gorm.DB) *PipelineRepo {
 	return &PipelineRepo{db: database}
 }
 
@@ -49,6 +55,18 @@ func (r *PipelineRepo) FindByID(ctx context.Context, id string) (*model.Ingestio
 		return nil, fmt.Errorf("find ingestion pipeline: %w", err)
 	}
 	return &pipeline, nil
+}
+
+// ExistsActiveName 查询未删除流水线中是否存在同名记录。
+func (r *PipelineRepo) ExistsActiveName(ctx context.Context, name string) (bool, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.IngestionPipeline{}).
+		Where("name = ?", strings.TrimSpace(name)).
+		Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count ingestion pipeline by name: %w", err)
+	}
+	return count > 0, nil
 }
 
 // List 分页查询流水线。
@@ -88,8 +106,7 @@ func (r *PipelineRepo) SoftDelete(ctx context.Context, id string) error {
 // ReplaceNodes 替换流水线节点。
 func (r *PipelineRepo) ReplaceNodes(ctx context.Context, pipelineID string, nodes []*model.IngestionPipelineNode) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&model.IngestionPipelineNode{}).Where("pipeline_id = ? AND deleted = 0", pipelineID).
-			Updates(map[string]any{"deleted": 1, "update_time": time.Now()}).Error; err != nil {
+		if err := tx.Where("pipeline_id = ?", pipelineID).Delete(&model.IngestionPipelineNode{}).Error; err != nil {
 			return fmt.Errorf("delete old ingestion nodes: %w", err)
 		}
 		if len(nodes) == 0 {

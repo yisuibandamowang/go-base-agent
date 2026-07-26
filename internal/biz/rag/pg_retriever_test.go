@@ -43,7 +43,7 @@ type fakeKnowledgeBaseLister struct {
 	kbs []knowledgeModel.KnowledgeBase
 }
 
-func (l fakeKnowledgeBaseLister) List(context.Context, int, int) ([]knowledgeModel.KnowledgeBase, int64, error) {
+func (l fakeKnowledgeBaseLister) List(context.Context, int, int, string) ([]knowledgeModel.KnowledgeBase, int64, error) {
 	return l.kbs, int64(len(l.kbs)), nil
 }
 

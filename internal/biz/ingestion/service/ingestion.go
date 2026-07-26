@@ -4,10 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"mime/multipart"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	auditService "go-base-agent/internal/biz/audit/service"
 	"go-base-agent/internal/biz/ingestion/dto"
@@ -36,16 +41,37 @@ func (s *PipelineService) SetAuditRecorder(recorder *auditService.BizChangeLogSe
 
 // Create 创建摄取流水线。
 func (s *PipelineService) Create(ctx context.Context, req dto.CreatePipelineReq, userID string) (*dto.PipelineResp, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, fmt.Errorf("流水线名称不能为空")
+	}
+	exists, err := s.repo.ExistsActiveName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, fmt.Errorf("流水线名称已存在")
+	}
+	nodes, err := toPipelineNodes("", req.Nodes, userID)
+	if err != nil {
+		return nil, err
+	}
 	pipeline := &model.IngestionPipeline{
-		Name:        req.Name,
+		Name:        name,
 		Description: req.Description,
 		CreatedBy:   userID,
 		UpdatedBy:   userID,
 	}
-	if err := s.repo.Create(ctx, pipeline); err != nil {
-		return nil, fmt.Errorf("创建摄取流水线失败: %w", err)
-	}
-	if err := s.repo.ReplaceNodes(ctx, pipeline.ID, toPipelineNodes(pipeline.ID, req.Nodes, userID)); err != nil {
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txRepo := s.repo.WithDB(tx)
+		if err := txRepo.Create(ctx, pipeline); err != nil {
+			return fmt.Errorf("创建摄取流水线失败: %w", err)
+		}
+		for _, node := range nodes {
+			node.PipelineID = pipeline.ID
+		}
+		return txRepo.ReplaceNodes(ctx, pipeline.ID, nodes)
+	}); err != nil {
 		return nil, err
 	}
 	resp, err := s.Get(ctx, pipeline.ID)
@@ -68,24 +94,35 @@ func (s *PipelineService) Update(ctx context.Context, id string, req dto.UpdateP
 	if err != nil {
 		return nil, err
 	}
-	pipeline, err := s.repo.FindByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if req.Name != "" {
-		pipeline.Name = req.Name
-	}
-	if req.Description != nil {
-		pipeline.Description = *req.Description
-	}
-	pipeline.UpdatedBy = userID
-	if err := s.repo.Update(ctx, pipeline); err != nil {
-		return nil, err
-	}
+	var nodes []*model.IngestionPipelineNode
 	if req.Nodes != nil {
-		if err := s.repo.ReplaceNodes(ctx, pipeline.ID, toPipelineNodes(pipeline.ID, req.Nodes, userID)); err != nil {
+		nodes, err = toPipelineNodes(id, req.Nodes, userID)
+		if err != nil {
 			return nil, err
 		}
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txRepo := s.repo.WithDB(tx)
+		pipeline, err := txRepo.FindByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		if req.Name != "" {
+			pipeline.Name = req.Name
+		}
+		if req.Description != nil {
+			pipeline.Description = *req.Description
+		}
+		pipeline.UpdatedBy = userID
+		if err := txRepo.Update(ctx, pipeline); err != nil {
+			return err
+		}
+		if req.Nodes != nil {
+			return txRepo.ReplaceNodes(ctx, pipeline.ID, nodes)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	resp, err := s.Get(ctx, id)
 	if err != nil {
@@ -187,6 +224,7 @@ type PipelineTaskExecutor interface {
 type TaskExecutionResult struct {
 	ChunkCount int
 	Nodes      []TaskNodeExecutionResult
+	Metadata   map[string]any
 }
 
 // TaskNodeExecutionResult contains the outcome of one pipeline node.
@@ -200,6 +238,8 @@ type TaskNodeExecutionResult struct {
 	Output       map[string]any
 }
 
+const maxTaskNodeOutputJSONSize = 1024 * 1024
+
 // SetExecutor 设置摄取任务的实际执行器。
 func (s *TaskService) SetExecutor(executor TaskExecutor) {
 	s.executor = executor
@@ -212,6 +252,12 @@ func (s *TaskService) SetAuditRecorder(recorder *auditService.BizChangeLogServic
 
 // Create 创建并执行摄取任务。
 func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID string) (*dto.IngestionResultResp, error) {
+	resolvedPipelineID, sourceType, err := validateTaskCreateReq(req)
+	if err != nil {
+		return nil, err
+	}
+	req.PipelineID = resolvedPipelineID
+	req.Source.Type = sourceType
 	nodes, err := s.pipelineSvc.DefinitionNodes(ctx, req.PipelineID)
 	if err != nil {
 		return nil, err
@@ -227,9 +273,6 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 		CreatedBy:      userID,
 		UpdatedBy:      userID,
 		MetadataJSON:   writeJSON(req.Metadata),
-	}
-	if task.SourceType == "" {
-		task.SourceType = "url"
 	}
 	if err := s.repo.Create(ctx, task); err != nil {
 		return nil, fmt.Errorf("创建摄取任务失败: %w", err)
@@ -284,7 +327,8 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 	for _, nodeResult := range execResult.Nodes {
 		nodeResultMap[nodeResult.NodeID] = nodeResult
 	}
-	for idx, node := range nodes {
+	nodeOrderMap := buildNodeOrderMap(nodes)
+	for _, node := range nodes {
 		nodeResult, ok := nodeResultMap[node.NodeID]
 		if !ok {
 			nodeResult = TaskNodeExecutionResult{
@@ -296,13 +340,13 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 				Output:     map[string]any{"chunkCount": execResult.ChunkCount},
 			}
 		}
-		status := firstNonEmpty(nodeResult.Status, "success")
+		status := resolveTaskNodeStatus(nodeResult.Status, nodeResult.Message)
 		message := firstNonEmpty(nodeResult.Message, "OK")
 		nodeDuration := nodeResult.DurationMs
 		if nodeDuration == 0 {
 			nodeDuration = durationMs
 		}
-		taskNode := newTaskNode(task, node, idx+1, status, nodeDuration, message, nodeResult.ErrorMessage, nodeResult.Output)
+		taskNode := newTaskNode(task, node, nodeOrderMap[node.NodeID], status, nodeDuration, message, nodeResult.ErrorMessage, nodeResult.Output)
 		if err := s.repo.CreateNode(ctx, taskNode); err != nil {
 			return nil, fmt.Errorf("创建摄取任务节点失败: %w", err)
 		}
@@ -313,6 +357,7 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 	task.CompletedAt = &completed
 	task.LogsJSON = writeJSON(logs)
 	task.ChunkCount = execResult.ChunkCount
+	task.MetadataJSON = writeJSON(mergeTaskMetadata(req.Metadata, execResult.Metadata))
 	if err := s.repo.Update(ctx, task); err != nil {
 		return nil, fmt.Errorf("更新摄取任务失败: %w", err)
 	}
@@ -334,16 +379,18 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq, userID 
 
 func (s *TaskService) markTaskFailed(ctx context.Context, task *model.IngestionTask, nodes []model.IngestionPipelineNode, message string) error {
 	logs := make([]map[string]any, 0, len(nodes))
-	for idx, node := range nodes {
+	nodeOrderMap := buildNodeOrderMap(nodes)
+	for _, node := range nodes {
+		nodeOrder := nodeOrderMap[node.NodeID]
 		status := "skipped"
 		nodeMessage := "SKIPPED"
 		errorMessage := ""
-		if idx == 0 {
+		if nodeOrder == 1 {
 			status = "failed"
 			nodeMessage = "FAILED"
 			errorMessage = message
 		}
-		taskNode := newTaskNode(task, node, idx+1, status, 0, nodeMessage, errorMessage, nil)
+		taskNode := newTaskNode(task, node, nodeOrder, status, 0, nodeMessage, errorMessage, nil)
 		if err := s.repo.CreateNode(ctx, taskNode); err != nil {
 			return fmt.Errorf("创建摄取任务节点失败: %w", err)
 		}
@@ -397,7 +444,7 @@ func newTaskNode(task *model.IngestionTask, node model.IngestionPipelineNode, or
 		DurationMs:   durationMs,
 		Message:      message,
 		ErrorMessage: errorMessage,
-		OutputJSON:   writeJSON(output),
+		OutputJSON:   writeTaskNodeOutputJSON(output),
 	}
 }
 
@@ -411,10 +458,86 @@ func taskNodeLog(node model.IngestionPipelineNode, success bool, message string,
 	}
 }
 
+func buildNodeOrderMap(nodes []model.IngestionPipelineNode) map[string]int {
+	orderMap := make(map[string]int, len(nodes))
+	nodeMap := make(map[string]model.IngestionPipelineNode, len(nodes))
+	nodeIDs := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if strings.TrimSpace(node.NodeID) == "" {
+			continue
+		}
+		if _, exists := nodeMap[node.NodeID]; exists {
+			continue
+		}
+		nodeMap[node.NodeID] = node
+		nodeIDs = append(nodeIDs, node.NodeID)
+	}
+	if len(nodeMap) == 0 {
+		return orderMap
+	}
+	referenced := make(map[string]struct{}, len(nodes))
+	for _, node := range nodeMap {
+		if strings.TrimSpace(node.NextNodeID) != "" {
+			referenced[node.NextNodeID] = struct{}{}
+		}
+	}
+	order := 1
+	visited := make(map[string]struct{}, len(nodeMap))
+	for _, nodeID := range nodeIDs {
+		if _, ok := referenced[nodeID]; ok {
+			continue
+		}
+		for current := nodeID; strings.TrimSpace(current) != ""; {
+			if _, ok := visited[current]; ok {
+				break
+			}
+			orderMap[current] = order
+			order++
+			visited[current] = struct{}{}
+			next, ok := nodeMap[current]
+			if !ok {
+				break
+			}
+			current = next.NextNodeID
+		}
+	}
+	for _, nodeID := range nodeIDs {
+		if _, ok := visited[nodeID]; ok {
+			continue
+		}
+		orderMap[nodeID] = order
+		order++
+	}
+	return orderMap
+}
+
+func mergeTaskMetadata(base, extra map[string]any) map[string]any {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	merged := make(map[string]any, len(base)+len(extra))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	return merged
+}
+
 // Upload 上传文件并执行摄取任务。
 func (s *TaskService) Upload(ctx context.Context, pipelineID string, header *multipart.FileHeader, userID string) (*dto.IngestionResultResp, error) {
 	if header == nil {
 		return nil, fmt.Errorf("文件不能为空")
+	}
+	file, err := header.Open()
+	if err != nil {
+		return nil, fmt.Errorf("读取上传文件失败: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("读取上传文件失败: %w", err)
 	}
 	return s.Create(ctx, dto.CreateTaskReq{
 		PipelineID: pipelineID,
@@ -423,7 +546,24 @@ func (s *TaskService) Upload(ctx context.Context, pipelineID string, header *mul
 			Location: header.Filename,
 			FileName: header.Filename,
 		},
+		RawBytes: data,
+		MimeType: detectUploadMimeType(header, data),
 	}, userID)
+}
+
+func detectUploadMimeType(header *multipart.FileHeader, data []byte) string {
+	if header == nil {
+		return http.DetectContentType(data)
+	}
+	if contentType := strings.TrimSpace(header.Header.Get("Content-Type")); contentType != "" && contentType != "application/octet-stream" {
+		return contentType
+	}
+	if ext := strings.ToLower(filepath.Ext(header.Filename)); ext != "" {
+		if mimeType := mime.TypeByExtension(ext); strings.TrimSpace(mimeType) != "" {
+			return mimeType
+		}
+	}
+	return http.DetectContentType(data)
 }
 
 // Get 查询摄取任务详情。
@@ -461,13 +601,17 @@ func (s *TaskService) Nodes(ctx context.Context, taskID string) ([]dto.TaskNodeR
 	return resp, nil
 }
 
-func toPipelineNodes(pipelineID string, reqs []dto.PipelineNodeReq, userID string) []*model.IngestionPipelineNode {
+func toPipelineNodes(pipelineID string, reqs []dto.PipelineNodeReq, userID string) ([]*model.IngestionPipelineNode, error) {
 	nodes := make([]*model.IngestionPipelineNode, 0, len(reqs))
 	for _, req := range reqs {
+		nodeType, err := normalizeNodeType(req.NodeType)
+		if err != nil {
+			return nil, err
+		}
 		nodes = append(nodes, &model.IngestionPipelineNode{
 			PipelineID:    pipelineID,
 			NodeID:        req.NodeID,
-			NodeType:      normalizeNodeType(req.NodeType),
+			NodeType:      nodeType,
 			NextNodeID:    req.NextNodeID,
 			SettingsJSON:  writeJSON(req.Settings),
 			ConditionJSON: writeJSON(req.Condition),
@@ -475,7 +619,7 @@ func toPipelineNodes(pipelineID string, reqs []dto.PipelineNodeReq, userID strin
 			UpdatedBy:     userID,
 		})
 	}
-	return nodes
+	return nodes, nil
 }
 
 func pipelineToResp(pipeline *model.IngestionPipeline, nodes []model.IngestionPipelineNode) *dto.PipelineResp {
@@ -492,7 +636,7 @@ func pipelineToResp(pipeline *model.IngestionPipeline, nodes []model.IngestionPi
 		resp.Nodes = append(resp.Nodes, dto.PipelineNodeResp{
 			ID:         node.ID,
 			NodeID:     node.NodeID,
-			NodeType:   node.NodeType,
+			NodeType:   normalizeNodeTypeForOutput(node.NodeType),
 			Settings:   readMap(node.SettingsJSON),
 			Condition:  readMap(node.ConditionJSON),
 			NextNodeID: node.NextNodeID,
@@ -505,10 +649,10 @@ func taskToResp(task *model.IngestionTask) *dto.TaskResp {
 	return &dto.TaskResp{
 		ID:             task.ID,
 		PipelineID:     task.PipelineID,
-		SourceType:     task.SourceType,
+		SourceType:     normalizeSourceTypeForOutput(task.SourceType),
 		SourceLocation: task.SourceLocation,
 		SourceFileName: task.SourceFileName,
-		Status:         task.Status,
+		Status:         normalizeTaskStatusForOutput(task.Status),
 		ChunkCount:     task.ChunkCount,
 		ErrorMessage:   task.ErrorMessage,
 		Logs:           readList(task.LogsJSON),
@@ -527,9 +671,9 @@ func taskNodeToResp(node *model.IngestionTaskNode) *dto.TaskNodeResp {
 		TaskID:       node.TaskID,
 		PipelineID:   node.PipelineID,
 		NodeID:       node.NodeID,
-		NodeType:     node.NodeType,
+		NodeType:     normalizeNodeTypeForOutput(node.NodeType),
 		NodeOrder:    node.NodeOrder,
-		Status:       node.Status,
+		Status:       normalizeStatus(node.Status),
 		DurationMs:   node.DurationMs,
 		Message:      node.Message,
 		ErrorMessage: node.ErrorMessage,
@@ -539,9 +683,25 @@ func taskNodeToResp(node *model.IngestionTaskNode) *dto.TaskNodeResp {
 	}
 }
 
-func normalizeNodeType(nodeType string) string {
+func normalizeNodeType(nodeType string) (string, error) {
 	v := strings.TrimSpace(strings.ToLower(nodeType))
-	return strings.ReplaceAll(v, "-", "_")
+	v = strings.ReplaceAll(v, "-", "_")
+	switch v {
+	case "":
+		return "", nil
+	case "fetcher", "parser", "enhancer", "chunker", "enricher", "indexer":
+		return v, nil
+	default:
+		return "", fmt.Errorf("未知节点类型: %s", nodeType)
+	}
+}
+
+func normalizeNodeTypeForOutput(nodeType string) string {
+	normalized, err := normalizeNodeType(nodeType)
+	if err != nil {
+		return nodeType
+	}
+	return normalized
 }
 
 func normalizeSourceType(sourceType string) string {
@@ -555,9 +715,60 @@ func normalizeSourceType(sourceType string) string {
 	}
 }
 
+func normalizeSourceTypeForOutput(sourceType string) string {
+	normalized := normalizeSourceType(sourceType)
+	switch normalized {
+	case "file", "url", "feishu", "":
+		return normalized
+	default:
+		return sourceType
+	}
+}
+
+func validateTaskCreateReq(req dto.CreateTaskReq) (string, string, error) {
+	pipelineID := strings.TrimSpace(req.PipelineID)
+	if pipelineID == "" {
+		return "", "", fmt.Errorf("必须传流水线ID")
+	}
+	if strings.TrimSpace(req.Source.Type) == "" &&
+		strings.TrimSpace(req.Source.Location) == "" &&
+		strings.TrimSpace(req.Source.FileName) == "" &&
+		len(req.Source.Credentials) == 0 {
+		return "", "", fmt.Errorf("文档来源不能为空")
+	}
+	sourceType := normalizeSourceType(req.Source.Type)
+	if sourceType == "" {
+		return "", "", fmt.Errorf("文档来源类型不能为空")
+	}
+	switch sourceType {
+	case "file", "url", "feishu":
+		return pipelineID, sourceType, nil
+	default:
+		return "", "", fmt.Errorf("未知文档来源类型: %s", req.Source.Type)
+	}
+}
+
 func normalizeStatus(status string) string {
 	v := strings.TrimSpace(strings.ToLower(status))
 	return strings.ReplaceAll(v, "-", "_")
+}
+
+func normalizeTaskStatusForOutput(status string) string {
+	normalized := normalizeStatus(status)
+	switch normalized {
+	case "pending", "running", "failed", "completed", "":
+		return normalized
+	default:
+		return status
+	}
+}
+
+func resolveTaskNodeStatus(status, message string) string {
+	normalized := normalizeStatus(firstNonEmpty(status, "success"))
+	if normalized != "failed" && strings.HasPrefix(message, "Skipped:") {
+		return "skipped"
+	}
+	return normalized
 }
 
 func firstNonEmpty(values ...string) string {
@@ -578,6 +789,22 @@ func writeJSON(value any) string {
 		return ""
 	}
 	return string(data)
+}
+
+func writeTaskNodeOutputJSON(value any) string {
+	raw := writeJSON(value)
+	if len(raw) <= maxTaskNodeOutputJSONSize {
+		return raw
+	}
+	suffix := fmt.Sprintf("... [输出过大，已截断，原始大小: %d 字节]", len(raw))
+	limit := maxTaskNodeOutputJSONSize - len(suffix)
+	if limit < 0 {
+		return suffix
+	}
+	for limit > 0 && !utf8.ValidString(raw[:limit]) {
+		limit--
+	}
+	return raw[:limit] + suffix
 }
 
 func readMap(raw string) map[string]any {

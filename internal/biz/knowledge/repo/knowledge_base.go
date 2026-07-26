@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go-base-agent/internal/biz/knowledge/model"
@@ -89,19 +90,58 @@ func (r *KnowledgeBaseRepo) CountDocumentsByKBID(ctx context.Context, kbID strin
 }
 
 // List 分页查询知识库列表（仅未删除记录）。
-func (r *KnowledgeBaseRepo) List(ctx context.Context, page, size int) ([]model.KnowledgeBase, int64, error) {
+func (r *KnowledgeBaseRepo) List(ctx context.Context, page, size int, name string) ([]model.KnowledgeBase, int64, error) {
 	var (
 		records []model.KnowledgeBase
 		total   int64
 	)
 	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeBase{})
+	if name = strings.TrimSpace(name); name != "" {
+		query = query.Where("name LIKE ?", "%"+name+"%")
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("failed to count knowledge bases: %w", err)
 	}
-	if err := query.Scopes(db.Paginate(page, size)).Order("create_time DESC").Find(&records).Error; err != nil {
+	if err := query.Scopes(db.Paginate(page, size)).Order("update_time DESC").Find(&records).Error; err != nil {
 		return nil, 0, fmt.Errorf("failed to list knowledge bases: %w", err)
 	}
 	return records, total, nil
+}
+
+// CountDocumentsByKBIDs 批量统计知识库下未删除文档数量。
+func (r *KnowledgeBaseRepo) CountDocumentsByKBIDs(ctx context.Context, kbIDs []string) (map[string]int64, error) {
+	counts := make(map[string]int64, len(kbIDs))
+	if len(kbIDs) == 0 {
+		return counts, nil
+	}
+	var rows []struct {
+		KBID  string `gorm:"column:kb_id"`
+		Count int64  `gorm:"column:doc_count"`
+	}
+	if err := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.KnowledgeDocument{}).
+		Select("kb_id, COUNT(1) AS doc_count").
+		Where("kb_id IN ?", kbIDs).
+		Group("kb_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		counts[row.KBID] = row.Count
+	}
+	return counts, nil
+}
+
+// CountChunkedDocumentsByKBID 统计知识库下已产生分块的未删除文档数量。
+func (r *KnowledgeBaseRepo) CountChunkedDocumentsByKBID(ctx context.Context, kbID string) (int64, error) {
+	var count int64
+	if err := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.KnowledgeDocument{}).
+		Where("kb_id = ? AND chunk_count > 0", kbID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ExistsByName 检查名称是否已存在（排除指定 ID 用于更新时的唯一性校验）。

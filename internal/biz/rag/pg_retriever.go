@@ -24,7 +24,7 @@ type PgRetriever struct {
 }
 
 type knowledgeBaseLister interface {
-	List(ctx context.Context, page, size int) ([]knowledgeModel.KnowledgeBase, int64, error)
+	List(ctx context.Context, page, size int, name string) ([]knowledgeModel.KnowledgeBase, int64, error)
 }
 
 // NewPgRetriever creates a PgRetriever.
@@ -53,7 +53,7 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 	if r.vectorSearch == nil {
 		return nil, fmt.Errorf("vector search service not configured")
 	}
-	kbs, _, err := r.kbRepo.List(ctx, 1, 100)
+	kbs, _, err := r.kbRepo.List(ctx, 1, 100, "")
 	if err != nil {
 		return nil, fmt.Errorf("list knowledge bases: %w", err)
 	}
@@ -117,7 +117,7 @@ func (r *PgRetriever) RetrieveGlobal(ctx context.Context, question string, topK 
 	if !ok {
 		return r.Retrieve(ctx, question, topK)
 	}
-	kbs, _, err := r.kbRepo.List(ctx, 1, 100)
+	kbs, _, err := r.kbRepo.List(ctx, 1, 100, "")
 	if err != nil {
 		return nil, fmt.Errorf("list knowledge bases: %w", err)
 	}

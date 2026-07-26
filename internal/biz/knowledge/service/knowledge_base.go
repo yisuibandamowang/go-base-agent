@@ -67,17 +67,29 @@ func (s *KnowledgeBaseService) SetAuditRecorder(recorder *auditService.BizChange
 
 // Create 创建知识库，校验名称和 collection 唯一性。
 func (s *KnowledgeBaseService) Create(ctx context.Context, req dto.CreateKnowledgeBaseReq, userID string) (*dto.KnowledgeBaseResp, error) {
-	if err := s.checkNameUnique(ctx, req.Name, ""); err != nil {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, fmt.Errorf("知识库名称不能为空")
+	}
+	embeddingModel := strings.TrimSpace(req.EmbeddingModel)
+	if embeddingModel == "" {
+		return nil, fmt.Errorf("嵌入模型不能为空")
+	}
+	collectionName := strings.TrimSpace(req.CollectionName)
+	if collectionName == "" {
+		return nil, fmt.Errorf("Collection 名称不能为空")
+	}
+	if err := s.checkNameUnique(ctx, name, ""); err != nil {
 		return nil, err
 	}
-	if err := s.checkCollectionUnique(ctx, req.CollectionName, ""); err != nil {
+	if err := s.checkCollectionUnique(ctx, collectionName, ""); err != nil {
 		return nil, err
 	}
 
 	kb := &model.KnowledgeBase{
-		Name:           req.Name,
-		EmbeddingModel: req.EmbeddingModel,
-		CollectionName: req.CollectionName,
+		Name:           name,
+		EmbeddingModel: embeddingModel,
+		CollectionName: collectionName,
 		CreatedBy:      userID,
 	}
 	kb.CreateTime = time.Now()
@@ -88,8 +100,8 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, req dto.CreateKnowled
 	}
 	if s.vecCleaner != nil {
 		if err := s.vecCleaner.EnsureVectorSpace(ctx, rag.VectorSpaceSpec{
-			SpaceID: rag.VectorSpaceID{Name: req.CollectionName},
-			Remark:  req.Name,
+			SpaceID: rag.VectorSpaceID{Name: collectionName},
+			Remark:  name,
 		}); err != nil {
 			return nil, fmt.Errorf("failed to ensure vector space: %w", err)
 		}
@@ -128,16 +140,35 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, id string, req dto.Up
 	}
 	before := toResp(kb)
 
-	if err := s.checkNameUnique(ctx, req.Name, id); err != nil {
-		return nil, err
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, fmt.Errorf("知识库名称不能为空")
 	}
-	if err := s.checkCollectionUnique(ctx, req.CollectionName, id); err != nil {
-		return nil, err
+	if name != kb.Name {
+		if err := s.checkNameUnique(ctx, name, id); err != nil {
+			return nil, err
+		}
+	}
+	embeddingModel := strings.TrimSpace(req.EmbeddingModel)
+	if embeddingModel != "" && embeddingModel != kb.EmbeddingModel {
+		docCount, err := s.repo.CountChunkedDocumentsByKBID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count chunked documents: %w", err)
+		}
+		if docCount > 0 {
+			return nil, fmt.Errorf("知识库已存在向量化文档，不允许修改嵌入模型")
+		}
+		kb.EmbeddingModel = embeddingModel
+	}
+	collectionName := strings.TrimSpace(req.CollectionName)
+	if collectionName != "" && collectionName != kb.CollectionName {
+		if err := s.checkCollectionUnique(ctx, collectionName, id); err != nil {
+			return nil, err
+		}
+		kb.CollectionName = collectionName
 	}
 
-	kb.Name = req.Name
-	kb.EmbeddingModel = req.EmbeddingModel
-	kb.CollectionName = req.CollectionName
+	kb.Name = name
 	kb.UpdatedBy = userID
 	kb.UpdateTime = time.Now()
 
@@ -154,6 +185,73 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, id string, req dto.Up
 		AfterSnapshot:  resp,
 	})
 	return resp, nil
+}
+
+// List 分页查询知识库列表。
+func (s *KnowledgeBaseService) List(ctx context.Context, page, size int, name string) ([]dto.KnowledgeBaseResp, int64, error) {
+	records, total, err := s.repo.List(ctx, page, size, name)
+	if err != nil {
+		return nil, 0, err
+	}
+	ids := make([]string, 0, len(records))
+	for i := range records {
+		ids = append(ids, records[i].ID)
+	}
+	docCounts, err := s.repo.CountDocumentsByKBIDs(ctx, ids)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count knowledge base documents: %w", err)
+	}
+	resps := make([]dto.KnowledgeBaseResp, 0, len(records))
+	for i := range records {
+		resp := toResp(&records[i])
+		resp.DocumentCount = docCounts[records[i].ID]
+		resps = append(resps, *resp)
+	}
+	return resps, total, nil
+}
+
+func (s *KnowledgeBaseService) checkNameUnique(ctx context.Context, name string, excludeID string) error {
+	exists, err := s.repo.ExistsByName(ctx, name, excludeID)
+	if err != nil {
+		return fmt.Errorf("failed to check name uniqueness: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("知识库名称已存在")
+	}
+	return nil
+}
+
+func (s *KnowledgeBaseService) checkCollectionUnique(ctx context.Context, collectionName string, excludeID string) error {
+	exists, err := s.repo.ExistsByCollectionName(ctx, collectionName, excludeID)
+	if err != nil {
+		return fmt.Errorf("failed to check collection uniqueness: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("collection 名称已存在")
+	}
+	return nil
+}
+
+func toResp(kb *model.KnowledgeBase) *dto.KnowledgeBaseResp {
+	return &dto.KnowledgeBaseResp{
+		ID:             kb.ID,
+		Name:           kb.Name,
+		EmbeddingModel: kb.EmbeddingModel,
+		CollectionName: kb.CollectionName,
+		CreatedBy:      kb.CreatedBy,
+		UpdatedBy:      kb.UpdatedBy,
+		CreateTime:     kb.CreateTime.Format(time.RFC3339),
+		UpdateTime:     kb.UpdateTime.Format(time.RFC3339),
+	}
+}
+
+func (s *KnowledgeBaseService) recordAudit(ctx context.Context, req auditService.RecordReq) {
+	if s.auditRecorder == nil {
+		return
+	}
+	if err := s.auditRecorder.Record(ctx, req); err != nil {
+		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
+	}
 }
 
 // Delete 软删除知识库。
@@ -244,61 +342,4 @@ func (s *KnowledgeBaseService) cleanupPhysicalResources(ctx context.Context, eve
 		return firstErr
 	}
 	return nil
-}
-
-// List 分页查询知识库列表。
-func (s *KnowledgeBaseService) List(ctx context.Context, page, size int) ([]dto.KnowledgeBaseResp, int64, error) {
-	records, total, err := s.repo.List(ctx, page, size)
-	if err != nil {
-		return nil, 0, err
-	}
-	resps := make([]dto.KnowledgeBaseResp, 0, len(records))
-	for i := range records {
-		resps = append(resps, *toResp(&records[i]))
-	}
-	return resps, total, nil
-}
-
-func (s *KnowledgeBaseService) checkNameUnique(ctx context.Context, name string, excludeID string) error {
-	exists, err := s.repo.ExistsByName(ctx, name, excludeID)
-	if err != nil {
-		return fmt.Errorf("failed to check name uniqueness: %w", err)
-	}
-	if exists {
-		return fmt.Errorf("知识库名称已存在")
-	}
-	return nil
-}
-
-func (s *KnowledgeBaseService) checkCollectionUnique(ctx context.Context, collectionName string, excludeID string) error {
-	exists, err := s.repo.ExistsByCollectionName(ctx, collectionName, excludeID)
-	if err != nil {
-		return fmt.Errorf("failed to check collection uniqueness: %w", err)
-	}
-	if exists {
-		return fmt.Errorf("collection 名称已存在")
-	}
-	return nil
-}
-
-func toResp(kb *model.KnowledgeBase) *dto.KnowledgeBaseResp {
-	return &dto.KnowledgeBaseResp{
-		ID:             kb.ID,
-		Name:           kb.Name,
-		EmbeddingModel: kb.EmbeddingModel,
-		CollectionName: kb.CollectionName,
-		CreatedBy:      kb.CreatedBy,
-		UpdatedBy:      kb.UpdatedBy,
-		CreateTime:     kb.CreateTime.Format(time.RFC3339),
-		UpdateTime:     kb.UpdateTime.Format(time.RFC3339),
-	}
-}
-
-func (s *KnowledgeBaseService) recordAudit(ctx context.Context, req auditService.RecordReq) {
-	if s.auditRecorder == nil {
-		return
-	}
-	if err := s.auditRecorder.Record(ctx, req); err != nil {
-		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
-	}
 }

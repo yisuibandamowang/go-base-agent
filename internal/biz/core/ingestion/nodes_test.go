@@ -345,6 +345,27 @@ func TestChunkerNode_ChunksFallbackText(t *testing.T) {
 	}
 }
 
+func TestChunkerNode_UsesStructureAwareStrategyForFallbackText(t *testing.T) {
+	node := NewChunkerNode()
+	ctx := &rag.IngestionContext{
+		RawText: "# 会员权益\n支持会员等级、积分和优惠券查询。\n\n# 订单售后\n支持订单状态、退款和发票查询。",
+	}
+	result := node.Execute(context.Background(), ctx, rag.NodeConfig{Settings: map[string]any{
+		"strategy":    "structure_aware",
+		"chunkSize":   40,
+		"overlapSize": 0,
+	}})
+	if !result.Success {
+		t.Fatalf("unexpected chunker result: %+v", result)
+	}
+	if len(ctx.Chunks) != 2 {
+		t.Fatalf("expected markdown headings to produce 2 chunks, got %+v", ctx.Chunks)
+	}
+	if !strings.HasPrefix(ctx.Chunks[0].Content, "# 会员权益") || !strings.HasPrefix(ctx.Chunks[1].Content, "# 订单售后") {
+		t.Fatalf("expected chunks to keep heading boundaries, got %+v", ctx.Chunks)
+	}
+}
+
 func TestChunkerNode_WholeDocumentSentinelKeepsFallbackTextTogether(t *testing.T) {
 	node := NewChunkerNode()
 	text := strings.Repeat("会员Agent支持查询。", 80)

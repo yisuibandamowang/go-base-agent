@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	auditModel "go-base-agent/internal/biz/audit/model"
 	auditRepo "go-base-agent/internal/biz/audit/repo"
@@ -215,6 +216,124 @@ func TestKnowledgeBaseService_CreateEnsuresVectorSpace(t *testing.T) {
 	}
 	if len(vecStore.ensureCalls) != 1 || vecStore.ensureCalls[0] != "kb_ensure" {
 		t.Fatalf("expected vector space ensure for kb_ensure, got %+v", vecStore.ensureCalls)
+	}
+}
+
+func TestKnowledgeBaseService_ListFiltersByNameOrdersByUpdateTimeAndCountsDocuments(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Now()
+	kbs := []knowledgeModel.KnowledgeBase{
+		{Name: "会员知识库", EmbeddingModel: "emb-1", CollectionName: "member_kb", CreatedBy: "admin"},
+		{Name: "会员规则库", EmbeddingModel: "emb-1", CollectionName: "rule_kb", CreatedBy: "admin"},
+		{Name: "工单知识库", EmbeddingModel: "emb-1", CollectionName: "ticket_kb", CreatedBy: "admin"},
+	}
+	for i := range kbs {
+		if err := gdb.Create(&kbs[i]).Error; err != nil {
+			t.Fatalf("seed kb %d: %v", i, err)
+		}
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeBase{}).Where("id = ?", kbs[0].ID).
+		Updates(map[string]any{"update_time": now.Add(-2 * time.Hour)}).Error; err != nil {
+		t.Fatalf("update time member: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeBase{}).Where("id = ?", kbs[1].ID).
+		Updates(map[string]any{"update_time": now}).Error; err != nil {
+		t.Fatalf("update time rule: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocument{
+		KbID: kbs[1].ID, DocName: "doc-1", FileURL: "file://doc-1", FileType: "md", Status: "success", CreatedBy: "admin",
+	}).Error; err != nil {
+		t.Fatalf("seed active document: %v", err)
+	}
+	deletedDoc := knowledgeModel.KnowledgeDocument{
+		KbID: kbs[1].ID, DocName: "doc-2", FileURL: "file://doc-2", FileType: "md", Status: "success", CreatedBy: "admin",
+	}
+	if err := gdb.Create(&deletedDoc).Error; err != nil {
+		t.Fatalf("seed deleted document: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", deletedDoc.ID).
+		Update("deleted", 1).Error; err != nil {
+		t.Fatalf("mark deleted document: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	items, total, err := svc.List(context.Background(), 1, 10, "会员")
+	if err != nil {
+		t.Fatalf("list knowledge bases: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("expected 2 matched knowledge bases, got %d", total)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(items))
+	}
+	if items[0].ID != kbs[1].ID || items[1].ID != kbs[0].ID {
+		t.Fatalf("expected update_time desc order, got %+v", items)
+	}
+	if items[0].DocumentCount != 1 {
+		t.Fatalf("expected active document count 1, got %+v", items[0])
+	}
+}
+
+func TestKnowledgeBaseService_UpdateRenamesWithoutClearingExistingFields(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	kb := knowledgeModel.KnowledgeBase{Name: "原知识库", EmbeddingModel: "emb-1", CollectionName: "kb_origin", CreatedBy: "admin"}
+	if err := gdb.Create(&kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	updated, err := svc.Update(context.Background(), kb.ID, knowledgeDto.UpdateKnowledgeBaseReq{Name: "新知识库"}, "admin")
+	if err != nil {
+		t.Fatalf("rename knowledge base: %v", err)
+	}
+	if updated.Name != "新知识库" || updated.EmbeddingModel != "emb-1" || updated.CollectionName != "kb_origin" {
+		t.Fatalf("expected rename to preserve existing fields, got %+v", updated)
+	}
+
+	if _, err := svc.Update(context.Background(), kb.ID, knowledgeDto.UpdateKnowledgeBaseReq{Name: "   "}, "admin"); err == nil || !strings.Contains(err.Error(), "知识库名称不能为空") {
+		t.Fatalf("expected blank name validation, got %v", err)
+	}
+}
+
+func TestKnowledgeBaseService_UpdateBlocksEmbeddingModelChangeAfterChunkedDocuments(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	kb := knowledgeModel.KnowledgeBase{Name: "会员知识库", EmbeddingModel: "emb-1", CollectionName: "member_kb", CreatedBy: "admin"}
+	if err := gdb.Create(&kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocument{
+		KbID: kb.ID, DocName: "doc-1", FileURL: "file://doc-1", FileType: "md", Status: "success", ChunkCount: 1, CreatedBy: "admin",
+	}).Error; err != nil {
+		t.Fatalf("seed chunked document: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	_, err = svc.Update(context.Background(), kb.ID, knowledgeDto.UpdateKnowledgeBaseReq{
+		Name:           "会员知识库",
+		EmbeddingModel: "emb-2",
+	}, "admin")
+	if err == nil || !strings.Contains(err.Error(), "不允许修改嵌入模型") {
+		t.Fatalf("expected embedding model change to be blocked, got %v", err)
 	}
 }
 

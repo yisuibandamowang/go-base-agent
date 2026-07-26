@@ -43,6 +43,7 @@ type DocumentService struct {
 	vecStore                   vectorStore
 	fileStore                  FileReader
 	ingestion                  ingestionTaskStarter
+	pipelineGetter             ingestionPipelineGetter
 	auditRecorder              *auditService.BizChangeLogService
 	parserRegistry             *parser.Registry
 	llm                        chat.LLMService
@@ -84,6 +85,10 @@ type ingestionTaskStarter interface {
 	Create(ctx context.Context, req ingestionDto.CreateTaskReq, userID string) (*ingestionDto.IngestionResultResp, error)
 }
 
+type ingestionPipelineGetter interface {
+	Get(ctx context.Context, id string) (*ingestionDto.PipelineResp, error)
+}
+
 // NewDocumentService 创建 DocumentService。
 func NewDocumentService(
 	docRepo *repo.KnowledgeDocumentRepo,
@@ -114,6 +119,11 @@ func (s *DocumentService) SetScheduleRepo(scheduleRepo *repo.KnowledgeDocumentSc
 // SetIngestionTaskStarter sets the optional ingestion task service for pipeline-mode documents.
 func (s *DocumentService) SetIngestionTaskStarter(starter ingestionTaskStarter) {
 	s.ingestion = starter
+}
+
+// SetIngestionPipelineGetter 设置 Pipeline 查询服务，用于文档 pipeline 模式前置校验。
+func (s *DocumentService) SetIngestionPipelineGetter(getter ingestionPipelineGetter) {
+	s.pipelineGetter = getter
 }
 
 // SetAuditRecorder 设置审计日志记录器。
@@ -181,18 +191,42 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 	}
 	doc.CreateTime = time.Now()
 	doc.UpdateTime = time.Now()
+	if err := validateCreateDocumentScheduleConfig(doc, req.ScheduleEnabled, req.ScheduleCron); err != nil {
+		return nil, err
+	}
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
 	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
 		return nil, err
 	}
+	if err := s.validateDocumentParserSupport(doc); err != nil {
+		return nil, err
+	}
 
-	if req.ChunkStrategy != "" {
+	processMode, err := normalizeDocumentProcessMode(req.ProcessMode)
+	if err != nil {
+		return nil, err
+	}
+	if processMode == "pipeline" || strings.EqualFold(req.ChunkStrategy, "pipeline") {
+		pipelineID := firstNonEmpty(req.PipelineID, pipelineIDFromChunkConfig(req.ChunkConfig))
+		if strings.TrimSpace(pipelineID) == "" {
+			return nil, fmt.Errorf("使用Pipeline模式时，必须指定Pipeline ID")
+		}
+		if err := s.validateDocumentPipelineExists(ctx, pipelineID); err != nil {
+			return nil, err
+		}
+		doc.ProcessMode = "pipeline"
+		doc.PipelineID = strings.TrimSpace(pipelineID)
+	} else if processMode == "chunk" || req.ChunkStrategy != "" {
 		doc.ProcessMode = "chunk"
 		doc.ChunkStrategy = req.ChunkStrategy
 		doc.ChunkConfig = req.ChunkConfig
-		if strings.EqualFold(req.ChunkStrategy, "pipeline") {
-			doc.ProcessMode = "pipeline"
-			doc.PipelineID = firstNonEmpty(req.PipelineID, pipelineIDFromChunkConfig(req.ChunkConfig))
+		if processMode == "chunk" || isJavaChunkStrategy(req.ChunkStrategy) {
+			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
+			if err != nil {
+				return nil, err
+			}
+			doc.ChunkStrategy = strategy
+			doc.ChunkConfig = chunkConfig
 		}
 	}
 
@@ -224,6 +258,88 @@ func pipelineIDFromChunkConfig(raw string) string {
 		return ""
 	}
 	return strings.TrimSpace(cfg.PipelineID)
+}
+
+func (s *DocumentService) validateDocumentPipelineExists(ctx context.Context, pipelineID string) error {
+	pipelineID = strings.TrimSpace(pipelineID)
+	if pipelineID == "" || s.pipelineGetter == nil {
+		return nil
+	}
+	if _, err := s.pipelineGetter.Get(ctx, pipelineID); err != nil {
+		return fmt.Errorf("指定的Pipeline不存在: %s", pipelineID)
+	}
+	return nil
+}
+
+func (s *DocumentService) validateDocumentParserSupport(doc *model.KnowledgeDocument) error {
+	registry := s.parserRegistry
+	if registry == nil {
+		registry = parser.DefaultRegistry()
+	}
+	mimeType := detectDocumentMIME(doc)
+	if !registry.Supports(mimeType) {
+		fileType := strings.TrimSpace(doc.FileType)
+		if fileType == "" {
+			fileType = strings.TrimSpace(filepath.Ext(doc.DocName))
+		}
+		return fmt.Errorf("暂不支持的文件类型：%s", strings.TrimPrefix(fileType, "."))
+	}
+	return nil
+}
+
+func normalizeDocumentProcessMode(raw string) (string, error) {
+	mode := strings.TrimSpace(strings.ToLower(raw))
+	switch mode {
+	case "", "chunk", "pipeline":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("不支持的处理模式: %s", raw)
+	}
+}
+
+func validateAndNormalizeDocumentChunkConfig(strategy string, rawConfig string) (string, string, error) {
+	normalizedStrategy, err := normalizeDocumentChunkStrategy(strategy)
+	if err != nil {
+		return "", "", err
+	}
+	chunkConfig := strings.TrimSpace(rawConfig)
+	if chunkConfig == "" {
+		return normalizedStrategy, "", nil
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(chunkConfig), &config); err != nil {
+		return "", "", fmt.Errorf("分块参数JSON格式不合法")
+	}
+	for _, key := range requiredDocumentChunkConfigKeys(normalizedStrategy) {
+		if _, ok := config[key]; !ok {
+			return "", "", fmt.Errorf("分块参数缺少必要字段: %s", key)
+		}
+	}
+	return normalizedStrategy, chunkConfig, nil
+}
+
+func normalizeDocumentChunkStrategy(raw string) (string, error) {
+	strategy := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(raw)), "-", "_")
+	switch strategy {
+	case "":
+		return "structure_aware", nil
+	case "fixed_size", "structure_aware":
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("Unknown chunk strategy: %s", raw)
+	}
+}
+
+func isJavaChunkStrategy(raw string) bool {
+	strategy := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(raw)), "-", "_")
+	return strategy == "fixed_size" || strategy == "structure_aware"
+}
+
+func requiredDocumentChunkConfigKeys(strategy string) []string {
+	if strategy == "fixed_size" {
+		return []string{"chunkSize", "overlapSize"}
+	}
+	return []string{"targetChars", "overlapChars", "maxChars", "minChars"}
 }
 
 func buildDocumentPipelineNodeResults(nodes []ingestionModel.IngestionPipelineNode, chunkCount int, durationMs int64) []ingestionService.TaskNodeExecutionResult {
@@ -456,15 +572,17 @@ func (s *DocumentService) executeChunk(ctx context.Context, docID string) error 
 
 	// 2. 执行分块处理
 	if doc.ProcessMode == "pipeline" {
+		pipelineStart := time.Now()
 		result, err := s.runPipelineProcess(ctx, doc)
+		chunkDuration = time.Since(pipelineStart).Milliseconds()
 		if err != nil {
 			slog.Error("chunk task: pipeline process failed", "docId", docID, "err", err)
 			s.markChunkFailed(ctx, docID)
-			s.updateChunkLog(chunkLog.ID, "failed", 0, 0, 0, 0, 0, time.Since(startTime).Milliseconds(), err.Error())
+			s.updateChunkLog(chunkLog.ID, "failed", 0, 0, chunkDuration, 0, 0, time.Since(startTime).Milliseconds(), err.Error())
 			return err
 		}
 		s.markPipelineCompleted(ctx, docID, result.ChunkCount)
-		s.updateChunkLog(chunkLog.ID, "success", result.ChunkCount, 0, 0, 0, 0, time.Since(startTime).Milliseconds(), result.Message)
+		s.updateChunkLog(chunkLog.ID, "success", result.ChunkCount, 0, chunkDuration, 0, 0, time.Since(startTime).Milliseconds(), result.Message)
 		slog.Info("chunk task: pipeline completed", "docId", docID, "taskId", result.TaskID, "chunks", result.ChunkCount)
 		return nil
 	}
@@ -582,7 +700,28 @@ func (s *DocumentService) ExecuteIngestionPipelineTask(ctx context.Context, req 
 	return ingestionService.TaskExecutionResult{
 		ChunkCount: savedCount,
 		Nodes:      documentTaskNodeResultsFromLogs(ingestionCtx.Logs),
+		Metadata:   documentIngestionTaskMetadata(ingestionCtx),
 	}, nil
+}
+
+func documentIngestionTaskMetadata(ctx *rag.IngestionContext) map[string]any {
+	if ctx == nil {
+		return nil
+	}
+	data := make(map[string]any, len(ctx.Metadata)+2)
+	for k, v := range ctx.Metadata {
+		data[k] = v
+	}
+	if len(ctx.Keywords) > 0 {
+		data["keywords"] = ctx.Keywords
+	}
+	if len(ctx.Questions) > 0 {
+		data["questions"] = ctx.Questions
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return data
 }
 
 func (s *DocumentService) documentIngestionNodes() []rag.IngestionNode {
@@ -601,13 +740,15 @@ func (s *DocumentService) documentIngestionNodes() []rag.IngestionNode {
 }
 
 func (s *DocumentService) newDocumentIngestionContext(ctx context.Context, req ingestionDto.CreateTaskReq, doc *model.KnowledgeDocument, kb *model.KnowledgeBase) (*rag.IngestionContext, error) {
-	var rawBytes []byte
+	rawBytes := req.RawBytes
 	if s.fileStore != nil {
 		data, err := s.readDocumentBytes(ctx, doc)
 		if err != nil {
 			return nil, fmt.Errorf("读取文件内容失败: %w", err)
 		}
-		rawBytes = data
+		if len(rawBytes) == 0 {
+			rawBytes = data
+		}
 	}
 	source := &rag.DocumentSource{
 		Type:        firstNonEmpty(normalizeKnowledgeSourceType(req.Source.Type), normalizeKnowledgeSourceType(doc.SourceType), doc.FileType, "file"),
@@ -631,7 +772,7 @@ func (s *DocumentService) newDocumentIngestionContext(ctx context.Context, req i
 		PipelineID:       req.PipelineID,
 		Source:           source,
 		RawBytes:         rawBytes,
-		MimeType:         detectDocumentMIME(doc),
+		MimeType:         firstNonEmpty(req.MimeType, detectDocumentMIME(doc)),
 		Metadata:         metadata,
 		VectorSpaceID:    firstNonEmpty(vectorSpaceIDString(req.VectorSpaceID), kb.CollectionName),
 		SkipIndexerWrite: true,
@@ -648,19 +789,15 @@ func documentPipelineDefinitionFromNodes(pipelineID string, nodes []ingestionMod
 		if err != nil {
 			return rag.PipelineDefinition{}, fmt.Errorf("parse node %s settings: %w", node.NodeID, err)
 		}
-		condition, err := readPipelineNodeJSONMap(node.ConditionJSON)
+		condition, err := readPipelineNodeJSONValue(node.ConditionJSON)
 		if err != nil {
 			return rag.PipelineDefinition{}, fmt.Errorf("parse node %s condition: %w", node.NodeID, err)
-		}
-		var conditionValue any
-		if len(condition) > 0 {
-			conditionValue = condition
 		}
 		definition.Nodes = append(definition.Nodes, rag.NodeConfig{
 			NodeID:     node.NodeID,
 			NodeType:   rag.NormalizeIngestionNodeType(rag.IngestionNodeType(node.NodeType)),
 			Settings:   settings,
-			Condition:  conditionValue,
+			Condition:  condition,
 			NextNodeID: node.NextNodeID,
 			Enabled:    true,
 		})
@@ -673,6 +810,17 @@ func readPipelineNodeJSONMap(raw string) (map[string]any, error) {
 		return nil, nil
 	}
 	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func readPipelineNodeJSONValue(raw string) (any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out any
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return nil, err
 	}
@@ -928,7 +1076,7 @@ func detectDocumentMIME(doc *model.KnowledgeDocument) string {
 		case ".svg":
 			return "image/svg+xml"
 		default:
-			return "text/plain"
+			return "application/octet-stream"
 		}
 	}
 }
@@ -1211,9 +1359,45 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	if strings.TrimSpace(req.ScheduleCron) != "" {
 		doc.ScheduleCron = req.ScheduleCron
 	}
-	if req.ChunkStrategy != "" {
+	if err := validateUpdateDocumentScheduleConfig(doc, req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.ProcessMode) != "" {
+		processMode, err := normalizeDocumentProcessMode(req.ProcessMode)
+		if err != nil {
+			return nil, err
+		}
+		doc.ProcessMode = processMode
+		if processMode == "pipeline" {
+			if strings.TrimSpace(req.PipelineID) == "" {
+				return nil, fmt.Errorf("使用Pipeline模式时，必须指定Pipeline ID")
+			}
+			if err := s.validateDocumentPipelineExists(ctx, req.PipelineID); err != nil {
+				return nil, err
+			}
+			doc.PipelineID = strings.TrimSpace(req.PipelineID)
+			doc.ChunkStrategy = ""
+			doc.ChunkConfig = ""
+		} else {
+			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
+			if err != nil {
+				return nil, err
+			}
+			doc.ChunkStrategy = strategy
+			doc.ChunkConfig = chunkConfig
+			doc.PipelineID = ""
+		}
+	} else if req.ChunkStrategy != "" {
 		doc.ChunkStrategy = req.ChunkStrategy
 		doc.ChunkConfig = req.ChunkConfig
+		if isJavaChunkStrategy(req.ChunkStrategy) {
+			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
+			if err != nil {
+				return nil, err
+			}
+			doc.ChunkStrategy = strategy
+			doc.ChunkConfig = chunkConfig
+		}
 	}
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, doc.ScheduleEnabled, doc.ScheduleCron)
 	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
@@ -1407,16 +1591,26 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 	if err != nil {
 		return nil, fmt.Errorf("document not found: %w", err)
 	}
+	if doc.Status == "running" {
+		return nil, fmt.Errorf("文档正在分块处理中，暂不支持新增 Chunk")
+	}
+	if doc.Enabled != 1 {
+		return nil, fmt.Errorf("文档未启用，暂不支持新增 Chunk")
+	}
 	content := strings.TrimSpace(req.Content)
 	if content == "" {
 		return nil, fmt.Errorf("分块内容不能为空")
 	}
 	var nextIndex int
-	if err := s.db.WithContext(ctx).Model(&model.KnowledgeChunk{}).
-		Where("doc_id = ? AND deleted = 0", docID).
-		Select("COALESCE(MAX(chunk_index), -1) + 1").
-		Scan(&nextIndex).Error; err != nil {
-		return nil, fmt.Errorf("查询分块序号失败: %w", err)
+	if req.Index != nil {
+		nextIndex = *req.Index
+	} else {
+		if err := s.db.WithContext(ctx).Model(&model.KnowledgeChunk{}).
+			Where("doc_id = ? AND deleted = 0", docID).
+			Select("COALESCE(MAX(chunk_index), -1) + 1").
+			Scan(&nextIndex).Error; err != nil {
+			return nil, fmt.Errorf("查询分块序号失败: %w", err)
+		}
 	}
 	hash := sha256.Sum256([]byte(content))
 	chunk := &model.KnowledgeChunk{
@@ -1431,6 +1625,9 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 		CreatedBy:   userID,
 		UpdatedBy:   userID,
 	}
+	if strings.TrimSpace(req.ChunkID) != "" {
+		chunk.ID = strings.TrimSpace(req.ChunkID)
+	}
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(chunk).Error; err != nil {
 			return err
@@ -1444,6 +1641,19 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 	}); err != nil {
 		return nil, fmt.Errorf("create chunk: %w", err)
 	}
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return nil, fmt.Errorf("知识库不存在: %w", err)
+		}
+		vecChunk, err := s.buildChunkVector(ctx, doc, kb, chunk)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, []rag.VectorChunk{vecChunk}); err != nil {
+			return nil, fmt.Errorf("index chunk vector: %w", err)
+		}
+	}
 	resp := s.chunkToResp(chunk)
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:       auditService.BizTypeKnowledgeChunk,
@@ -1456,16 +1666,50 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 }
 
 // UpdateChunk 更新分块内容。
-func (s *DocumentService) UpdateChunk(ctx context.Context, chunkID string, req dto.UpdateChunkReq, userID string) (*dto.ChunkResp, error) {
+func (s *DocumentService) UpdateChunk(ctx context.Context, docID, chunkID string, req dto.UpdateChunkReq, userID string) (*dto.ChunkResp, error) {
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return nil, fmt.Errorf("文档不存在: %w", err)
+	}
+	if doc.Status == "running" {
+		return nil, fmt.Errorf("文档正在分块处理中，暂不支持修改 Chunk")
+	}
 	chunk, err := s.chunkRepo.FindByID(ctx, chunkID)
 	if err != nil {
 		return nil, err
 	}
+	if chunk.DocID != docID {
+		return nil, fmt.Errorf("Chunk 不属于该文档")
+	}
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		return nil, fmt.Errorf("分块内容不能为空")
+	}
 	before := s.chunkToResp(chunk)
-	chunk.Content = req.Content
+	if content == chunk.Content {
+		return before, nil
+	}
+	hash := sha256.Sum256([]byte(content))
+	chunk.Content = content
+	chunk.ContentHash = fmt.Sprintf("%x", hash[:])
+	chunk.CharCount = len([]rune(content))
+	chunk.TokenCount = len(strings.Fields(content))
 	chunk.UpdatedBy = userID
 	if err := s.chunkRepo.Update(ctx, chunk); err != nil {
 		return nil, fmt.Errorf("update chunk: %w", err)
+	}
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return nil, fmt.Errorf("知识库不存在: %w", err)
+		}
+		vecChunk, err := s.buildChunkVector(ctx, doc, kb, chunk)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.vecStore.UpdateChunk(ctx, kb.CollectionName, doc.ID, vecChunk); err != nil {
+			return nil, fmt.Errorf("update chunk vector: %w", err)
+		}
 	}
 	resp := s.chunkToResp(chunk)
 	s.recordAudit(ctx, auditService.RecordReq{
@@ -1480,14 +1724,42 @@ func (s *DocumentService) UpdateChunk(ctx context.Context, chunkID string, req d
 }
 
 // DeleteChunk 软删除分块。
-func (s *DocumentService) DeleteChunk(ctx context.Context, chunkID string) error {
+func (s *DocumentService) DeleteChunk(ctx context.Context, docID, chunkID string) error {
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return fmt.Errorf("文档不存在: %w", err)
+	}
+	if doc.Status == "running" {
+		return fmt.Errorf("文档正在分块处理中，暂不支持删除 Chunk")
+	}
 	chunk, err := s.chunkRepo.FindByID(ctx, chunkID)
 	if err != nil {
 		return err
 	}
+	if chunk.DocID != docID {
+		return fmt.Errorf("Chunk 不属于该文档")
+	}
 	before := s.chunkToResp(chunk)
-	if err := s.chunkRepo.SoftDelete(ctx, chunkID); err != nil {
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := db.SoftDelete(tx, &model.KnowledgeChunk{BaseModel: db.BaseModel{ID: chunkID}}); err != nil {
+			return err
+		}
+		return tx.Model(&model.KnowledgeDocument{}).Where("id = ?", docID).
+			Updates(map[string]interface{}{
+				"chunk_count": gorm.Expr("CASE WHEN chunk_count > 0 THEN chunk_count - 1 ELSE 0 END"),
+				"update_time": time.Now(),
+			}).Error
+	}); err != nil {
 		return err
+	}
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return fmt.Errorf("知识库不存在: %w", err)
+		}
+		if err := s.vecStore.DeleteChunkByID(ctx, kb.CollectionName, chunkID); err != nil {
+			return fmt.Errorf("delete chunk vector: %w", err)
+		}
 	}
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeKnowledgeChunk,
@@ -1625,7 +1897,7 @@ func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, i
 }
 
 // GetChunkLogs 查询文档分块日志。
-func (s *DocumentService) GetChunkLogs(ctx context.Context, docID string, page, size int) ([]model.KnowledgeDocumentChunkLog, int64, error) {
+func (s *DocumentService) GetChunkLogs(ctx context.Context, docID string, page, size int) ([]dto.ChunkLogResp, int64, error) {
 	var logs []model.KnowledgeDocumentChunkLog
 	var total int64
 	q := s.db.WithContext(ctx).Model(&model.KnowledgeDocumentChunkLog{}).
@@ -1636,7 +1908,77 @@ func (s *DocumentService) GetChunkLogs(ctx context.Context, docID string, page, 
 	if err := q.Order("create_time DESC").Limit(size).Offset((page - 1) * size).Find(&logs).Error; err != nil {
 		return nil, 0, err
 	}
-	return logs, total, nil
+	resp := make([]dto.ChunkLogResp, 0, len(logs))
+	pipelineNames := s.chunkLogPipelineNames(ctx, logs)
+	for _, log := range logs {
+		resp = append(resp, chunkLogToResp(log, pipelineNames[log.PipelineID]))
+	}
+	return resp, total, nil
+}
+
+func (s *DocumentService) chunkLogPipelineNames(ctx context.Context, logs []model.KnowledgeDocumentChunkLog) map[string]string {
+	names := make(map[string]string)
+	if s.pipelineGetter == nil {
+		return names
+	}
+	for _, log := range logs {
+		pipelineID := strings.TrimSpace(log.PipelineID)
+		if pipelineID == "" {
+			continue
+		}
+		if _, ok := names[pipelineID]; ok {
+			continue
+		}
+		pipeline, err := s.pipelineGetter.Get(ctx, pipelineID)
+		if err != nil || pipeline == nil {
+			names[pipelineID] = ""
+			continue
+		}
+		names[pipelineID] = pipeline.Name
+	}
+	return names
+}
+
+func chunkLogToResp(log model.KnowledgeDocumentChunkLog, pipelineName string) dto.ChunkLogResp {
+	return dto.ChunkLogResp{
+		ID:              log.ID,
+		DocID:           log.DocID,
+		Status:          log.Status,
+		ProcessMode:     log.ProcessMode,
+		ChunkStrategy:   log.ChunkStrategy,
+		PipelineID:      log.PipelineID,
+		PipelineName:    pipelineName,
+		ExtractDuration: log.ExtractDuration,
+		ChunkDuration:   log.ChunkDuration,
+		EmbedDuration:   log.EmbedDuration,
+		PersistDuration: log.PersistDuration,
+		OtherDuration:   chunkLogOtherDuration(log),
+		TotalDuration:   log.TotalDuration,
+		ChunkCount:      log.ChunkCount,
+		ErrorMessage:    log.ErrorMessage,
+		StartTime:       formatOptionalTime(log.StartTime),
+		EndTime:         formatOptionalTime(log.EndTime),
+		CreateTime:      log.CreateTime.Format(time.RFC3339),
+		UpdateTime:      log.UpdateTime.Format(time.RFC3339),
+	}
+}
+
+func chunkLogOtherDuration(log model.KnowledgeDocumentChunkLog) int64 {
+	other := log.TotalDuration - log.ChunkDuration - log.PersistDuration
+	if !strings.EqualFold(log.ProcessMode, "pipeline") {
+		other -= log.ExtractDuration + log.EmbedDuration
+	}
+	if other < 0 {
+		return 0
+	}
+	return other
+}
+
+func formatOptionalTime(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 // PreviewDocument returns the full text of a document by concatenating all its chunks.
@@ -1746,6 +2088,35 @@ func (s *DocumentService) validateDocumentSchedule(enabled int16, cronExpr strin
 	}
 	_, err := s.documentScheduleNextRunTime(cronExpr, time.Now())
 	return err
+}
+
+func validateCreateDocumentScheduleConfig(doc *model.KnowledgeDocument, enabled int16, cronExpr string) error {
+	if doc == nil || !strings.EqualFold(normalizeKnowledgeSourceType(doc.SourceType), "url") || enabled != 1 {
+		return nil
+	}
+	if strings.TrimSpace(cronExpr) == "" {
+		return fmt.Errorf("定时表达式不能为空")
+	}
+	return nil
+}
+
+func validateUpdateDocumentScheduleConfig(doc *model.KnowledgeDocument, req dto.UpdateDocumentReq) error {
+	if doc == nil || !strings.EqualFold(normalizeKnowledgeSourceType(doc.SourceType), "url") {
+		return nil
+	}
+	if req.ScheduleEnabled == nil && strings.TrimSpace(req.ScheduleCron) == "" && strings.TrimSpace(req.SourceLocation) == "" {
+		return nil
+	}
+	if doc.ScheduleEnabled != 1 {
+		return nil
+	}
+	if strings.TrimSpace(doc.ScheduleCron) == "" {
+		return fmt.Errorf("启用定时拉取时必须设置定时表达式")
+	}
+	if strings.TrimSpace(doc.SourceLocation) == "" {
+		return fmt.Errorf("启用定时拉取时必须设置来源地址")
+	}
+	return nil
 }
 
 func (s *DocumentService) documentScheduleNextRunTime(expr string, from time.Time) (time.Time, error) {

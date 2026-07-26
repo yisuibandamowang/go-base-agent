@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"go-base-agent/internal/biz/intent_tree/dto"
 	"go-base-agent/internal/biz/intent_tree/service"
@@ -39,6 +40,21 @@ func (h *IntentHandler) CreateNode(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
+// CreateNodeCompat POST /api/ragent/intent-tree
+func (h *IntentHandler) CreateNodeCompat(c *gin.Context) {
+	var req dto.CreateIntentReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
+		return
+	}
+	resp, err := h.svc.CreateNode(c.Request.Context(), req, currentUser(c))
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp.ID))
+}
+
 // GetNode GET /api/ragent/intent-tree/nodes/:id
 func (h *IntentHandler) GetNode(c *gin.Context) {
 	id := c.Param("id")
@@ -64,6 +80,21 @@ func (h *IntentHandler) UpdateNode(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+// UpdateNodeCompat PUT /api/ragent/intent-tree/:id
+func (h *IntentHandler) UpdateNodeCompat(c *gin.Context) {
+	id := c.Param("id")
+	var req dto.UpdateIntentReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
+		return
+	}
+	if _, err := h.svc.UpdateNode(c.Request.Context(), id, req, currentUser(c)); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // DeleteNode DELETE /api/ragent/intent-tree/nodes/:id
@@ -166,9 +197,10 @@ func (h *IntentHandler) DeleteTermMapping(c *gin.Context) {
 // ListTermMappings GET /api/ragent/intent-tree/term-mappings
 func (h *IntentHandler) ListTermMappings(c *gin.Context) {
 	domain := c.Query("domain")
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	page, _ := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
-	records, total, err := h.svc.ListTermMappings(c.Request.Context(), domain, page, size)
+	records, total, err := h.svc.ListTermMappings(c.Request.Context(), domain, keyword, page, size)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return

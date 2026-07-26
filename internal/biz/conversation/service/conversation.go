@@ -400,7 +400,11 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 	if err != nil {
 		return nil, fmt.Errorf("find conversation for history: %w", err)
 	}
-	msgs, err := s.msgRepo.LoadHistory(ctx, conversationID, conv.UserID, 100)
+	historyLimit := 100
+	if s.historyKeepTurns > 0 {
+		historyLimit = s.historyKeepTurns * 2
+	}
+	msgs, err := s.msgRepo.LoadLatestHistory(ctx, conversationID, conv.UserID, historyLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +415,7 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 	if summary := s.loadLatestSummary(ctx, conversationID, conv.UserID); summary != nil && summary.Content != "" {
 		result = append(result, chat.NewSystemMessage(s.decorateSummary(summary.Content)))
 	}
-	for _, m := range msgs {
+	for _, m := range normalizeMemoryMessages(msgs) {
 		result = append(result, chat.Message{
 			Role:             chat.Role(m.Role),
 			Content:          m.Content,
@@ -420,6 +424,30 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 		})
 	}
 	return result, nil
+}
+
+func normalizeMemoryMessages(msgs []model.Message) []model.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+	filtered := make([]model.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		if !strings.EqualFold(msg.Role, string(chat.RoleUser)) && !strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	start := 0
+	for start < len(filtered) && strings.EqualFold(filtered[start].Role, string(chat.RoleAssistant)) {
+		start++
+	}
+	if start >= len(filtered) {
+		return nil
+	}
+	return filtered[start:]
 }
 
 // AppendMessage 追加消息到会话。

@@ -48,8 +48,11 @@ type jwtClaims struct {
 	UserID   string `json:"userId"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	Avatar   string `json:"avatar"`
 	jwt.RegisteredClaims
 }
+
+const defaultAvatarURL = "https://avatars.githubusercontent.com/u/583231?v=4"
 
 // Login 验证用户名密码并签发 JWT token。
 func (s *AuthService) Login(ctx context.Context, username, password string) (string, error) {
@@ -67,6 +70,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (str
 		UserID:   user.ID,
 		Username: user.Username,
 		Role:     user.Role,
+		Avatar:   resolveAvatar(user.Avatar),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -99,6 +103,7 @@ func (s *AuthService) ParseTokenWithContext(ctx context.Context, tokenStr string
 		UserID:   claims.UserID,
 		Username: claims.Username,
 		Role:     claims.Role,
+		Avatar:   resolveAvatar(claims.Avatar),
 	}, nil
 }
 
@@ -166,13 +171,21 @@ func (s *AuthService) TokenName() string {
 
 // ChangePassword verifies old password and updates to new password.
 func (s *AuthService) ChangePassword(ctx context.Context, userID, oldPwd, newPwd string) error {
+	oldPwd = strings.TrimSpace(oldPwd)
+	newPwd = strings.TrimSpace(newPwd)
+	if oldPwd == "" {
+		return fmt.Errorf("当前密码不能为空")
+	}
+	if newPwd == "" {
+		return fmt.Errorf("新密码不能为空")
+	}
 	user, err := s.repo.FindByID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("用户不存在")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(oldPwd)); err != nil {
 		if user.Password != oldPwd {
-			return fmt.Errorf("原密码错误")
+			return fmt.Errorf("当前密码不正确")
 		}
 	}
 	hashed, err := bcrypt.GenerateFromPassword([]byte(newPwd), bcrypt.DefaultCost)
@@ -180,4 +193,12 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID, oldPwd, newPwd
 		return fmt.Errorf("加密密码失败")
 	}
 	return s.repo.UpdatePassword(ctx, userID, string(hashed))
+}
+
+func resolveAvatar(avatar string) string {
+	avatar = strings.TrimSpace(avatar)
+	if avatar == "" {
+		return defaultAvatarURL
+	}
+	return avatar
 }

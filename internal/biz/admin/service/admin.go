@@ -182,12 +182,19 @@ func (s *AdminService) GetTraceDetail(ctx context.Context, traceID string) (*adm
 
 // --- 示例问题 ---
 
+const defaultSampleQuestionLimit = 3
+const defaultAdminUsername = "admin"
+
 // CreateSampleQuestion 创建示例问题。
 func (s *AdminService) CreateSampleQuestion(ctx context.Context, req adminDto.CreateSampleQuestionReq) (*adminDto.SampleQuestionResp, error) {
+	question := strings.TrimSpace(req.Question)
+	if question == "" {
+		return nil, fmt.Errorf("示例问题内容不能为空")
+	}
 	sq := &adminModel.SampleQuestion{
-		Title:       req.Title,
-		Description: req.Description,
-		Question:    req.Question,
+		Title:       strings.TrimSpace(req.Title),
+		Description: strings.TrimSpace(req.Description),
+		Question:    question,
 	}
 	if err := s.sampleQRepo.Create(ctx, sq); err != nil {
 		return nil, fmt.Errorf("创建示例问题失败: %w", err)
@@ -204,8 +211,8 @@ func (s *AdminService) CreateSampleQuestion(ctx context.Context, req adminDto.Cr
 }
 
 // ListSampleQuestions 查询示例问题。
-func (s *AdminService) ListSampleQuestions(ctx context.Context, page, size int) ([]adminDto.SampleQuestionResp, int64, error) {
-	items, total, err := s.sampleQRepo.List(ctx, page, size)
+func (s *AdminService) ListSampleQuestions(ctx context.Context, page, size int, keyword string) ([]adminDto.SampleQuestionResp, int64, error) {
+	items, total, err := s.sampleQRepo.List(ctx, page, size, keyword)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -214,6 +221,19 @@ func (s *AdminService) ListSampleQuestions(ctx context.Context, page, size int) 
 		resp = append(resp, *toSampleQResp(&sq))
 	}
 	return resp, total, nil
+}
+
+// ListRandomSampleQuestions 随机查询欢迎页示例问题。
+func (s *AdminService) ListRandomSampleQuestions(ctx context.Context) ([]adminDto.SampleQuestionResp, error) {
+	items, err := s.sampleQRepo.ListRandom(ctx, defaultSampleQuestionLimit)
+	if err != nil {
+		return nil, err
+	}
+	resp := make([]adminDto.SampleQuestionResp, 0, len(items))
+	for _, sq := range items {
+		resp = append(resp, *toSampleQResp(&sq))
+	}
+	return resp, nil
 }
 
 // GetSampleQuestion 查询示例问题详情。
@@ -233,13 +253,17 @@ func (s *AdminService) UpdateSampleQuestion(ctx context.Context, id string, req 
 	}
 	before := toSampleQResp(sq)
 	if req.Title != nil {
-		sq.Title = *req.Title
+		sq.Title = strings.TrimSpace(*req.Title)
 	}
 	if req.Description != nil {
-		sq.Description = *req.Description
+		sq.Description = strings.TrimSpace(*req.Description)
 	}
 	if req.Question != nil {
-		sq.Question = *req.Question
+		question := strings.TrimSpace(*req.Question)
+		if question == "" {
+			return nil, fmt.Errorf("示例问题内容不能为空")
+		}
+		sq.Question = question
 	}
 	if err := s.sampleQRepo.Update(ctx, sq); err != nil {
 		return nil, fmt.Errorf("更新示例问题失败: %w", err)
@@ -279,16 +303,20 @@ func (s *AdminService) DeleteSampleQuestion(ctx context.Context, id string) erro
 // --- 用户管理 ---
 
 // ListUsers 查询所有用户。
-func (s *AdminService) ListUsers(ctx context.Context, page, size int) ([]adminDto.UserResp, int64, error) {
+func (s *AdminService) ListUsers(ctx context.Context, page, size int, keyword string) ([]adminDto.UserResp, int64, error) {
 	var (
 		users []userModel.User
 		total int64
 	)
 	query := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&userModel.User{})
+	if keyword = strings.TrimSpace(keyword); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where("username LIKE ? OR role LIKE ?", like, like)
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
-	if err := query.Scopes(db.Paginate(page, size)).Order("create_time DESC").Find(&users).Error; err != nil {
+	if err := query.Scopes(db.Paginate(page, size)).Order("update_time DESC").Find(&users).Error; err != nil {
 		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
 	resp := make([]adminDto.UserResp, 0, len(users))
@@ -303,19 +331,33 @@ func (s *AdminService) ListUsers(ctx context.Context, page, size int) ([]adminDt
 
 // CreateUser 管理员创建用户。
 func (s *AdminService) CreateUser(ctx context.Context, req adminDto.CreateUserReq) (*adminDto.UserResp, error) {
-	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	username := strings.TrimSpace(req.Username)
+	password := strings.TrimSpace(req.Password)
+	if username == "" {
+		return nil, fmt.Errorf("用户名不能为空")
+	}
+	if password == "" {
+		return nil, fmt.Errorf("密码不能为空")
+	}
+	if isDefaultAdminUsername(username) {
+		return nil, fmt.Errorf("默认管理员用户名不可用")
+	}
+	if err := s.ensureUsernameAvailable(ctx, username, ""); err != nil {
+		return nil, err
+	}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("加密密码失败: %w", err)
 	}
-	role := req.Role
-	if role == "" {
-		role = "user"
+	role, err := normalizeUserRole(req.Role)
+	if err != nil {
+		return nil, err
 	}
 	u := &userModel.User{
-		Username: req.Username,
+		Username: username,
 		Password: string(hashed),
 		Role:     role,
-		Avatar:   req.Avatar,
+		Avatar:   strings.TrimSpace(req.Avatar),
 	}
 	if err := s.db.WithContext(ctx).Create(u).Error; err != nil {
 		return nil, fmt.Errorf("创建用户失败: %w", err)
@@ -340,23 +382,47 @@ func (s *AdminService) UpdateUser(ctx context.Context, id string, req adminDto.U
 	if err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Where("id = ?", id).First(&u).Error; err != nil {
 		return nil, fmt.Errorf("用户不存在: %w", err)
 	}
+	if isDefaultAdminUsername(u.Username) {
+		return nil, fmt.Errorf("默认管理员不允许修改或删除")
+	}
 	before := toUserResp(&u)
 	updates := map[string]interface{}{}
 	if req.Username != nil {
-		updates["username"] = *req.Username
-		u.Username = *req.Username
+		username := strings.TrimSpace(*req.Username)
+		if username == "" {
+			return nil, fmt.Errorf("用户名不能为空")
+		}
+		if isDefaultAdminUsername(username) {
+			return nil, fmt.Errorf("默认管理员用户名不可用")
+		}
+		if username != u.Username {
+			if err := s.ensureUsernameAvailable(ctx, username, u.ID); err != nil {
+				return nil, err
+			}
+		}
+		updates["username"] = username
+		u.Username = username
 	}
 	if req.Password != nil {
-		hashed, _ := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
+		password := strings.TrimSpace(*req.Password)
+		if password == "" {
+			return nil, fmt.Errorf("新密码不能为空")
+		}
+		hashed, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		updates["password"] = string(hashed)
 	}
 	if req.Role != nil {
-		updates["role"] = *req.Role
-		u.Role = *req.Role
+		role, err := normalizeUserRole(*req.Role)
+		if err != nil {
+			return nil, err
+		}
+		updates["role"] = role
+		u.Role = role
 	}
 	if req.Avatar != nil {
-		updates["avatar"] = *req.Avatar
-		u.Avatar = *req.Avatar
+		avatar := strings.TrimSpace(*req.Avatar)
+		updates["avatar"] = avatar
+		u.Avatar = avatar
 	}
 	if len(updates) > 0 {
 		updates["update_time"] = gorm.Expr("CURRENT_TIMESTAMP")
@@ -385,6 +451,9 @@ func (s *AdminService) DeleteUser(ctx context.Context, id string) error {
 	if err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Where("id = ?", id).First(&u).Error; err != nil {
 		return fmt.Errorf("用户不存在: %w", err)
 	}
+	if isDefaultAdminUsername(u.Username) {
+		return fmt.Errorf("默认管理员不允许修改或删除")
+	}
 	before := toUserResp(&u)
 	if err := db.SoftDelete(s.db.WithContext(ctx), &u); err != nil {
 		return err
@@ -396,6 +465,40 @@ func (s *AdminService) DeleteUser(ctx context.Context, id string) error {
 		ActionDesc:     "删除用户：" + u.Username,
 		BeforeSnapshot: before,
 	})
+	return nil
+}
+
+func isDefaultAdminUsername(username string) bool {
+	return strings.EqualFold(strings.TrimSpace(username), defaultAdminUsername)
+}
+
+func normalizeUserRole(role string) (string, error) {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return "user", nil
+	}
+	if strings.EqualFold(role, "admin") {
+		return "admin", nil
+	}
+	if strings.EqualFold(role, "user") {
+		return "user", nil
+	}
+	return "", fmt.Errorf("角色类型不合法")
+}
+
+func (s *AdminService) ensureUsernameAvailable(ctx context.Context, username, excludeID string) error {
+	var count int64
+	query := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&userModel.User{}).
+		Where("username = ?", username)
+	if strings.TrimSpace(excludeID) != "" {
+		query = query.Where("id <> ?", excludeID)
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return fmt.Errorf("检查用户名失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("用户名已存在")
+	}
 	return nil
 }
 

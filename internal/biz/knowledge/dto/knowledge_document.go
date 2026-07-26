@@ -10,6 +10,7 @@ type CreateDocumentReq struct {
 	SourceLocation  string `json:"sourceLocation"`
 	ScheduleEnabled int16  `json:"scheduleEnabled"`
 	ScheduleCron    string `json:"scheduleCron"`
+	ProcessMode     string `json:"processMode"`
 	ChunkStrategy   string `json:"chunkStrategy"`
 	ChunkConfig     string `json:"chunkConfig"`
 	PipelineID      string `json:"pipelineId"`
@@ -22,8 +23,10 @@ type UpdateDocumentReq struct {
 	SourceLocation  string `json:"sourceLocation"`
 	ScheduleEnabled *int16 `json:"scheduleEnabled"`
 	ScheduleCron    string `json:"scheduleCron"`
+	ProcessMode     string `json:"processMode"`
 	ChunkStrategy   string `json:"chunkStrategy"`
 	ChunkConfig     string `json:"chunkConfig"`
+	PipelineID      string `json:"pipelineId"`
 }
 
 // DocumentResp 文档响应。
@@ -48,6 +51,29 @@ type DocumentResp struct {
 	PipelineID      string `json:"pipelineId"`
 	CreatedBy       string `json:"createdBy"`
 	UpdatedBy       string `json:"updatedBy"`
+	CreateTime      string `json:"createTime"`
+	UpdateTime      string `json:"updateTime"`
+}
+
+// ChunkLogResp 文档分块日志响应。
+type ChunkLogResp struct {
+	ID              string `json:"id"`
+	DocID           string `json:"docId"`
+	Status          string `json:"status"`
+	ProcessMode     string `json:"processMode"`
+	ChunkStrategy   string `json:"chunkStrategy"`
+	PipelineID      string `json:"pipelineId"`
+	PipelineName    string `json:"pipelineName"`
+	ExtractDuration int64  `json:"extractDuration"`
+	ChunkDuration   int64  `json:"chunkDuration"`
+	EmbedDuration   int64  `json:"embedDuration"`
+	PersistDuration int64  `json:"persistDuration"`
+	OtherDuration   int64  `json:"otherDuration"`
+	TotalDuration   int64  `json:"totalDuration"`
+	ChunkCount      int    `json:"chunkCount"`
+	ErrorMessage    string `json:"errorMessage"`
+	StartTime       string `json:"startTime"`
+	EndTime         string `json:"endTime"`
 	CreateTime      string `json:"createTime"`
 	UpdateTime      string `json:"updateTime"`
 }
@@ -77,6 +103,8 @@ type UpdateChunkReq struct {
 // CreateChunkReq 手工创建分块请求。
 type CreateChunkReq struct {
 	Content string `json:"content" binding:"required"`
+	Index   *int   `json:"index"`
+	ChunkID string `json:"chunkId"`
 }
 
 // BatchEnableChunksReq 批量启用/禁用分块请求。

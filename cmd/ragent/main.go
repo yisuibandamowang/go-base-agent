@@ -288,6 +288,7 @@ func main() {
 	ingestionPipelineSvc.SetAuditRecorder(auditSvc)
 	ingestionTaskSvc := ingestionService.NewTaskService(ingestionRepo.NewTaskRepo(gormDB), ingestionPipelineSvc, gormDB)
 	ingestionTaskSvc.SetAuditRecorder(auditSvc)
+	docSvc.SetIngestionPipelineGetter(ingestionPipelineSvc)
 	docSvc.SetIngestionTaskStarter(ingestionTaskSvc)
 	ingestionTaskSvc.SetExecutor(docSvc)
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
@@ -457,9 +458,9 @@ func main() {
 		api.GET("/rag/traces/runs/:id", adminH.TraceDetail)
 		api.GET("/rag/traces/runs/:id/nodes", adminH.TraceNodes)
 
-		// Sample questions — /rag/*, /sample-questions, /admin/sample-questions
+		// Sample questions — /rag/* for chat welcome, /sample-questions for Java-compatible admin page.
 		api.GET("/rag/sample-questions", adminH.ListRAGSampleQuestions)
-		api.GET("/sample-questions", adminH.ListRAGSampleQuestions)
+		api.GET("/sample-questions", adminH.ListSampleQuestions)
 		api.GET("/sample-questions/:id", adminH.GetSampleQuestion)
 		api.POST("/sample-questions", adminH.CreateSampleQuestion)
 		api.PUT("/sample-questions/:id", adminH.UpdateSampleQuestion)
@@ -481,7 +482,7 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
-		registerRagEvalRoute(api, llmRewriter, vectorRetriever, cfg.App.Eval.Enabled, intentResolverSvc)
+		registerRagEvalRoute(api, llmRewriter, enrichedRetriever, cfg.App.Eval.Enabled, intentResolverSvc)
 		demoH := newDemoHandler()
 		if hasVLM {
 			demoH = newDemoHandlerWithVLM(vlmService)
@@ -643,8 +644,8 @@ func isNoopConsumer(consumer mq.Consumer) bool {
 
 func registerIntentRoutes(api *gin.RouterGroup, intentTreeHandler *intentHandler.IntentHandler) {
 	api.GET("/intent-tree/trees", intentTreeHandler.GetTree)
-	api.POST("/intent-tree", intentTreeHandler.CreateNode)
-	api.PUT("/intent-tree/:id", intentTreeHandler.UpdateNode)
+	api.POST("/intent-tree", intentTreeHandler.CreateNodeCompat)
+	api.PUT("/intent-tree/:id", intentTreeHandler.UpdateNodeCompat)
 	api.DELETE("/intent-tree/:id", intentTreeHandler.DeleteNode)
 	api.POST("/intent-tree/batch/enable", intentTreeHandler.BatchEnable)
 	api.POST("/intent-tree/batch/disable", intentTreeHandler.BatchDisable)
@@ -766,7 +767,9 @@ func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, chat.LLM
 }
 
 const preferredLocalChatProvider = "ollama"
+const preferredLocalChatID = "qwen3-local"
 const preferredLocalChatModel = "qwen3.6:latest"
+const defaultOllamaURL = "http://localhost:11434"
 
 func buildPreferredLLMService(aiCfg config.AIConfig, health *model.HealthStore, executor *model.RoutingExecutor, chatClients []chat.ChatClient, fallback chat.LLMService) chat.LLMService {
 	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
@@ -797,11 +800,42 @@ func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool
 			if strings.TrimSpace(candidate.ID) != "" {
 				localCfg.Chat.DefaultModel = candidate.ID
 			}
+			if provider, ok := localCfg.Providers[preferredLocalChatProvider]; ok {
+				localCfg.Providers[preferredLocalChatProvider] = normalizeOllamaProvider(provider)
+			}
 			return localCfg, true
 		}
 	}
 
+	if provider, ok := localCfg.Providers[preferredLocalChatProvider]; ok {
+		localCfg.Providers[preferredLocalChatProvider] = normalizeOllamaProvider(provider)
+		localCfg.Chat.DefaultModel = preferredLocalChatID
+		localCfg.Chat.Candidates = []config.AICandidateConfig{{
+			ID:       preferredLocalChatID,
+			Provider: preferredLocalChatProvider,
+			Model:    preferredLocalChatModel,
+			Priority: -1000,
+		}}
+		return localCfg, true
+	}
+
 	return aiCfg, false
+}
+
+func normalizeOllamaProvider(provider config.AIProviderConfig) config.AIProviderConfig {
+	if strings.TrimSpace(provider.Protocol) == "" {
+		provider.Protocol = "openai-compatible"
+	}
+	if strings.TrimSpace(provider.URL) == "" {
+		provider.URL = defaultOllamaURL
+	}
+	if provider.Endpoints == nil {
+		provider.Endpoints = map[string]string{}
+	}
+	if strings.TrimSpace(provider.Endpoints["chat"]) == "" {
+		provider.Endpoints["chat"] = "/v1/chat/completions"
+	}
+	return provider
 }
 
 func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
@@ -959,12 +993,21 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			}
 		}
 		intentLeafIDs := nullableIntentLeafIDs(subQuestions)
+		subIntents := []rag.SubQuestionIntent(nil)
 		if resolver != nil {
 			if resolved, err := resolver.ResolveQuestions(c.Request.Context(), evalIntentQuestions(rewrittenQuestion, subQuestions)); err == nil && len(resolved) > 0 {
+				subIntents = resolved
 				intentLeafIDs = rag.IntentLeafIDs(resolved)
 			}
 		}
-		chunks, err := retriever.Retrieve(c.Request.Context(), rewrittenQuestion, 10)
+		searchContext := rag.SearchContext{
+			OriginalQuestion:  question,
+			RewrittenQuestion: rewrittenQuestion,
+			SubQuestions:      subQuestions,
+			Intents:           subIntents,
+			TopK:              10,
+		}
+		chunks, err := evalRetrieve(c.Request.Context(), retriever, searchContext)
 		if err != nil {
 			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 			return
@@ -979,7 +1022,7 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			contexts = append(contexts, chunk.Text)
 			docID := ""
 			if chunk.Metadata != nil {
-				docID = chunk.Metadata["doc_id"]
+				docID = evalBusinessDocID(chunk.Metadata)
 			}
 			contextDocIDs = append(contextDocIDs, docID)
 			if docID != "" {
@@ -1002,6 +1045,39 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			"latencyMs":              time.Since(start).Milliseconds(),
 		}))
 	}
+}
+
+func evalRetrieve(ctx context.Context, retriever rag.Retriever, sc rag.SearchContext) ([]rag.RetrievedChunk, error) {
+	if retriever == nil {
+		return nil, nil
+	}
+	if intentAware, ok := retriever.(rag.IntentAwareRetriever); ok {
+		return intentAware.RetrieveWithContext(ctx, sc)
+	}
+	return retriever.Retrieve(ctx, firstNonEmpty(sc.RewrittenQuestion, sc.OriginalQuestion), sc.TopK)
+}
+
+func evalBusinessDocID(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	docName := strings.TrimSpace(metadata["doc_name"])
+	if docName != "" {
+		return stripEvalDocExtension(docName)
+	}
+	return strings.TrimSpace(metadata["doc_id"])
+}
+
+func stripEvalDocExtension(docName string) string {
+	docName = strings.TrimSpace(docName)
+	if docName == "" {
+		return ""
+	}
+	dot := strings.LastIndex(docName, ".")
+	if dot > 0 && dot < len(docName)-1 {
+		return docName[:dot]
+	}
+	return docName
 }
 
 func evalIntentQuestions(rewrittenQuestion string, subQuestions []string) []string {

@@ -119,7 +119,7 @@ func (h *ConversationHandler) Messages(c *gin.Context) {
 		return
 	}
 	conversationID := c.Param("conversationId")
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
 	msgs, err := h.svc.GetMessages(c.Request.Context(), conversationID, user.UserID, limit)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))

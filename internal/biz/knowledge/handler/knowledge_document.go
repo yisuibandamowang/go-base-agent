@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -91,6 +92,8 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	var req dto.CreateDocumentReq
 	var file multipart.File
 	var header *multipart.FileHeader
+	var remoteData []byte
+	var remoteName string
 
 	// File upload
 	if files := form.File["file"]; len(files) > 0 {
@@ -122,6 +125,20 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 		}
 	}
 
+	if file == nil && strings.EqualFold(strings.TrimSpace(req.SourceType), "url") {
+		data, name, fileType, err := fetchRemoteUploadFile(c.Request.Context(), req.SourceLocation)
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+			return
+		}
+		remoteData = data
+		remoteName = name
+		req.DocName = name
+		req.FileType = fileType
+		req.FileSize = int64(len(data))
+		req.FileURL = req.SourceLocation
+	}
+
 	if vals, ok := form.Value["scheduleEnabled"]; ok && len(vals) > 0 {
 		req.ScheduleEnabled = parseInt16(vals[0])
 	}
@@ -131,6 +148,7 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 
 	// Process mode & chunk strategy
 	if vals, ok := form.Value["processMode"]; ok && len(vals) > 0 {
+		req.ProcessMode = vals[0]
 		if vals[0] == "pipeline" {
 			if pvals, ok := form.Value["pipelineId"]; ok && len(pvals) > 0 {
 				req.ChunkStrategy = "pipeline"
@@ -144,6 +162,9 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	}
 	if vals, ok := form.Value["chunkConfig"]; ok && len(vals) > 0 {
 		req.ChunkConfig = vals[0]
+	}
+	if vals, ok := form.Value["pipelineId"]; ok && len(vals) > 0 && req.PipelineID == "" {
+		req.PipelineID = vals[0]
 	}
 
 	if req.DocName == "" {
@@ -175,8 +196,111 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 			return
 		}
 	}
+	if remoteData != nil {
+		kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), kbID)
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", "查询知识库失败: "+err.Error()))
+			return
+		}
+		if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, resp.ID, remoteName, remoteData); err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", "保存远程文件失败: "+err.Error()))
+			return
+		}
+	}
 
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+func fetchRemoteUploadFile(ctx context.Context, rawURL string) ([]byte, string, string, error) {
+	location := strings.TrimSpace(rawURL)
+	if location == "" {
+		return nil, "", "", fmt.Errorf("来源地址不能为空")
+	}
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, "", "", fmt.Errorf("来源地址不合法")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, "", "", fmt.Errorf("来源地址仅支持 http/https")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, location, nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("创建远程文件请求失败: %w", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("获取远程文件失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, "", "", fmt.Errorf("获取远程文件失败: HTTP %d", resp.StatusCode)
+	}
+	const maxUploadBytes = 50 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxUploadBytes+1))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("读取远程文件失败: %w", err)
+	}
+	if len(data) > maxUploadBytes {
+		return nil, "", "", fmt.Errorf("远程文件超过 50MB 限制")
+	}
+	name := remoteUploadFilename(resp.Header.Get("Content-Disposition"), parsed.Path)
+	fileType := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
+	if fileType == "" {
+		fileType = uploadFileTypeFromContentType(resp.Header.Get("Content-Type"))
+	}
+	if fileType == "" {
+		fileType = "unknown"
+	}
+	return data, name, fileType, nil
+}
+
+func remoteUploadFilename(disposition, urlPath string) string {
+	if disposition != "" {
+		if _, params, err := mime.ParseMediaType(disposition); err == nil {
+			if filename := strings.TrimSpace(params["filename"]); filename != "" {
+				return filepath.Base(filename)
+			}
+		}
+	}
+	name := filepath.Base(urlPath)
+	if name == "." || name == "/" || name == "" {
+		return "remote-document"
+	}
+	return name
+}
+
+func uploadFileTypeFromContentType(contentType string) string {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.ToLower(contentType))
+	}
+	switch mediaType {
+	case "text/markdown":
+		return "md"
+	case "text/plain":
+		return "txt"
+	case "text/csv":
+		return "csv"
+	case "application/pdf":
+		return "pdf"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return "docx"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return "xlsx"
+	case "application/vnd.ms-excel":
+		return "xls"
+	case "text/html":
+		return "html"
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpg"
+	case "image/svg+xml":
+		return "svg"
+	default:
+		return ""
+	}
 }
 
 func parseInt16(value string) int16 {
@@ -294,24 +418,26 @@ func (h *DocumentHandler) ListChunks(c *gin.Context) {
 
 // UpdateChunk PUT /knowledge-base/docs/:docId/chunks/:chunkId
 func (h *DocumentHandler) UpdateChunk(c *gin.Context) {
+	docID := c.Param("docId")
 	chunkID := c.Param("chunkId")
 	var req dto.UpdateChunkReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
 		return
 	}
-	resp, err := h.svc.UpdateChunk(c.Request.Context(), chunkID, req, userID(c))
+	_, err := h.svc.UpdateChunk(c.Request.Context(), docID, chunkID, req, userID(c))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // DeleteChunk DELETE /knowledge-base/docs/:docId/chunks/:chunkId
 func (h *DocumentHandler) DeleteChunk(c *gin.Context) {
+	docID := c.Param("docId")
 	chunkID := c.Param("chunkId")
-	if err := h.svc.DeleteChunk(c.Request.Context(), chunkID); err != nil {
+	if err := h.svc.DeleteChunk(c.Request.Context(), docID, chunkID); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}

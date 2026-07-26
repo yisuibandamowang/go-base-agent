@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	corechunk "go-base-agent/internal/biz/core/chunk"
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
@@ -385,10 +386,11 @@ func (n *ChunkerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 	if strings.TrimSpace(text) == "" {
 		return rag.NodeResult{Success: false, ErrorMessage: "可分块文本为空"}
 	}
-	chunks := (&rag.FixedSizeChunker{}).Chunk(text, opts)
+	chunks := fallbackTextChunker(settings.Strategy).Chunk(text, opts)
 	if len(chunks) == 0 {
 		return rag.NodeResult{Success: false, ErrorMessage: "分块结果为空"}
 	}
+	normalizeFallbackChunks(chunks)
 	nodeCtx.Chunks = chunks
 	return rag.NodeResult{Success: true, ShouldContinue: true, ErrorMessage: fmt.Sprintf("已分块 %d 段, path=legacy-text", len(chunks))}
 }
@@ -551,6 +553,39 @@ func indexerSettingsFromConfig(settings map[string]any) indexerSettings {
 	var out indexerSettings
 	_ = decodeSettings(settings, &out)
 	return out
+}
+
+func fallbackTextChunker(strategy *string) rag.ChunkingStrategy {
+	switch normalizeChunkingStrategy(strategy) {
+	case "fixed_size":
+		return &rag.FixedSizeChunker{}
+	case "structure_aware":
+		return &corechunk.SemanticChunker{}
+	default:
+		return &corechunk.SemanticChunker{}
+	}
+}
+
+func normalizeChunkingStrategy(strategy *string) string {
+	if strategy == nil {
+		return ""
+	}
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(*strategy)), "-", "_")
+}
+
+func normalizeFallbackChunks(chunks []rag.VectorChunk) {
+	for i := range chunks {
+		chunks[i].Index = i
+		if strings.TrimSpace(chunks[i].ChunkID) == "" {
+			chunks[i].ChunkID = fmt.Sprintf("chunk-%d", i)
+		}
+		if strings.TrimSpace(chunks[i].EmbeddingText) == "" {
+			chunks[i].EmbeddingText = chunks[i].Content
+		}
+		if chunks[i].Metadata == nil {
+			chunks[i].Metadata = make(map[string]string)
+		}
+	}
 }
 
 func decodeSettings(settings map[string]any, dst any) error {

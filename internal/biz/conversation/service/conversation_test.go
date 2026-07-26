@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +203,115 @@ func TestDBMemoryStore_LoadHistory_NoMessagesReturnsEmptyEvenWithSummary(t *test
 	}
 	if len(history) != 0 {
 		t.Fatalf("expected empty history when there are no messages, got %d", len(history))
+	}
+}
+
+func TestDBMemoryStore_LoadHistoryKeepsLatestTurnsLikeJava(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.ConversationSummary{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+
+	if err := gdb.Create(&conversationModel.Conversation{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Title:          "长会话",
+	}).Error; err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	baseTime := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ {
+		if err := gdb.Create(&conversationModel.Message{
+			BaseModel:      db.BaseModel{CreateTime: baseTime.Add(time.Duration(i) * time.Second)},
+			ConversationID: "conv-1",
+			UserID:         "user-1",
+			Role:           string(chat.RoleUser),
+			Content:        "message-" + strconv.Itoa(i),
+		}).Error; err != nil {
+			t.Fatalf("seed message %d: %v", i, err)
+		}
+	}
+
+	store := NewDBMemoryStore(
+		gdb,
+		repo.NewConversationRepo(gdb),
+		repo.NewMessageRepo(gdb),
+		repo.NewConversationSummaryRepo(gdb),
+		nil,
+		false,
+		5,
+		120,
+		0,
+		2,
+	)
+
+	history, err := store.LoadHistory(context.Background(), "conv-1")
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if len(history) != 4 {
+		t.Fatalf("expected latest 4 messages, got %d: %+v", len(history), history)
+	}
+	if history[0].Content != "message-2" || history[3].Content != "message-5" {
+		t.Fatalf("expected latest messages in ascending order, first=%q last=%q", history[0].Content, history[3].Content)
+	}
+}
+
+func TestDBMemoryStore_LoadHistoryDropsLeadingAssistantLikeJava(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.ConversationSummary{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+
+	if err := gdb.Create(&conversationModel.Conversation{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		Title:          "长会话",
+	}).Error; err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	baseTime := time.Now().Add(-time.Hour)
+	roles := []chat.Role{chat.RoleUser, chat.RoleAssistant, chat.RoleUser, chat.RoleAssistant, chat.RoleUser}
+	for i, role := range roles {
+		if err := gdb.Create(&conversationModel.Message{
+			BaseModel:      db.BaseModel{CreateTime: baseTime.Add(time.Duration(i) * time.Second)},
+			ConversationID: "conv-1",
+			UserID:         "user-1",
+			Role:           string(role),
+			Content:        "message-" + strconv.Itoa(i),
+		}).Error; err != nil {
+			t.Fatalf("seed message %d: %v", i, err)
+		}
+	}
+
+	store := NewDBMemoryStore(
+		gdb,
+		repo.NewConversationRepo(gdb),
+		repo.NewMessageRepo(gdb),
+		repo.NewConversationSummaryRepo(gdb),
+		nil,
+		false,
+		5,
+		120,
+		0,
+		2,
+	)
+
+	history, err := store.LoadHistory(context.Background(), "conv-1")
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("expected leading assistant to be dropped, got %d messages: %+v", len(history), history)
+	}
+	if history[0].Role != chat.RoleUser || history[0].Content != "message-2" {
+		t.Fatalf("expected history to start from latest user turn, got %+v", history[0])
 	}
 }
 

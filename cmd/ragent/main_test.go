@@ -99,8 +99,8 @@ func TestRagEvalHandler(t *testing.T) {
 		body := w.Body.String()
 		for _, want := range []string{
 			`"retrievedChunkIds":["chunk-1"]`,
-			`"retrievedDocIds":["doc-1"]`,
-			`"retrievedContextDocIds":["doc-1"]`,
+			`"retrievedDocIds":["FAQ_VAC_001"]`,
+			`"retrievedContextDocIds":["FAQ_VAC_001"]`,
 			`"hasKb":true`,
 			`"hasMcp":false`,
 			`"mcpContext":""`,
@@ -134,6 +134,35 @@ func TestRagEvalHandlerReturnsResolvedIntentLeafIDs(t *testing.T) {
 	}
 	if !strings.Contains(body, `"intentLeafIds":["leaf-1","leaf-2"]`) {
 		t.Fatalf("expected resolved leaf ids, got %s", body)
+	}
+}
+
+func TestRagEvalHandlerPassesIntentContextToRetriever(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	api := r.Group("/api/ragent")
+	retriever := &fakeEvalContextRetriever{}
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, retriever, true, fakeEvalIntentResolver{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d %s", w.Code, w.Body.String())
+	}
+	if retriever.simpleCalls != 0 || retriever.contextCalls != 1 {
+		t.Fatalf("expected context retrieval only, simple=%d context=%d", retriever.simpleCalls, retriever.contextCalls)
+	}
+	sc := retriever.lastContext
+	if sc.OriginalQuestion != "hello" || sc.RewrittenQuestion != "hello 改写" || sc.TopK != 10 {
+		t.Fatalf("unexpected search context basics: %+v", sc)
+	}
+	if len(sc.SubQuestions) != 2 || sc.SubQuestions[1] != "hello follow-up" {
+		t.Fatalf("expected rewritten sub questions, got %+v", sc.SubQuestions)
+	}
+	if len(sc.Intents) != 2 || sc.Intents[0].TopLeafID() != "leaf-1" || sc.Intents[1].TopLeafID() != "leaf-2" {
+		t.Fatalf("expected resolved intents, got %+v", sc.Intents)
 	}
 }
 
@@ -279,6 +308,48 @@ func TestBuildLocalPreferredChatConfig_SelectsOllamaQwen36(t *testing.T) {
 	candidate := localCfg.Chat.Candidates[0]
 	if candidate.Provider != "ollama" || candidate.Model != "qwen3.6:latest" {
 		t.Fatalf("unexpected local candidate: %+v", candidate)
+	}
+}
+
+func TestBuildLocalPreferredChatConfig_AddsOllamaQwen36WhenCandidateMissing(t *testing.T) {
+	aiCfg := config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"ollama": {
+				URL:      "http://localhost:11434",
+				Protocol: "openai-compatible",
+				Endpoints: map[string]string{
+					"chat": "/v1/chat/completions",
+				},
+			},
+			"bailian": {
+				URL:      "https://dashscope.aliyuncs.com",
+				Protocol: "openai-compatible",
+				Endpoints: map[string]string{
+					"chat": "/compatible-mode/v1/chat/completions",
+				},
+			},
+		},
+		Chat: config.AIChatConfig{
+			DefaultModel: "qwen3-max",
+			Candidates: []config.AICandidateConfig{
+				{ID: "qwen3-max", Provider: "bailian", Model: "qwen3-max", Priority: 1},
+			},
+		},
+	}
+
+	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
+	if !ok {
+		t.Fatal("expected local preferred chat config")
+	}
+	if localCfg.Chat.DefaultModel != "qwen3-local" {
+		t.Fatalf("unexpected local default model %q", localCfg.Chat.DefaultModel)
+	}
+	if len(localCfg.Chat.Candidates) != 1 {
+		t.Fatalf("expected one local candidate, got %d", len(localCfg.Chat.Candidates))
+	}
+	candidate := localCfg.Chat.Candidates[0]
+	if candidate.Provider != "ollama" || candidate.Model != "qwen3.6:latest" {
+		t.Fatalf("unexpected generated local candidate: %+v", candidate)
 	}
 }
 
@@ -645,8 +716,9 @@ func (f *fakeEvalRetriever) Retrieve(ctx context.Context, question string, topK 
 		Text:  "hello context",
 		Score: 0.91,
 		Metadata: map[string]string{
-			"doc_id":  "doc-1",
-			"kb_name": "kb",
+			"doc_id":   "internal-doc-1",
+			"doc_name": "FAQ_VAC_001.md",
+			"kb_name":  "kb",
 		},
 	}}, nil
 }
@@ -668,4 +740,21 @@ func (f fakeEvalIntentResolver) ResolveQuestions(ctx context.Context, questions 
 		})
 	}
 	return out, nil
+}
+
+type fakeEvalContextRetriever struct {
+	simpleCalls  int
+	contextCalls int
+	lastContext  rag.SearchContext
+}
+
+func (f *fakeEvalContextRetriever) Retrieve(ctx context.Context, question string, topK int) ([]rag.RetrievedChunk, error) {
+	f.simpleCalls++
+	return []rag.RetrievedChunk{{ID: "simple", Text: question}}, nil
+}
+
+func (f *fakeEvalContextRetriever) RetrieveWithContext(ctx context.Context, sc rag.SearchContext) ([]rag.RetrievedChunk, error) {
+	f.contextCalls++
+	f.lastContext = sc
+	return []rag.RetrievedChunk{{ID: "context", Text: sc.RewrittenQuestion}}, nil
 }

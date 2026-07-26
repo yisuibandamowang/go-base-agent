@@ -151,7 +151,7 @@ ai:
       endpoints:
         chat: /v1/messages
     ollama:
-      url: ${OLLAMA_URL}
+      url: ${OLLAMA_URL:http://localhost:11434}
       protocol: openai-compatible
       endpoints:
         chat: /v1/chat/completions
