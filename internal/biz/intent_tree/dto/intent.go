@@ -75,6 +75,7 @@ type CreateIntentReq struct {
 	SortOrder           int            `json:"sortOrder"`
 	Enabled             int16          `json:"enabled"`
 	TopKSet             bool           `json:"-"`
+	EnabledSet          bool           `json:"-"`
 }
 
 // UnmarshalJSON 记录 topK 是否由请求显式传入。
@@ -119,6 +120,14 @@ func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 	r.ParamPromptTemplate = raw.ParamPromptTemplate
 	r.SortOrder = raw.SortOrder
 	r.Enabled = raw.Enabled
+	if string(data) != "" {
+		var enabledProbe struct {
+			Enabled *int16 `json:"enabled"`
+		}
+		if err := json.Unmarshal(data, &enabledProbe); err == nil && enabledProbe.Enabled != nil {
+			r.EnabledSet = true
+		}
+	}
 	return nil
 }
 

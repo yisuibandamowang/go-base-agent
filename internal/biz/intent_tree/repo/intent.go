@@ -23,7 +23,7 @@ func NewIntentRepo(database *gorm.DB) *IntentRepo {
 
 // Create 创建意图节点。
 func (r *IntentRepo) Create(ctx context.Context, node *model.IntentNode) error {
-	return r.db.WithContext(ctx).Create(node).Error
+	return r.db.WithContext(ctx).Select("*").Create(node).Error
 }
 
 // FindByID 根据 ID 查询节点。

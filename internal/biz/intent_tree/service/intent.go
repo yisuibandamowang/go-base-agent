@@ -83,11 +83,18 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 		PromptTemplate:      req.PromptTemplate,
 		ParamPromptTemplate: req.ParamPromptTemplate,
 		SortOrder:           req.SortOrder,
-		Enabled:             req.Enabled,
+		Enabled:             normalizeCreateEnabled(req.Enabled, req.EnabledSet),
 		CreateBy:            userID,
 	}
 	if err := s.intentRepo.Create(ctx, node); err != nil {
 		return nil, fmt.Errorf("创建意图节点失败: %w", err)
+	}
+	desiredEnabled := normalizeCreateEnabled(req.Enabled, req.EnabledSet)
+	if node.Enabled != desiredEnabled {
+		if err := s.intentRepo.UpdateEnabled(ctx, node.ID, desiredEnabled); err != nil {
+			return nil, fmt.Errorf("更新意图节点默认启用状态失败: %w", err)
+		}
+		node.Enabled = desiredEnabled
 	}
 	resp := toIntentResp(node)
 	s.recordAudit(ctx, auditService.RecordReq{
@@ -639,6 +646,13 @@ func validateTopK(topK int) error {
 		return fmt.Errorf("节点级 TopK 必须大于 0")
 	}
 	return nil
+}
+
+func normalizeCreateEnabled(enabled int16, enabledSet bool) int16 {
+	if !enabledSet && enabled == 0 {
+		return 1
+	}
+	return enabled
 }
 
 func (s *IntentService) resolveCollectionName(ctx context.Context, kbID, fallback string) (string, error) {

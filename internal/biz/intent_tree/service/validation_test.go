@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -119,6 +120,36 @@ func TestIntentService_CreateNodeResolvesCollectionNameFromKBIDLikeJava(t *testi
 	}
 	if created.CollectionName != "member_collection" {
 		t.Fatalf("expected collectionName from knowledge base, got %s", created.CollectionName)
+	}
+}
+
+func TestIntentService_CreateNodeDefaultsEnabledToOneLikeJava(t *testing.T) {
+	svc := newIntentValidationService(t)
+	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode: "member.default-enabled",
+		Name:       "默认启用节点",
+		Level:      1,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	if created.Enabled != 1 {
+		t.Fatalf("expected enabled to default to 1, got %d", created.Enabled)
+	}
+}
+
+func TestIntentService_CreateNodePreservesExplicitDisabledState(t *testing.T) {
+	svc := newIntentValidationService(t)
+	var req dto.CreateIntentReq
+	if err := json.Unmarshal([]byte(`{"intentCode":"member.disabled","name":"禁用节点","level":1,"enabled":0}`), &req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	created, err := svc.CreateNode(context.Background(), req, "user-1")
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	if created.Enabled != 0 {
+		t.Fatalf("expected explicit disabled state to remain 0, got %d", created.Enabled)
 	}
 }
 
