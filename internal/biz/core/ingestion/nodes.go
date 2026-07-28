@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
 )
+
+const defaultFeishuOpenAPIBaseURL = "https://open.feishu.cn"
 
 type parserRegistry interface {
 	Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error)
@@ -109,9 +112,197 @@ func (n *FetcherNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 			}
 		}
 		return rag.NodeResult{Success: true, ShouldContinue: true, ErrorMessage: fmt.Sprintf("已获取 %d 字节", len(data))}
+	case "feishu":
+		data, mimeType, fileName, err := n.fetchFeishu(ctx, source)
+		if err != nil {
+			return rag.NodeResult{Success: false, ErrorMessage: err.Error()}
+		}
+		nodeCtx.RawBytes = data
+		nodeCtx.MimeType = firstNonEmpty(nodeCtx.MimeType, mimeType, detectMimeType(source, data))
+		if strings.TrimSpace(source.FileName) == "" {
+			source.FileName = fileName
+		}
+		return rag.NodeResult{Success: true, ShouldContinue: true, ErrorMessage: fmt.Sprintf("已获取 %d 字节", len(data))}
 	default:
 		return rag.NodeResult{Success: false, ErrorMessage: "不支持的来源类型: " + source.Type}
 	}
+}
+
+func (n *FetcherNode) fetchFeishu(ctx context.Context, source *rag.DocumentSource) ([]byte, string, string, error) {
+	location := strings.TrimSpace(source.Location)
+	if location == "" {
+		return nil, "", "", fmt.Errorf("飞书文档地址不能为空")
+	}
+	headers, err := n.feishuHeaders(ctx, source.Credentials)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	if isFeishuDocxURL(location) {
+		docToken, err := extractFeishuDocToken(location)
+		if err != nil {
+			return nil, "", "", err
+		}
+		apiURL := strings.TrimRight(feishuBaseURL(source.Credentials), "/") + "/open-apis/docx/v1/documents/" + docToken + "/raw_content"
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("创建飞书请求失败: %w", err)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := n.client.Do(req)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("飞书文档获取失败: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, "", "", fmt.Errorf("飞书文档获取失败: status=%d", resp.StatusCode)
+		}
+		body, err := readAllLimited(resp.Body, 20<<20)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("读取飞书响应失败: %w", err)
+		}
+		content := extractFeishuDocxContent(body)
+		if strings.TrimSpace(content) == "" {
+			content = string(body)
+		}
+		fileName := firstNonEmpty(source.FileName, docToken+".txt")
+		return []byte(content), "text/plain", fileName, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, location, nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("创建飞书请求失败: %w", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("飞书文档获取失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", "", fmt.Errorf("飞书文档获取失败: status=%d", resp.StatusCode)
+	}
+	data, err := readAllLimited(resp.Body, 20<<20)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("读取飞书响应失败: %w", err)
+	}
+	fileName := source.FileName
+	if strings.TrimSpace(fileName) == "" {
+		if name := filenameFromContentDisposition(resp.Header.Get("Content-Disposition")); name != "" {
+			fileName = name
+		} else if u, err := url.Parse(location); err == nil {
+			fileName = filepath.Base(u.Path)
+		}
+	}
+	mimeType := firstNonEmpty(normalizeContentType(resp.Header.Get("Content-Type")), detectMimeType(source, data))
+	return data, mimeType, fileName, nil
+}
+
+func (n *FetcherNode) feishuHeaders(ctx context.Context, credentials map[string]string) (map[string]string, error) {
+	headers := make(map[string]string)
+	token, err := n.resolveFeishuAccessToken(ctx, credentials)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(token) != "" {
+		headers["Authorization"] = "Bearer " + strings.TrimSpace(token)
+	}
+	return headers, nil
+}
+
+func (n *FetcherNode) resolveFeishuAccessToken(ctx context.Context, credentials map[string]string) (string, error) {
+	if len(credentials) == 0 {
+		return "", nil
+	}
+	if token := firstNonEmpty(credentials["tenantAccessToken"], credentials["accessToken"]); token != "" {
+		return token, nil
+	}
+	appID := firstNonEmpty(credentials["app_id"], credentials["appId"])
+	appSecret := firstNonEmpty(credentials["app_secret"], credentials["appSecret"])
+	if appID == "" || appSecret == "" {
+		return "", nil
+	}
+	return n.requestFeishuTenantAccessToken(ctx, credentials, appID, appSecret)
+}
+
+func (n *FetcherNode) requestFeishuTenantAccessToken(ctx context.Context, credentials map[string]string, appID, appSecret string) (string, error) {
+	payload, err := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
+	if err != nil {
+		return "", fmt.Errorf("构造飞书令牌请求失败: %w", err)
+	}
+	tokenURL := strings.TrimRight(feishuBaseURL(credentials), "/") + "/open-apis/auth/v3/tenant_access_token/internal/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("创建飞书令牌请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("飞书令牌请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("飞书令牌请求失败: status=%d", resp.StatusCode)
+	}
+	body, err := readAllLimited(resp.Body, 1<<20)
+	if err != nil {
+		return "", fmt.Errorf("读取飞书令牌响应失败: %w", err)
+	}
+	var parsed struct {
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("解析飞书令牌响应失败: %w", err)
+	}
+	return strings.TrimSpace(parsed.TenantAccessToken), nil
+}
+
+func isFeishuDocxURL(location string) bool {
+	return strings.Contains(location, "/docx/") || strings.Contains(location, "/docs/")
+}
+
+func extractFeishuDocToken(location string) (string, error) {
+	u, err := url.Parse(location)
+	var parts []string
+	if err == nil {
+		parts = strings.Split(u.Path, "/")
+	} else {
+		parts = strings.Split(location, "/")
+	}
+	for i, part := range parts {
+		if strings.EqualFold(part, "docx") || strings.EqualFold(part, "docs") {
+			if i+1 < len(parts) {
+				token := strings.TrimSpace(parts[i+1])
+				if token != "" {
+					return token, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("无法从飞书链接解析文档令牌: %s", location)
+}
+
+func feishuBaseURL(credentials map[string]string) string {
+	if len(credentials) == 0 {
+		return defaultFeishuOpenAPIBaseURL
+	}
+	return firstNonEmpty(credentials["baseURL"], credentials["baseUrl"], defaultFeishuOpenAPIBaseURL)
+}
+
+func extractFeishuDocxContent(body []byte) string {
+	var parsed struct {
+		Data struct {
+			Content string `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Data.Content)
 }
 
 // ParserNode parses raw bytes into a structured document.

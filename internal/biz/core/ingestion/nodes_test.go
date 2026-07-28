@@ -53,6 +53,43 @@ func TestFetcherNode_ReadsURL(t *testing.T) {
 	}
 }
 
+func TestFetcherNode_ReadsFeishuDocxRawContent(t *testing.T) {
+	var gotAuth string
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"content":"飞书正文"}}`))
+	}))
+	defer srv.Close()
+
+	ctx := &rag.IngestionContext{Source: &rag.DocumentSource{
+		Type:     "feishu",
+		Location: "https://example.feishu.cn/docx/doc-token",
+		Credentials: map[string]string{
+			"accessToken": "token-1",
+			"baseURL":     srv.URL,
+		},
+	}}
+	result := NewFetcherNode(srv.Client()).Execute(context.Background(), ctx, rag.NodeConfig{})
+	if !result.Success {
+		t.Fatalf("unexpected fetch result: %+v", result)
+	}
+	if gotPath != "/open-apis/docx/v1/documents/doc-token/raw_content" {
+		t.Fatalf("unexpected feishu raw content path: %s", gotPath)
+	}
+	if gotAuth != "Bearer token-1" {
+		t.Fatalf("unexpected authorization header: %q", gotAuth)
+	}
+	if string(ctx.RawBytes) != "飞书正文" {
+		t.Fatalf("unexpected raw bytes: %q", string(ctx.RawBytes))
+	}
+	if ctx.MimeType != "text/plain" || ctx.Source.FileName != "doc-token.txt" {
+		t.Fatalf("unexpected mime or fileName: mime=%q fileName=%q", ctx.MimeType, ctx.Source.FileName)
+	}
+}
+
 type testParserRegistry struct {
 	doc     *rag.ParsedDocument
 	options map[string]string
