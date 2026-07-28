@@ -255,5 +255,7 @@ auth:
 
 app:
   demo-mode: false
+  intent-tree:
+    init-from-factory: false
   eval:
     enabled: false

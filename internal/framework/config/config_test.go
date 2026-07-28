@@ -225,6 +225,28 @@ rag:
 	}
 }
 
+func TestLoadParsesAppIntentTreeInitFromFactory(t *testing.T) {
+	yaml := `
+app:
+  intent-tree:
+    init-from-factory: true
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.App.IntentTree.InitFromFactory {
+		t.Fatal("expected app.intent-tree.init-from-factory to be true")
+	}
+}
+
 func TestLoadRejectsInvalidMemorySummaryWindow(t *testing.T) {
 	yaml := `
 rag:

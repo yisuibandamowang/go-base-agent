@@ -392,12 +392,17 @@ type AuthConfig struct {
 }
 
 type AppConfig struct {
-	DemoMode bool          `mapstructure:"demo-mode"`
-	Eval     AppEvalConfig `mapstructure:"eval"`
+	DemoMode   bool                `mapstructure:"demo-mode"`
+	Eval       AppEvalConfig       `mapstructure:"eval"`
+	IntentTree AppIntentTreeConfig `mapstructure:"intent-tree"`
 }
 
 type AppEvalConfig struct {
 	Enabled bool `mapstructure:"enabled"`
+}
+
+type AppIntentTreeConfig struct {
+	InitFromFactory bool `mapstructure:"init-from-factory"`
 }
 
 // Load 加载配置。

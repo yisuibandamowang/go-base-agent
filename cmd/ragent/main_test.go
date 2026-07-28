@@ -248,6 +248,27 @@ func TestSetupMQ_FallsBackToNoopWhenNameServerMissing(t *testing.T) {
 	}
 }
 
+func TestMaybeInitIntentTreeFromFactoryHonorsConfig(t *testing.T) {
+	ctx := context.Background()
+	disabledSvc := &fakeIntentTreeFactoryInitializer{created: 18}
+	if err := maybeInitIntentTreeFromFactory(ctx, config.AppConfig{}, disabledSvc); err != nil {
+		t.Fatalf("disabled init should not fail: %v", err)
+	}
+	if disabledSvc.calls != 0 {
+		t.Fatalf("expected disabled config to skip init, got %d calls", disabledSvc.calls)
+	}
+
+	enabledSvc := &fakeIntentTreeFactoryInitializer{created: 18}
+	if err := maybeInitIntentTreeFromFactory(ctx, config.AppConfig{
+		IntentTree: config.AppIntentTreeConfig{InitFromFactory: true},
+	}, enabledSvc); err != nil {
+		t.Fatalf("enabled init should not fail: %v", err)
+	}
+	if enabledSvc.calls != 1 {
+		t.Fatalf("expected enabled config to call init once, got %d", enabledSvc.calls)
+	}
+}
+
 func TestBuildChatClients_IncludesAnthropicProvider(t *testing.T) {
 	clients := buildChatClients(config.AIConfig{
 		Providers: config.AIProvidersConfig{
@@ -266,6 +287,16 @@ func TestBuildChatClients_IncludesAnthropicProvider(t *testing.T) {
 	if clients[0].Provider() != "anthropic-main" {
 		t.Fatalf("unexpected provider %q", clients[0].Provider())
 	}
+}
+
+type fakeIntentTreeFactoryInitializer struct {
+	calls   int
+	created int
+}
+
+func (f *fakeIntentTreeFactoryInitializer) InitFromFactory(context.Context) (int, error) {
+	f.calls++
+	return f.created, nil
 }
 
 func TestBuildLocalPreferredChatConfig_SelectsOllamaQwen36(t *testing.T) {

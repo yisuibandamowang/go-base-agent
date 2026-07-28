@@ -260,6 +260,10 @@ func main() {
 	queryTermCacheManager := rag.NewRedisQueryTermMappingCacheManager(rdb)
 	intentSvc.SetIntentNodeCacheManager(intentNodeCacheManager)
 	intentSvc.SetQueryTermMappingCacheManager(queryTermCacheManager)
+	if err := maybeInitIntentTreeFromFactory(context.Background(), cfg.App, intentSvc); err != nil {
+		slog.Error("failed to initialize intent tree from factory", "err", err)
+		os.Exit(1)
+	}
 	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
 	cachedIntentTreeLister := rag.NewCachedIntentNodeLister(intentTreeRepo, intentNodeCacheManager)
 	intentResolverSvc := rag.NewIntentResolver(cachedIntentTreeLister, rag.IntentResolverOptions{
@@ -673,6 +677,22 @@ func registerIntentRoutes(api *gin.RouterGroup, intentTreeHandler *intentHandler
 	api.POST("/mappings", intentTreeHandler.CreateTermMapping)
 	api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMapping)
 	api.DELETE("/mappings/:id", intentTreeHandler.DeleteTermMapping)
+}
+
+type intentTreeFactoryInitializer interface {
+	InitFromFactory(context.Context) (int, error)
+}
+
+func maybeInitIntentTreeFromFactory(ctx context.Context, cfg config.AppConfig, svc intentTreeFactoryInitializer) error {
+	if !cfg.IntentTree.InitFromFactory {
+		return nil
+	}
+	created, err := svc.InitFromFactory(ctx)
+	if err != nil {
+		return fmt.Errorf("init intent tree from factory: %w", err)
+	}
+	slog.Info("intent tree initialized from factory", "created", created)
+	return nil
 }
 
 func splitCSV(value string) []string {
