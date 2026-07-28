@@ -88,6 +88,18 @@ func (r *IntentRepo) ListAll(ctx context.Context) ([]model.IntentNode, error) {
 	return nodes, nil
 }
 
+// ListAllForTree 查询树形结构节点，按 Java 树接口顺序排序。
+func (r *IntentRepo) ListAllForTree(ctx context.Context) ([]model.IntentNode, error) {
+	var nodes []model.IntentNode
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Order("sort_order ASC, id ASC").
+		Find(&nodes).Error
+	if err != nil {
+		return nil, fmt.Errorf("list intent nodes for tree: %w", err)
+	}
+	return nodes, nil
+}
+
 // ListAllPage 分页查询所有节点。
 func (r *IntentRepo) ListAllPage(ctx context.Context, page, size int) ([]model.IntentNode, int64, error) {
 	var (

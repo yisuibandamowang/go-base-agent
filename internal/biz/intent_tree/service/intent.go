@@ -227,7 +227,7 @@ func (s *IntentService) BatchDeleteNodes(ctx context.Context, ids []string) erro
 
 // GetTree 获取意图树（以树形结构返回）。
 func (s *IntentService) GetTree(ctx context.Context) ([]*dto.IntentNodeResp, error) {
-	nodes, err := s.intentRepo.ListAll(ctx)
+	nodes, err := s.intentRepo.ListAllForTree(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -415,12 +415,6 @@ func buildTree(nodes []model.IntentNode, parentCode string) []*dto.IntentNodeRes
 }
 
 func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
-	if req.KbID != nil {
-		node.KbID = *req.KbID
-	}
-	if req.IntentCode != nil {
-		node.IntentCode = *req.IntentCode
-	}
 	if req.Name != nil {
 		node.Name = *req.Name
 	}
@@ -444,9 +438,6 @@ func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
 			return err
 		}
 		node.TopK = *req.TopK
-	}
-	if req.McpToolID != nil {
-		node.McpToolID = *req.McpToolID
 	}
 	if req.Kind != nil {
 		node.Kind = *req.Kind

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"go-base-agent/internal/biz/intent_tree/model"
 	"go-base-agent/internal/biz/intent_tree/repo"
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
+	"go-base-agent/internal/framework/db"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -150,6 +152,146 @@ func TestIntentService_CreateNodePreservesExplicitDisabledState(t *testing.T) {
 	}
 	if created.Enabled != 0 {
 		t.Fatalf("expected explicit disabled state to remain 0, got %d", created.Enabled)
+	}
+}
+
+func TestIntentService_UpdateNodeIgnoresImmutableJavaFields(t *testing.T) {
+	svc := newIntentValidationService(t)
+	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode:     "member.query",
+		Name:           "会员查询",
+		Level:          1,
+		McpToolID:      "tool-a",
+		Enabled:        1,
+		EnabledSet:     true,
+		CollectionName: "",
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	newCode := "member.query.updated"
+	newKbID := "kb-2"
+	newToolID := "tool-b"
+	newName := "会员查询2"
+	updated, err := svc.UpdateNode(context.Background(), created.ID, dto.UpdateIntentReq{
+		IntentCode: &newCode,
+		KbID:       &newKbID,
+		McpToolID:  &newToolID,
+		Name:       &newName,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("update node: %v", err)
+	}
+	if updated.IntentCode != "member.query" {
+		t.Fatalf("expected intentCode to remain immutable, got %s", updated.IntentCode)
+	}
+	if updated.KbID != "" {
+		t.Fatalf("expected kbId to remain immutable, got %s", updated.KbID)
+	}
+	if updated.McpToolID != "tool-a" {
+		t.Fatalf("expected mcpToolId to remain immutable, got %s", updated.McpToolID)
+	}
+	if updated.Name != newName {
+		t.Fatalf("expected mutable fields to still update, got %s", updated.Name)
+	}
+}
+
+func TestIntentService_GetTreeOrdersSiblingsLikeJava(t *testing.T) {
+	svc, gdb := newIntentValidationServiceWithDB(t)
+	root := &model.IntentNode{BaseModel: db.BaseModel{ID: "root"}, IntentCode: "root", Name: "根", Level: 0, Enabled: 1, SortOrder: 0}
+	childB := &model.IntentNode{BaseModel: db.BaseModel{ID: "child-b"}, IntentCode: "child-b", Name: "B", Level: 1, ParentCode: "root", Enabled: 1, SortOrder: 0}
+	childA := &model.IntentNode{BaseModel: db.BaseModel{ID: "child-a"}, IntentCode: "child-a", Name: "A", Level: 1, ParentCode: "root", Enabled: 1, SortOrder: 0}
+	if err := gdb.Create(root).Error; err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := gdb.Create(childB).Error; err != nil {
+		t.Fatalf("seed childB: %v", err)
+	}
+	if err := gdb.Create(childA).Error; err != nil {
+		t.Fatalf("seed childA: %v", err)
+	}
+
+	tree, err := svc.GetTree(context.Background())
+	if err != nil {
+		t.Fatalf("get tree: %v", err)
+	}
+	if len(tree) != 1 {
+		t.Fatalf("expected one root, got %d", len(tree))
+	}
+	if len(tree[0].Children) != 2 {
+		t.Fatalf("expected two children, got %d", len(tree[0].Children))
+	}
+	if tree[0].Children[0].ID != "child-a" || tree[0].Children[1].ID != "child-b" {
+		t.Fatalf("expected Java-like child order by sortOrder then id, got [%s,%s]", tree[0].Children[0].ID, tree[0].Children[1].ID)
+	}
+}
+
+func TestIntentService_InitFromFactorySeedsJavaDefaultIntentTree(t *testing.T) {
+	svc, gdb := newIntentValidationServiceWithDB(t)
+	if err := gdb.Create(&knowledgeModel.KnowledgeBase{BaseModel: db.BaseModel{ID: "1997855927072321537"}, Name: "集团知识库", EmbeddingModel: "qwen3.6:latest", CollectionName: "group-collection"}).Error; err != nil {
+		t.Fatalf("seed group kb: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeBase{BaseModel: db.BaseModel{ID: "1997857139737882625"}, Name: "业务知识库", EmbeddingModel: "qwen3.6:latest", CollectionName: "biz-collection"}).Error; err != nil {
+		t.Fatalf("seed biz kb: %v", err)
+	}
+	method := reflect.ValueOf(svc).MethodByName("InitFromFactory")
+	if !method.IsValid() {
+		t.Fatalf("expected InitFromFactory to exist on IntentService")
+	}
+
+	results := method.Call([]reflect.Value{reflect.ValueOf(context.Background())})
+	if len(results) != 2 {
+		t.Fatalf("expected two return values, got %d", len(results))
+	}
+	if !results[1].IsNil() {
+		t.Fatalf("expected no error return, got %v", results[1].Interface())
+	}
+	created := int(results[0].Int())
+	if created != 18 {
+		t.Fatalf("expected 18 default nodes, got %d", created)
+	}
+
+	tree, err := svc.GetTree(context.Background())
+	if err != nil {
+		t.Fatalf("get tree after init: %v", err)
+	}
+	if len(tree) != 4 {
+		t.Fatalf("expected 4 root nodes, got %d", len(tree))
+	}
+	rootIDs := []string{tree[0].IntentCode, tree[1].IntentCode, tree[2].IntentCode, tree[3].IntentCode}
+	if strings.Join(rootIDs, ",") != "group,biz,sales,sys" {
+		t.Fatalf("expected Java default root order, got %v", rootIDs)
+	}
+	if len(tree[0].Children) != 3 || tree[0].Children[2].IntentCode != "group-finance" {
+		t.Fatalf("expected group tree to include finance branch, got %+v", tree[0].Children)
+	}
+	if len(tree[1].Children) != 2 || tree[1].Children[0].IntentCode != "biz-oa" || tree[1].Children[1].IntentCode != "biz-ins" {
+		t.Fatalf("expected biz tree to include oa/ins branches, got %+v", tree[1].Children)
+	}
+	if len(tree[3].Children) != 2 || tree[3].Children[0].IntentCode != "sys-welcome" || tree[3].Children[1].IntentCode != "sys-about-bot" {
+		t.Fatalf("expected sys tree to include assistant branches, got %+v", tree[3].Children)
+	}
+	var count int64
+	if err := gdb.Model(&model.IntentNode{}).Count(&count).Error; err != nil {
+		t.Fatalf("count seeded nodes: %v", err)
+	}
+	if count != 18 {
+		t.Fatalf("expected 18 rows in DB, got %d", count)
+	}
+
+	results = method.Call([]reflect.Value{reflect.ValueOf(context.Background())})
+	if !results[1].IsNil() {
+		t.Fatalf("expected no error return on duplicate init, got %v", results[1].Interface())
+	}
+	if secondCreated := int(results[0].Int()); secondCreated != 0 {
+		t.Fatalf("expected duplicate init to create 0 nodes, got %d", secondCreated)
+	}
+	if err := gdb.Model(&model.IntentNode{}).Count(&count).Error; err != nil {
+		t.Fatalf("count duplicate seeded nodes: %v", err)
+	}
+	if count != 18 {
+		t.Fatalf("expected duplicate init to keep 18 rows, got %d", count)
 	}
 }
 
