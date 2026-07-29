@@ -57,9 +57,14 @@ func (h *AdminHandler) Trends(c *gin.Context) {
 
 // ListTraceRuns GET /api/ragent/admin/traces
 func (h *AdminHandler) ListTraceRuns(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	page, _ := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
-	runs, total, err := h.svc.ListTraceRuns(c.Request.Context(), page, size)
+	runs, total, err := h.svc.ListTraceRuns(c.Request.Context(), page, size, dto.TraceRunPageReq{
+		TraceID:        c.Query("traceId"),
+		ConversationID: c.Query("conversationId"),
+		TaskID:         c.Query("taskId"),
+		Status:         c.Query("status"),
+	})
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return

@@ -53,6 +53,7 @@ type DocumentResp struct {
 	UpdatedBy       string `json:"updatedBy"`
 	CreateTime      string `json:"createTime"`
 	UpdateTime      string `json:"updateTime"`
+	ChunksEdited    *bool  `json:"chunksEdited,omitempty"`
 }
 
 // ChunkLogResp 文档分块日志响应。

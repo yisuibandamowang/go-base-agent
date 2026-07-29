@@ -769,7 +769,7 @@ func TestDocumentScheduleService_RecoverStuckRunningDocuments(t *testing.T) {
 		t.Fatalf("backdate fresh doc: %v", err)
 	}
 
-	svc := NewDocumentScheduleService(gdb, nil, nil, nil, nil, nil, config.RAGKnowledgeScheduleConfig{})
+	svc := NewDocumentScheduleService(gdb, nil, nil, nil, nil, nil, config.RAGKnowledgeScheduleConfig{RunningTimeoutMinutes: 10})
 	svc.now = func() time.Time { return now }
 
 	recovered, err := svc.RecoverStuckRunningDocuments(context.Background())
@@ -789,6 +789,75 @@ func TestDocumentScheduleService_RecoverStuckRunningDocuments(t *testing.T) {
 	}
 	if oldStored.Status != "failed" {
 		t.Fatalf("expected old doc to be failed, got %s", oldStored.Status)
+	}
+	if freshStored.Status != "running" {
+		t.Fatalf("expected fresh doc to remain running, got %s", freshStored.Status)
+	}
+}
+
+func TestDocumentScheduleService_RecoverStuckRunningDocumentsUsesConfiguredTimeout(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate documents: %v", err)
+	}
+
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	oldDoc := &knowledgeModel.KnowledgeDocument{
+		KbID:      "kb-1",
+		DocName:   "old-running.md",
+		FileURL:   "upload://old-running.md",
+		FileType:  "md",
+		Status:    "running",
+		CreatedBy: "user-1",
+		UpdatedBy: "user-1",
+	}
+	oldDoc.ID = "doc-old"
+	if err := gdb.Create(oldDoc).Error; err != nil {
+		t.Fatalf("seed old doc: %v", err)
+	}
+	if err := gdb.Exec("UPDATE t_knowledge_document SET update_time = ? WHERE id = ?", now.Add(-21*time.Minute), oldDoc.ID).Error; err != nil {
+		t.Fatalf("backdate old doc: %v", err)
+	}
+	freshDoc := &knowledgeModel.KnowledgeDocument{
+		KbID:      "kb-1",
+		DocName:   "fresh-running.md",
+		FileURL:   "upload://fresh-running.md",
+		FileType:  "md",
+		Status:    "running",
+		CreatedBy: "user-1",
+		UpdatedBy: "user-1",
+	}
+	freshDoc.ID = "doc-fresh"
+	if err := gdb.Create(freshDoc).Error; err != nil {
+		t.Fatalf("seed fresh doc: %v", err)
+	}
+	if err := gdb.Exec("UPDATE t_knowledge_document SET update_time = ? WHERE id = ?", now.Add(-19*time.Minute), freshDoc.ID).Error; err != nil {
+		t.Fatalf("backdate fresh doc: %v", err)
+	}
+
+	svc := NewDocumentScheduleService(gdb, nil, nil, nil, nil, nil, config.RAGKnowledgeScheduleConfig{RunningTimeoutMinutes: 30})
+	svc.now = func() time.Time { return now }
+
+	recovered, err := svc.RecoverStuckRunningDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("recover stuck running documents: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("expected 0 recovered doc with 30-minute timeout, got %d", recovered)
+	}
+
+	var oldStored, freshStored knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&oldStored, "id = ?", oldDoc.ID).Error; err != nil {
+		t.Fatalf("load old doc: %v", err)
+	}
+	if err := gdb.First(&freshStored, "id = ?", freshDoc.ID).Error; err != nil {
+		t.Fatalf("load fresh doc: %v", err)
+	}
+	if oldStored.Status != "running" {
+		t.Fatalf("expected old doc to remain running under 30-minute timeout, got %s", oldStored.Status)
 	}
 	if freshStored.Status != "running" {
 		t.Fatalf("expected fresh doc to remain running, got %s", freshStored.Status)

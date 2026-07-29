@@ -397,6 +397,7 @@ func main() {
 		middleware.RequestLog(),
 		middleware.DB(gormDB),
 		middleware.Tenant(),
+		middleware.DemoMode(cfg.App.DemoMode),
 		middleware.Auth(authSvc),
 	)
 

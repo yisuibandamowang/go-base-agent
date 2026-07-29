@@ -38,6 +38,7 @@ type scheduleChunkSynchronizer interface {
 }
 
 const scheduleLeaseLostNote = "（调度锁已失效，未写回调度状态）"
+const defaultScheduleRunningTimeoutMinutes = 30
 
 // DocumentScheduleService 执行知识库文档定时刷新。
 type DocumentScheduleService struct {
@@ -54,8 +55,6 @@ type DocumentScheduleService struct {
 	parser            cron.Parser
 	lockRenewObserver func(scheduleID string, lockUntil time.Time)
 }
-
-const scheduleRunningRecoveryTimeout = 10 * time.Minute
 
 // NewDocumentScheduleService 创建文档定时刷新服务。
 func NewDocumentScheduleService(
@@ -120,7 +119,7 @@ func (s *DocumentScheduleService) Run(ctx context.Context) {
 			if recovered, err := s.RecoverStuckRunningDocuments(ctx); err != nil {
 				slog.Warn("knowledge document running recovery failed", "err", err)
 			} else if recovered > 0 {
-				slog.Warn("reset stuck running documents", "count", recovered, "timeout", scheduleRunningRecoveryTimeout.String())
+				slog.Warn("reset stuck running documents", "count", recovered, "timeout", s.runningTimeout().String())
 			}
 		case <-ticker.C:
 			if _, err := s.ScanDue(ctx); err != nil {
@@ -157,7 +156,7 @@ func (s *DocumentScheduleService) RecoverStuckRunningDocuments(ctx context.Conte
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
-	cutoff := s.now().Add(-scheduleRunningRecoveryTimeout)
+	cutoff := s.now().Add(-s.runningTimeout())
 	result := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Model(&model.KnowledgeDocument{}).
 		Where("status = ? AND update_time < ?", "running", cutoff).
@@ -170,6 +169,14 @@ func (s *DocumentScheduleService) RecoverStuckRunningDocuments(ctx context.Conte
 		return 0, fmt.Errorf("recover stuck running documents: %w", result.Error)
 	}
 	return result.RowsAffected, nil
+}
+
+func (s *DocumentScheduleService) runningTimeout() time.Duration {
+	minutes := defaultScheduleRunningTimeoutMinutes
+	if s != nil && s.cfg.RunningTimeoutMinutes > 0 {
+		minutes = s.cfg.RunningTimeoutMinutes
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model.KnowledgeDocumentSchedule, startedAt time.Time) error {

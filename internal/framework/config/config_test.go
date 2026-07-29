@@ -225,6 +225,29 @@ rag:
 	}
 }
 
+func TestLoadParsesRAGKnowledgeScheduleRunningTimeout(t *testing.T) {
+	yaml := `
+rag:
+  knowledge:
+    schedule:
+      running-timeout-minutes: 45
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Knowledge.Schedule.RunningTimeoutMinutes != 45 {
+		t.Fatalf("unexpected running timeout minutes: %d", cfg.RAG.Knowledge.Schedule.RunningTimeoutMinutes)
+	}
+}
+
 func TestLoadParsesAppIntentTreeInitFromFactory(t *testing.T) {
 	yaml := `
 app:

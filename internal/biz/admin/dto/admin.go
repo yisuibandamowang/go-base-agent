@@ -39,14 +39,26 @@ type TraceRunResp struct {
 	ID             string     `json:"id"`
 	TraceID        string     `json:"traceId"`
 	TraceName      string     `json:"traceName"`
+	EntryMethod    string     `json:"entryMethod"`
 	ConversationID string     `json:"conversationId"`
 	TaskID         string     `json:"taskId"`
 	UserID         string     `json:"userId"`
+	Username       string     `json:"username"`
 	Status         string     `json:"status"`
 	ErrorMessage   string     `json:"errorMessage"`
+	Question       string     `json:"question"`
 	StartTime      *time.Time `json:"startTime"`
 	EndTime        *time.Time `json:"endTime"`
 	DurationMs     int64      `json:"durationMs"`
+	TTFTMs         *int64     `json:"ttftMs"`
+}
+
+// TraceRunPageReq 链路追踪运行记录分页查询请求。
+type TraceRunPageReq struct {
+	TraceID        string
+	ConversationID string
+	TaskID         string
+	Status         string
 }
 
 // TraceDetailResp 链路详情（含节点树）。
@@ -64,6 +76,8 @@ type TraceNodeResp struct {
 	Depth        int        `json:"depth"`
 	NodeType     string     `json:"nodeType"`
 	NodeName     string     `json:"nodeName"`
+	ClassName    string     `json:"className"`
+	MethodName   string     `json:"methodName"`
 	Status       string     `json:"status"`
 	ErrorMessage string     `json:"errorMessage"`
 	StartTime    *time.Time `json:"startTime"`

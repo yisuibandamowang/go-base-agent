@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -105,26 +106,27 @@ func (s *AdminService) GetDashboard(ctx context.Context, window string) (*adminD
 }
 
 // ListTraceRuns 查询链路追踪运行记录。
-func (s *AdminService) ListTraceRuns(ctx context.Context, page, size int) ([]adminDto.TraceRunResp, int64, error) {
-	runs, total, err := s.adminRepo.ListTraceRuns(ctx, page, size)
+func (s *AdminService) ListTraceRuns(ctx context.Context, page, size int, req adminDto.TraceRunPageReq) ([]adminDto.TraceRunResp, int64, error) {
+	runs, total, err := s.adminRepo.ListTraceRuns(ctx, page, size, adminRepo.TraceRunFilter{
+		TraceID:        req.TraceID,
+		ConversationID: req.ConversationID,
+		TaskID:         req.TaskID,
+		Status:         req.Status,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	usernameMap, err := s.loadTraceUsernames(ctx, runs)
+	if err != nil {
+		return nil, 0, err
+	}
+	ttftMap, err := s.loadTraceTTFT(ctx, runs)
 	if err != nil {
 		return nil, 0, err
 	}
 	resp := make([]adminDto.TraceRunResp, 0, len(runs))
 	for _, r := range runs {
-		resp = append(resp, adminDto.TraceRunResp{
-			ID:             r.ID,
-			TraceID:        r.TraceID,
-			TraceName:      r.TraceName,
-			ConversationID: r.ConversationID,
-			TaskID:         r.TaskID,
-			UserID:         r.UserID,
-			Status:         r.Status,
-			ErrorMessage:   r.ErrorMessage,
-			StartTime:      r.StartTime,
-			EndTime:        r.EndTime,
-			DurationMs:     r.DurationMs,
-		})
+		resp = append(resp, toTraceRunResp(r, usernameMap, ttftMap))
 	}
 	return resp, total, nil
 }
@@ -141,6 +143,7 @@ func (s *AdminService) ListTraceNodes(ctx context.Context, traceID string) ([]ad
 			ID: n.ID, TraceID: n.TraceID, NodeID: n.NodeID,
 			ParentNodeID: n.ParentNodeID, Depth: n.Depth,
 			NodeType: n.NodeType, NodeName: n.NodeName, Status: n.Status,
+			ClassName: n.ClassName, MethodName: n.MethodName,
 			ErrorMessage: n.ErrorMessage, StartTime: n.StartTime,
 			EndTime: n.EndTime, DurationMs: n.DurationMs,
 		})
@@ -158,13 +161,16 @@ func (s *AdminService) GetTraceDetail(ctx context.Context, traceID string) (*adm
 	if err != nil {
 		return nil, err
 	}
-
-	runResp := &adminDto.TraceRunResp{
-		ID: run.ID, TraceID: run.TraceID, TraceName: run.TraceName,
-		ConversationID: run.ConversationID, TaskID: run.TaskID,
-		UserID: run.UserID, Status: run.Status, ErrorMessage: run.ErrorMessage,
-		StartTime: run.StartTime, EndTime: run.EndTime, DurationMs: run.DurationMs,
+	usernameMap, err := s.loadTraceUsernames(ctx, []adminRepo.TraceRun{*run})
+	if err != nil {
+		return nil, err
 	}
+	ttftMap, err := s.loadTraceTTFT(ctx, []adminRepo.TraceRun{*run})
+	if err != nil {
+		return nil, err
+	}
+
+	runResp := toTraceRunResp(*run, usernameMap, ttftMap)
 
 	nodeResp := make([]adminDto.TraceNodeResp, 0, len(nodes))
 	for _, n := range nodes {
@@ -172,12 +178,122 @@ func (s *AdminService) GetTraceDetail(ctx context.Context, traceID string) (*adm
 			ID: n.ID, TraceID: n.TraceID, NodeID: n.NodeID,
 			ParentNodeID: n.ParentNodeID, Depth: n.Depth,
 			NodeType: n.NodeType, NodeName: n.NodeName, Status: n.Status,
+			ClassName: n.ClassName, MethodName: n.MethodName,
 			ErrorMessage: n.ErrorMessage, StartTime: n.StartTime,
 			EndTime: n.EndTime, DurationMs: n.DurationMs,
 		})
 	}
 
-	return &adminDto.TraceDetailResp{Run: runResp, Nodes: nodeResp}, nil
+	return &adminDto.TraceDetailResp{Run: &runResp, Nodes: nodeResp}, nil
+}
+
+func toTraceRunResp(run adminRepo.TraceRun, usernameMap map[string]string, ttftMap map[string]*int64) adminDto.TraceRunResp {
+	return adminDto.TraceRunResp{
+		ID:             run.ID,
+		TraceID:        run.TraceID,
+		TraceName:      run.TraceName,
+		EntryMethod:    run.EntryMethod,
+		ConversationID: run.ConversationID,
+		TaskID:         run.TaskID,
+		UserID:         run.UserID,
+		Username:       usernameMap[run.UserID],
+		Status:         run.Status,
+		ErrorMessage:   run.ErrorMessage,
+		Question:       parseTraceQuestion(run.ExtraData),
+		StartTime:      run.StartTime,
+		EndTime:        run.EndTime,
+		DurationMs:     run.DurationMs,
+		TTFTMs:         ttftMap[run.TraceID],
+	}
+}
+
+func (s *AdminService) loadTraceUsernames(ctx context.Context, runs []adminRepo.TraceRun) (map[string]string, error) {
+	userIDs := make([]string, 0, len(runs))
+	seen := map[string]struct{}{}
+	for _, run := range runs {
+		userID := strings.TrimSpace(run.UserID)
+		if userID == "" {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		userIDs = append(userIDs, userID)
+	}
+	if len(userIDs) == 0 {
+		return map[string]string{}, nil
+	}
+
+	var users []struct {
+		ID       string `gorm:"column:id"`
+		Username string `gorm:"column:username"`
+	}
+	if err := s.db.WithContext(ctx).Table("t_user").
+		Select("id, username").
+		Where("deleted = 0 AND id IN ?", userIDs).
+		Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("load trace usernames: %w", err)
+	}
+	usernameMap := make(map[string]string, len(users))
+	for _, user := range users {
+		usernameMap[user.ID] = user.Username
+	}
+	return usernameMap, nil
+}
+
+func (s *AdminService) loadTraceTTFT(ctx context.Context, runs []adminRepo.TraceRun) (map[string]*int64, error) {
+	traceIDs := make([]string, 0, len(runs))
+	seen := map[string]struct{}{}
+	for _, run := range runs {
+		traceID := strings.TrimSpace(run.TraceID)
+		if traceID == "" {
+			continue
+		}
+		if _, ok := seen[traceID]; ok {
+			continue
+		}
+		seen[traceID] = struct{}{}
+		traceIDs = append(traceIDs, traceID)
+	}
+	if len(traceIDs) == 0 {
+		return map[string]*int64{}, nil
+	}
+
+	var rows []struct {
+		TraceID    string `gorm:"column:trace_id"`
+		DurationMs *int64 `gorm:"column:duration_ms"`
+	}
+	if err := s.db.WithContext(ctx).Table("t_rag_trace_node").
+		Select("trace_id, duration_ms").
+		Where("deleted = 0 AND trace_id IN ? AND node_type = ?", traceIDs, "USER_TTFT").
+		Order("start_time ASC, id ASC").
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("load trace ttft: %w", err)
+	}
+	ttftMap := make(map[string]*int64, len(rows))
+	for _, row := range rows {
+		if row.DurationMs == nil {
+			continue
+		}
+		if _, exists := ttftMap[row.TraceID]; !exists {
+			value := *row.DurationMs
+			ttftMap[row.TraceID] = &value
+		}
+	}
+	return ttftMap, nil
+}
+
+func parseTraceQuestion(extraData string) string {
+	if strings.TrimSpace(extraData) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(extraData), &payload); err != nil {
+		return ""
+	}
+	question, _ := payload["question"].(string)
+	return question
 }
 
 // --- 示例问题 ---

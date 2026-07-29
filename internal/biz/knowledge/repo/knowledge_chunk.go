@@ -2,6 +2,8 @@ package repo
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/framework/db"
@@ -57,6 +59,28 @@ func (r *KnowledgeChunkRepo) ListByDoc(ctx context.Context, docID string, page, 
 		return nil, 0, err
 	}
 	return records, total, nil
+}
+
+// FindEditedDocIDs 查询存在手工编辑分块的文档 ID。
+func (r *KnowledgeChunkRepo) FindEditedDocIDs(ctx context.Context, docIDs []string) (map[string]bool, error) {
+	result := make(map[string]bool)
+	if len(docIDs) == 0 {
+		return result, nil
+	}
+	var rows []model.KnowledgeChunk
+	err := r.gdb.WithContext(ctx).Model(&model.KnowledgeChunk{}).
+		Select("doc_id", "create_time", "update_time").
+		Where("deleted = 0 AND doc_id IN ?", docIDs).
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("find edited doc ids: %w", err)
+	}
+	for _, row := range rows {
+		if row.UpdateTime.After(row.CreateTime.Add(time.Second)) {
+			result[row.DocID] = true
+		}
+	}
+	return result, nil
 }
 
 // Update 更新分块内容。

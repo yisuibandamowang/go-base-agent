@@ -53,9 +53,11 @@ func (r *ConversationRepo) ListByUser(ctx context.Context, userID string, page, 
 		return nil, 0, fmt.Errorf("count conversations: %w", err)
 	}
 
-	err := query.Scopes(db.Paginate(page, size)).
-		Order("last_time DESC").
-		Find(&convs).Error
+	listQuery := query.Order("last_time DESC")
+	if size > 0 {
+		listQuery = listQuery.Scopes(db.Paginate(page, size))
+	}
+	err := listQuery.Find(&convs).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("list conversations: %w", err)
 	}

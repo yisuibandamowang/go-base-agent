@@ -1319,7 +1319,7 @@ func (s *DocumentService) GetDocument(ctx context.Context, id string) (*dto.Docu
 	if err != nil {
 		return nil, fmt.Errorf("document not found: %w", err)
 	}
-	return s.docToResp(doc), nil
+	return s.docToRespWithEditedFlag(ctx, doc)
 }
 
 // ListDocumentsByKB 按知识库分页查询文档。
@@ -1328,9 +1328,13 @@ func (s *DocumentService) ListDocumentsByKB(ctx context.Context, kbID string, pa
 	if err != nil {
 		return nil, 0, err
 	}
+	editedDocIDs, err := s.findEditedDocIDs(ctx, docs)
+	if err != nil {
+		return nil, 0, err
+	}
 	records := make([]dto.DocumentResp, 0, len(docs))
 	for _, d := range docs {
-		records = append(records, *s.docToResp(&d))
+		records = append(records, *s.docToRespWithEditedFlagValue(&d, editedDocIDs[d.ID]))
 	}
 	return records, total, nil
 }
@@ -2020,6 +2024,35 @@ func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentR
 		CreateTime:      doc.CreateTime.Format(time.RFC3339),
 		UpdateTime:      doc.UpdateTime.Format(time.RFC3339),
 	}
+}
+
+func (s *DocumentService) docToRespWithEditedFlag(ctx context.Context, doc *model.KnowledgeDocument) (*dto.DocumentResp, error) {
+	editedDocIDs, err := s.findEditedDocIDs(ctx, []model.KnowledgeDocument{*doc})
+	if err != nil {
+		return nil, err
+	}
+	return s.docToRespWithEditedFlagValue(doc, editedDocIDs[doc.ID]), nil
+}
+
+func (s *DocumentService) docToRespWithEditedFlagValue(doc *model.KnowledgeDocument, edited bool) *dto.DocumentResp {
+	resp := s.docToResp(doc)
+	resp.ChunksEdited = boolPtr(edited)
+	return resp
+}
+
+func (s *DocumentService) findEditedDocIDs(ctx context.Context, docs []model.KnowledgeDocument) (map[string]bool, error) {
+	docIDs := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		docIDs = append(docIDs, doc.ID)
+	}
+	if len(docIDs) == 0 {
+		return map[string]bool{}, nil
+	}
+	return s.chunkRepo.FindEditedDocIDs(ctx, docIDs)
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 func (s *DocumentService) syncDocumentSchedule(ctx context.Context, doc *model.KnowledgeDocument, enabled int16, cronExpr string) error {

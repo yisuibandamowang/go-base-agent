@@ -30,7 +30,11 @@ func (h *ConversationHandler) List(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "未登录"))
 		return
 	}
-	page, size := paginationParams(c)
+	page, size := 1, 0
+	paged := wantsPaged(c)
+	if paged {
+		page, size = paginationParams(c)
+	}
 	convs, total, err := h.svc.ListConversations(c.Request.Context(), user.UserID, page, size)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
@@ -46,7 +50,7 @@ func (h *ConversationHandler) List(c *gin.Context) {
 			CreateTime:     conv.CreateTime,
 		})
 	}
-	if wantsPaged(c) {
+	if paged {
 		c.JSON(http.StatusOK, convention.Success(convention.NewPageResp(records, total, page, size)))
 		return
 	}

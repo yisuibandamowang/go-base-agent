@@ -70,6 +70,7 @@ rag:
       lock-seconds: 900
       batch-size: 20
       min-interval-seconds: 60
+      running-timeout-minutes: 30
     feishu:
       app-id: ${FEISHU_APP_ID}
       app-secret: ${FEISHU_APP_SECRET}

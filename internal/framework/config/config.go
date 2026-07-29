@@ -173,10 +173,11 @@ type RAGKnowledgeConfig struct {
 }
 
 type RAGKnowledgeScheduleConfig struct {
-	ScanDelayMs        int `mapstructure:"scan-delay-ms"`
-	LockSeconds        int `mapstructure:"lock-seconds"`
-	BatchSize          int `mapstructure:"batch-size"`
-	MinIntervalSeconds int `mapstructure:"min-interval-seconds"`
+	ScanDelayMs           int `mapstructure:"scan-delay-ms"`
+	LockSeconds           int `mapstructure:"lock-seconds"`
+	BatchSize             int `mapstructure:"batch-size"`
+	MinIntervalSeconds    int `mapstructure:"min-interval-seconds"`
+	RunningTimeoutMinutes int `mapstructure:"running-timeout-minutes"`
 }
 
 type RAGKnowledgeFeishuConfig struct {

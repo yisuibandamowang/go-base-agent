@@ -102,6 +102,62 @@ func TestConversationListResponseShape(t *testing.T) {
 	})
 }
 
+func TestConversationListDefaultReturnsAllConversations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&conversationModel.Conversation{}, &conversationModel.Message{}, &conversationModel.MessageFeedback{}); err != nil {
+		t.Fatalf("migrate conversation tables: %v", err)
+	}
+	baseTime := time.Now()
+	for i := 0; i < 12; i++ {
+		conv := conversationModel.Conversation{
+			ConversationID: "conv-" + strconv.Itoa(i),
+			UserID:         "user-1",
+			Title:          "会话 " + strconv.Itoa(i),
+			LastTime:       baseTime.Add(time.Duration(i) * time.Minute),
+		}
+		if err := gdb.Create(&conv).Error; err != nil {
+			t.Fatalf("seed conversation %d: %v", i, err)
+		}
+	}
+
+	convRepo := repo.NewConversationRepo(gdb)
+	msgRepo := repo.NewMessageRepo(gdb)
+	fbRepo := repo.NewFeedbackRepo(gdb)
+	svc := service.NewConversationService(convRepo, msgRepo, fbRepo, nil)
+	h := NewConversationHandler(svc)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("loginUser", &appctx.LoginUser{UserID: "user-1", Username: "admin"})
+		c.Next()
+	})
+	r.GET("/api/ragent/conversations", h.List)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/conversations", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatalf("expected Java-style array data, got %T: %s", resp["data"], w.Body.String())
+	}
+	if len(data) != 12 {
+		t.Fatalf("expected all 12 conversations by default, got %d: %s", len(data), w.Body.String())
+	}
+}
+
 func TestConversationFeedbackVoteAndDelete(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

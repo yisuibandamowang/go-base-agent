@@ -61,6 +61,7 @@ type TraceRun struct {
 	ID             string     `gorm:"column:id" json:"id"`
 	TraceID        string     `gorm:"column:trace_id" json:"traceId"`
 	TraceName      string     `gorm:"column:trace_name" json:"traceName"`
+	EntryMethod    string     `gorm:"column:entry_method" json:"entryMethod"`
 	ConversationID string     `gorm:"column:conversation_id" json:"conversationId"`
 	TaskID         string     `gorm:"column:task_id" json:"taskId"`
 	UserID         string     `gorm:"column:user_id" json:"userId"`
@@ -69,6 +70,15 @@ type TraceRun struct {
 	StartTime      *time.Time `gorm:"column:start_time" json:"startTime"`
 	EndTime        *time.Time `gorm:"column:end_time" json:"endTime"`
 	DurationMs     int64      `gorm:"column:duration_ms" json:"durationMs"`
+	ExtraData      string     `gorm:"column:extra_data" json:"extraData"`
+}
+
+// TraceRunFilter 链路追踪运行记录查询条件。
+type TraceRunFilter struct {
+	TraceID        string
+	ConversationID string
+	TaskID         string
+	Status         string
 }
 
 // TraceNode 链路追踪节点（从 t_rag_trace_node 查询）。
@@ -80,6 +90,8 @@ type TraceNode struct {
 	Depth        int        `gorm:"column:depth" json:"depth"`
 	NodeType     string     `gorm:"column:node_type" json:"nodeType"`
 	NodeName     string     `gorm:"column:node_name" json:"nodeName"`
+	ClassName    string     `gorm:"column:class_name" json:"className"`
+	MethodName   string     `gorm:"column:method_name" json:"methodName"`
 	Status       string     `gorm:"column:status" json:"status"`
 	ErrorMessage string     `gorm:"column:error_message" json:"errorMessage"`
 	StartTime    *time.Time `gorm:"column:start_time" json:"startTime"`
@@ -88,17 +100,18 @@ type TraceNode struct {
 }
 
 // ListTraceRuns 分页查询链路追踪运行记录。
-func (r *AdminRepo) ListTraceRuns(ctx context.Context, page, size int) ([]TraceRun, int64, error) {
+func (r *AdminRepo) ListTraceRuns(ctx context.Context, page, size int, filter TraceRunFilter) ([]TraceRun, int64, error) {
 	var (
 		runs  []TraceRun
 		total int64
 	)
 	query := r.db.WithContext(ctx).Table("t_rag_trace_run").Where("deleted = 0")
+	query = applyTraceRunFilter(query, filter)
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count trace runs: %w", err)
 	}
 	err := query.Limit(size).Offset((page - 1) * size).
-		Order("create_time DESC").
+		Order("start_time DESC, id DESC").
 		Find(&runs).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("list trace runs: %w", err)
@@ -106,12 +119,28 @@ func (r *AdminRepo) ListTraceRuns(ctx context.Context, page, size int) ([]TraceR
 	return runs, total, nil
 }
 
+func applyTraceRunFilter(query *gorm.DB, filter TraceRunFilter) *gorm.DB {
+	if traceID := strings.TrimSpace(filter.TraceID); traceID != "" {
+		query = query.Where("trace_id = ?", traceID)
+	}
+	if conversationID := strings.TrimSpace(filter.ConversationID); conversationID != "" {
+		query = query.Where("conversation_id = ?", conversationID)
+	}
+	if taskID := strings.TrimSpace(filter.TaskID); taskID != "" {
+		query = query.Where("task_id = ?", taskID)
+	}
+	if status := strings.TrimSpace(filter.Status); status != "" {
+		query = query.Where("status = ?", status)
+	}
+	return query
+}
+
 // GetTraceNodes 根据 trace_id 查询节点。
 func (r *AdminRepo) GetTraceNodes(ctx context.Context, traceID string) ([]TraceNode, error) {
 	var nodes []TraceNode
 	err := r.db.WithContext(ctx).Table("t_rag_trace_node").
 		Where("trace_id = ? AND deleted = 0", traceID).
-		Order("depth ASC, start_time ASC").
+		Order("start_time ASC, id ASC").
 		Find(&nodes).Error
 	if err != nil {
 		return nil, fmt.Errorf("get trace nodes: %w", err)

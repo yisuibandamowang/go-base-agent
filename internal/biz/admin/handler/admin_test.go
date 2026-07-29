@@ -435,6 +435,111 @@ func TestTraceNodesReturnsStoredNodes(t *testing.T) {
 	}
 }
 
+func TestTraceRunsUseJavaFiltersAndEnrichedFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	user := &userModel.User{Username: "trace-user", Password: "pwd", Role: "user"}
+	if err := gdb.Create(user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := gdb.Exec(`CREATE TABLE t_rag_trace_run (
+		id text primary key,
+		trace_id text,
+		trace_name text,
+		entry_method text,
+		conversation_id text,
+		task_id text,
+		user_id text,
+		status text,
+		error_message text,
+		duration_ms integer,
+		extra_data text,
+		deleted integer default 0,
+		start_time datetime,
+		end_time datetime,
+		create_time datetime
+	)`).Error; err != nil {
+		t.Fatalf("create trace run table: %v", err)
+	}
+	if err := gdb.Exec(`CREATE TABLE t_rag_trace_node (
+		id text primary key,
+		trace_id text,
+		node_id text,
+		parent_node_id text,
+		depth integer,
+		node_type text,
+		node_name text,
+		status text,
+		error_message text,
+		duration_ms integer,
+		deleted integer default 0,
+		start_time datetime,
+		end_time datetime
+	)`).Error; err != nil {
+		t.Fatalf("create trace node table: %v", err)
+	}
+	now := time.Now()
+	if err := gdb.Exec(`INSERT INTO t_rag_trace_run
+		(id, trace_id, trace_name, entry_method, conversation_id, task_id, user_id, status, duration_ms, extra_data, deleted, start_time, create_time)
+		VALUES
+		('1', 'trace-success', 'rag-stream-chat', 'RAGChatController.streamChat', 'conv-1', 'task-1', ?, 'SUCCESS', 1200, '{"question":"如何开通会员？"}', 0, ?, ?),
+		('2', 'trace-error', 'rag-stream-chat', 'RAGChatController.streamChat', 'conv-1', 'task-2', ?, 'ERROR', 99, '{"question":"失败问题"}', 0, ?, ?)`,
+		user.ID, now, now, user.ID, now.Add(-time.Hour), now.Add(-time.Hour)).Error; err != nil {
+		t.Fatalf("seed trace runs: %v", err)
+	}
+	if err := gdb.Exec(`INSERT INTO t_rag_trace_node
+		(id, trace_id, node_id, node_type, duration_ms, deleted)
+		VALUES ('n1', 'trace-success', 'ttft', 'USER_TTFT', 345, 0)`).Error; err != nil {
+		t.Fatalf("seed trace ttft node: %v", err)
+	}
+
+	svc := adminService.NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	h := adminHandler.NewAdminHandler(svc)
+	r := gin.New()
+	r.GET("/api/ragent/rag/traces/runs", h.ListTraceRuns)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/traces/runs?current=1&size=10&status=SUCCESS&conversationId=conv-1", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected page object, got %T: %s", resp["data"], w.Body.String())
+	}
+	if data["current"] != float64(1) || data["total"] != float64(1) {
+		t.Fatalf("expected Java-style current pagination and status filter, got %s", w.Body.String())
+	}
+	records, ok := data["records"].([]interface{})
+	if !ok || len(records) != 1 {
+		t.Fatalf("expected one filtered trace run, got %s", w.Body.String())
+	}
+	first, ok := records[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected trace object, got %T", records[0])
+	}
+	if first["traceId"] != "trace-success" ||
+		first["username"] != "trace-user" ||
+		first["question"] != "如何开通会员？" ||
+		first["ttftMs"] != float64(345) ||
+		first["entryMethod"] != "RAGChatController.streamChat" {
+		t.Fatalf("expected enriched Java trace fields, got %s", w.Body.String())
+	}
+}
+
 func TestTraceDetailAcceptsJavaCompatibilityIDParam(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

@@ -117,6 +117,97 @@ func newDocumentServiceTestContext(t *testing.T) (*gorm.DB, *knowledgeModel.Know
 	return gdb, kb, svc
 }
 
+func TestDocumentService_ListDocumentsMarksChunksEdited(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	ctx := context.Background()
+	now := time.Now().Add(-time.Hour).Truncate(time.Second)
+	editedDoc := &knowledgeModel.KnowledgeDocument{
+		BaseModel: db.BaseModel{
+			CreateTime: now,
+			UpdateTime: now,
+		},
+		KbID:      kb.ID,
+		DocName:   "edited.md",
+		FileURL:   "upload://edited.md",
+		FileType:  "md",
+		Status:    "success",
+		Enabled:   1,
+		CreatedBy: "tester",
+		UpdatedBy: "tester",
+	}
+	cleanDoc := &knowledgeModel.KnowledgeDocument{
+		BaseModel: db.BaseModel{
+			CreateTime: now,
+			UpdateTime: now,
+		},
+		KbID:      kb.ID,
+		DocName:   "clean.md",
+		FileURL:   "upload://clean.md",
+		FileType:  "md",
+		Status:    "success",
+		Enabled:   1,
+		CreatedBy: "tester",
+		UpdatedBy: "tester",
+	}
+	if err := gdb.Create(editedDoc).Error; err != nil {
+		t.Fatalf("create edited doc: %v", err)
+	}
+	if err := gdb.Create(cleanDoc).Error; err != nil {
+		t.Fatalf("create clean doc: %v", err)
+	}
+	editedChunk := &knowledgeModel.KnowledgeChunk{
+		BaseModel: db.BaseModel{
+			CreateTime: now,
+			UpdateTime: now.Add(2 * time.Second),
+		},
+		KbID:       kb.ID,
+		DocID:      editedDoc.ID,
+		ChunkIndex: 0,
+		Content:    "edited chunk",
+		Enabled:    1,
+		CreatedBy:  "tester",
+	}
+	cleanChunk := &knowledgeModel.KnowledgeChunk{
+		BaseModel: db.BaseModel{
+			CreateTime: now,
+			UpdateTime: now,
+		},
+		KbID:       kb.ID,
+		DocID:      cleanDoc.ID,
+		ChunkIndex: 0,
+		Content:    "clean chunk",
+		Enabled:    1,
+		CreatedBy:  "tester",
+	}
+	if err := gdb.Create(editedChunk).Error; err != nil {
+		t.Fatalf("create edited chunk: %v", err)
+	}
+	if err := gdb.Create(cleanChunk).Error; err != nil {
+		t.Fatalf("create clean chunk: %v", err)
+	}
+
+	records, total, err := svc.ListDocumentsByKB(ctx, kb.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("list docs: %v", err)
+	}
+	if total != 2 || len(records) != 2 {
+		t.Fatalf("expected two docs, got total=%d records=%d", total, len(records))
+	}
+	editedByID := map[string]bool{}
+	for _, record := range records {
+		if record.ChunksEdited == nil {
+			t.Fatalf("expected chunksEdited to be populated for %s", record.DocName)
+		}
+		editedByID[record.ID] = *record.ChunksEdited
+	}
+	if !editedByID[editedDoc.ID] {
+		t.Fatalf("expected edited doc to be marked chunksEdited")
+	}
+	if editedByID[cleanDoc.ID] {
+		t.Fatalf("expected clean doc not to be marked chunksEdited")
+	}
+}
+
 type failingVectorStore struct {
 	err error
 }
