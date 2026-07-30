@@ -11,6 +11,7 @@ type CreateKnowledgeBaseReq struct {
 type UpdateKnowledgeBaseReq struct {
 	Name           string `json:"name"`
 	EmbeddingModel string `json:"embeddingModel"`
+	// CollectionName 保留历史 Go 请求兼容；更新时按 Java 语义忽略。
 	CollectionName string `json:"collectionName"`
 }
 

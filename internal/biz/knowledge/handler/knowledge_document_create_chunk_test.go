@@ -351,6 +351,65 @@ func TestSearchDocsReturnsJavaStyleArrayWithKBName(t *testing.T) {
 	}
 }
 
+func TestListDocsSupportsStatusAndKeywordFilters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "会员知识库", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	matched := &model.KnowledgeDocument{KbID: kb.ID, DocName: "会员权益说明.md", FileURL: "upload://match.md", FileType: "md", Status: "success", Enabled: 1, CreatedBy: "tester"}
+	mismatchedStatus := &model.KnowledgeDocument{KbID: kb.ID, DocName: "会员权益草稿.md", FileURL: "upload://draft.md", FileType: "md", Status: "pending", Enabled: 1, CreatedBy: "tester"}
+	mismatchedKeyword := &model.KnowledgeDocument{KbID: kb.ID, DocName: "理赔说明.md", FileURL: "upload://claim.md", FileType: "md", Status: "success", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(matched).Error; err != nil {
+		t.Fatalf("seed matched doc: %v", err)
+	}
+	if err := gdb.Create(mismatchedStatus).Error; err != nil {
+		t.Fatalf("seed pending doc: %v", err)
+	}
+	if err := gdb.Create(mismatchedKeyword).Error; err != nil {
+		t.Fatalf("seed keyword doc: %v", err)
+	}
+
+	svc := service.NewDocumentService(repo.NewKnowledgeDocumentRepo(gdb), repo.NewKnowledgeChunkRepo(gdb), repo.NewKnowledgeBaseRepo(gdb), gdb, nil, nil, nil)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.GET("/api/ragent/knowledge-base/:id/docs", h.ListDocs)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/knowledge-base/"+kb.ID+"/docs?status=success&keyword=权益", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	page, ok := resp["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected paged response, got %T: %s", resp["data"], w.Body.String())
+	}
+	items, ok := page["records"].([]any)
+	if !ok {
+		t.Fatalf("expected records array, got %T: %s", page["records"], w.Body.String())
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one filtered document, got %s", w.Body.String())
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok || item["docName"] != "会员权益说明.md" || item["status"] != "success" {
+		t.Fatalf("unexpected filtered doc: %s", w.Body.String())
+	}
+}
+
 func TestToggleDocumentAcceptsJavaValueQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

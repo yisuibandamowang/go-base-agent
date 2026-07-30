@@ -309,6 +309,65 @@ func TestKnowledgeBaseService_UpdateRenamesWithoutClearingExistingFields(t *test
 	}
 }
 
+func TestKnowledgeBaseService_UpdateIgnoresCollectionName(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	kb := knowledgeModel.KnowledgeBase{Name: "原知识库", EmbeddingModel: "emb-1", CollectionName: "kb_origin", CreatedBy: "admin"}
+	if err := gdb.Create(&kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	updated, err := svc.Update(context.Background(), kb.ID, knowledgeDto.UpdateKnowledgeBaseReq{
+		Name:           "新知识库",
+		CollectionName: "kb_new",
+	}, "admin")
+	if err != nil {
+		t.Fatalf("update knowledge base: %v", err)
+	}
+	if updated.CollectionName != "kb_origin" {
+		t.Fatalf("expected update to preserve collection name, got %+v", updated)
+	}
+}
+
+func TestKnowledgeBaseService_CreateRejectsWhitespaceEquivalentName(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeBase{}, &knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	svc := NewKnowledgeBaseService(knowledgeRepo.NewKnowledgeBaseRepo(gdb))
+	ctx := appctx.WithUser(context.Background(), &appctx.LoginUser{
+		UserID:   "admin-1",
+		Username: "管理员",
+		Role:     "admin",
+	})
+
+	if _, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "知 识 库 A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "kb-a",
+	}, "admin-1"); err != nil {
+		t.Fatalf("seed knowledge base: %v", err)
+	}
+
+	if _, err := svc.Create(ctx, knowledgeDto.CreateKnowledgeBaseReq{
+		Name:           "知识库A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "kb-b",
+	}, "admin-1"); err == nil || !strings.Contains(err.Error(), "知识库名称已存在") {
+		t.Fatalf("expected whitespace-equivalent name to be rejected, got %v", err)
+	}
+}
+
 func TestKnowledgeBaseService_UpdateBlocksEmbeddingModelChangeAfterChunkedDocuments(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

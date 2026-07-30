@@ -65,7 +65,7 @@ func (s *FallbackLLMService) ChatWithModel(ctx context.Context, req Request, mod
 		}
 		return "", errors.New("fallback llm service has no available backend")
 	}
-	result, err := s.fallback.ChatWithModel(ctx, req, modelID)
+	result, err := s.fallback.Chat(ctx, req)
 	if err != nil {
 		return "", wrapFallbackError("chat with model", primaryErr, err)
 	}

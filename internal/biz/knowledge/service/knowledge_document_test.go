@@ -186,7 +186,7 @@ func TestDocumentService_ListDocumentsMarksChunksEdited(t *testing.T) {
 		t.Fatalf("create clean chunk: %v", err)
 	}
 
-	records, total, err := svc.ListDocumentsByKB(ctx, kb.ID, 1, 10)
+	records, total, err := svc.ListDocumentsByKB(ctx, kb.ID, 1, 10, "", "")
 	if err != nil {
 		t.Fatalf("list docs: %v", err)
 	}

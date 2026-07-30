@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"strings"
 
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/framework/db"
@@ -56,16 +57,33 @@ func (r *KnowledgeDocumentRepo) SoftDelete(ctx context.Context, id string) error
 }
 
 // ListByKB 按知识库 ID 分页查询文档列表。
-func (r *KnowledgeDocumentRepo) ListByKB(ctx context.Context, kbID string, page, size int) ([]model.KnowledgeDocument, int64, error) {
+func (r *KnowledgeDocumentRepo) ListByKB(ctx context.Context, kbID string, page, size int, status, keyword string) ([]model.KnowledgeDocument, int64, error) {
 	var (
 		records []model.KnowledgeDocument
 		total   int64
 	)
-	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{}).Where("kb_id = ?", kbID)
-	if err := query.Count(&total).Error; err != nil {
+	status = strings.TrimSpace(status)
+	keyword = strings.TrimSpace(keyword)
+
+	countQuery := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{}).Where("kb_id = ?", kbID)
+	if keyword != "" {
+		countQuery = countQuery.Where("LOWER(doc_name) LIKE LOWER(?)", "%"+keyword+"%")
+	}
+	if status != "" {
+		countQuery = countQuery.Where("status = ?", status)
+	}
+	if err := countQuery.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	if err := query.Scopes(db.Paginate(page, size)).Order("create_time DESC").Find(&records).Error; err != nil {
+
+	listQuery := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeDocument{}).Where("kb_id = ?", kbID)
+	if keyword != "" {
+		listQuery = listQuery.Where("LOWER(doc_name) LIKE LOWER(?)", "%"+keyword+"%")
+	}
+	if status != "" {
+		listQuery = listQuery.Where("status = ?", status)
+	}
+	if err := listQuery.Scopes(db.Paginate(page, size)).Order("create_time DESC").Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
 	return records, total, nil

@@ -81,6 +81,30 @@ func TestFallbackLLMService_ChatFallsBackWhenPrimaryFails(t *testing.T) {
 	}
 }
 
+func TestFallbackLLMService_ChatWithModelFallsBackToDefaultRouteWhenPrimaryFails(t *testing.T) {
+	primary := &fakeLLMService{chatWithModelFn: func(ctx context.Context, req Request, modelID string) (string, error) {
+		if modelID != "qwen3-local" {
+			t.Fatalf("expected primary to receive requested local model, got %q", modelID)
+		}
+		return "", errors.New("ollama unavailable")
+	}}
+	fallback := &fakeLLMService{chatFn: func(ctx context.Context, req Request) (string, error) {
+		return "cloud-default", nil
+	}}
+
+	svc := NewFallbackLLMService(primary, fallback)
+	got, err := svc.ChatWithModel(context.Background(), SimpleRequest("hello"), "qwen3-local")
+	if err != nil {
+		t.Fatalf("chat with model: %v", err)
+	}
+	if got != "cloud-default" {
+		t.Fatalf("expected cloud default route fallback, got %q", got)
+	}
+	if primary.modelCalls != 1 || fallback.chatCalls != 1 || fallback.modelCalls != 0 {
+		t.Fatalf("expected primary model call then fallback default chat, got primaryModel=%d fallbackChat=%d fallbackModel=%d", primary.modelCalls, fallback.chatCalls, fallback.modelCalls)
+	}
+}
+
 func TestFallbackLLMService_StreamChatFallsBackWhenPrimaryFails(t *testing.T) {
 	primary := &fakeLLMService{streamFn: func(ctx context.Context, req Request, cb StreamCallback) (StreamHandle, error) {
 		return nil, errors.New("ollama unavailable")

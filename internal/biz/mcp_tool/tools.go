@@ -142,16 +142,7 @@ func searchDocsTool(docRepo *repo.KnowledgeDocumentRepo) *Tool {
 				err  error
 			)
 			if strings.TrimSpace(kbID) != "" {
-				docs, _, err = docRepo.ListByKB(ctx, kbID, 1, 100)
-				if err == nil {
-					filtered := docs[:0]
-					for _, doc := range docs {
-						if strings.Contains(strings.ToLower(doc.DocName), strings.ToLower(keyword)) {
-							filtered = append(filtered, doc)
-						}
-					}
-					docs = filtered
-				}
+				docs, _, err = docRepo.ListByKB(ctx, kbID, 1, 100, "", keyword)
 			} else {
 				docs, _, err = docRepo.SearchDocs(ctx, keyword, 1, 20)
 			}

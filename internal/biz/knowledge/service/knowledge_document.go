@@ -1323,8 +1323,8 @@ func (s *DocumentService) GetDocument(ctx context.Context, id string) (*dto.Docu
 }
 
 // ListDocumentsByKB 按知识库分页查询文档。
-func (s *DocumentService) ListDocumentsByKB(ctx context.Context, kbID string, page, size int) ([]dto.DocumentResp, int64, error) {
-	docs, total, err := s.docRepo.ListByKB(ctx, kbID, page, size)
+func (s *DocumentService) ListDocumentsByKB(ctx context.Context, kbID string, page, size int, status, keyword string) ([]dto.DocumentResp, int64, error) {
+	docs, total, err := s.docRepo.ListByKB(ctx, kbID, page, size, status, keyword)
 	if err != nil {
 		return nil, 0, err
 	}

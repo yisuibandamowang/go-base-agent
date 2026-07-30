@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/framework/db"
@@ -37,10 +38,10 @@ func (r *KnowledgeBaseRepo) FindByID(ctx context.Context, id string) (*model.Kno
 	return &kb, nil
 }
 
-// Update 更新知识库字段（name、embedding_model、collection_name、updated_by、update_time）。
+// Update 更新知识库字段（name、embedding_model、updated_by、update_time）。
 func (r *KnowledgeBaseRepo) Update(ctx context.Context, kb *model.KnowledgeBase) error {
 	result := r.gdb.WithContext(ctx).Model(kb).
-		Select("name", "embedding_model", "collection_name", "updated_by", "update_time").
+		Select("name", "embedding_model", "updated_by", "update_time").
 		Updates(kb)
 	if result.Error != nil {
 		return result.Error
@@ -146,15 +147,21 @@ func (r *KnowledgeBaseRepo) CountChunkedDocumentsByKBID(ctx context.Context, kbI
 
 // ExistsByName 检查名称是否已存在（排除指定 ID 用于更新时的唯一性校验）。
 func (r *KnowledgeBaseRepo) ExistsByName(ctx context.Context, name string, excludeID string) (bool, error) {
-	var count int64
-	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeBase{}).Where("name = ?", name)
+	var records []model.KnowledgeBase
+	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeBase{})
 	if excludeID != "" {
 		query = query.Where("id != ?", excludeID)
 	}
-	if err := query.Count(&count).Error; err != nil {
+	if err := query.Find(&records).Error; err != nil {
 		return false, err
 	}
-	return count > 0, nil
+	normalizedName := normalizeKnowledgeBaseName(name)
+	for _, record := range records {
+		if normalizeKnowledgeBaseName(record.Name) == normalizedName {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ExistsByCollectionName 检查 collection_name 是否已存在（排除指定 ID）。
@@ -168,4 +175,18 @@ func (r *KnowledgeBaseRepo) ExistsByCollectionName(ctx context.Context, collecti
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func normalizeKnowledgeBaseName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

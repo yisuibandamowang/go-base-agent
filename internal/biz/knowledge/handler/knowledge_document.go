@@ -316,7 +316,7 @@ func parseInt16(value string) int16 {
 func (h *DocumentHandler) ListDocs(c *gin.Context) {
 	kbID := c.Param("id")
 	page, size := pagination(c)
-	records, total, err := h.svc.ListDocumentsByKB(c.Request.Context(), kbID, page, size)
+	records, total, err := h.svc.ListDocumentsByKB(c.Request.Context(), kbID, page, size, c.Query("status"), c.Query("keyword"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return

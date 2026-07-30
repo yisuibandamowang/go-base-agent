@@ -160,14 +160,6 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, id string, req dto.Up
 		}
 		kb.EmbeddingModel = embeddingModel
 	}
-	collectionName := strings.TrimSpace(req.CollectionName)
-	if collectionName != "" && collectionName != kb.CollectionName {
-		if err := s.checkCollectionUnique(ctx, collectionName, id); err != nil {
-			return nil, err
-		}
-		kb.CollectionName = collectionName
-	}
-
 	kb.Name = name
 	kb.UpdatedBy = userID
 	kb.UpdateTime = time.Now()
