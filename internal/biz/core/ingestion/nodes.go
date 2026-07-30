@@ -588,13 +588,22 @@ func (n *ChunkerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 
 // IndexerNode embeds chunks and writes them to a vector store.
 type IndexerNode struct {
-	embedder embedding.Service
-	store    rag.VectorStoreService
+	embedder              embedding.Service
+	store                 rag.VectorStoreService
+	defaultCollectionName string
 }
 
 // NewIndexerNode creates an indexer node.
 func NewIndexerNode(embedder embedding.Service, store rag.VectorStoreService) *IndexerNode {
 	return &IndexerNode{embedder: embedder, store: store}
+}
+
+// SetDefaultCollectionName configures the fallback vector collection name.
+func (n *IndexerNode) SetDefaultCollectionName(collectionName string) {
+	if n == nil {
+		return
+	}
+	n.defaultCollectionName = strings.TrimSpace(collectionName)
 }
 
 // NodeType returns the node type.
@@ -615,7 +624,7 @@ func (n *IndexerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 		return rag.NodeResult{Success: false, ErrorMessage: "没有可索引的分块"}
 	}
 	settings := indexerSettingsFromConfig(config.Settings)
-	collectionName := firstNonEmpty(settings.CollectionName, nodeCtx.VectorSpaceID)
+	collectionName := firstNonEmpty(settings.CollectionName, nodeCtx.VectorSpaceID, n.defaultCollectionName)
 	if strings.TrimSpace(collectionName) == "" {
 		return rag.NodeResult{Success: false, ErrorMessage: "索引器需要指定集合名称"}
 	}

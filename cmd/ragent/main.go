@@ -147,6 +147,7 @@ func main() {
 	docSvc.SetScheduleRepo(scheduleRepo)
 	docSvc.SetScheduleMinIntervalSeconds(cfg.RAG.Knowledge.Schedule.MinIntervalSeconds)
 	docSvc.SetLLMService(llmService)
+	docSvc.SetDefaultCollectionName(cfg.RAG.Default.CollectionName)
 	docSvc.SetMQProducer(mqProducer, mqEnabled)
 	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeDocumentChunkTopic, docSvc.CheckChunkTransaction)
 	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeBaseCleanupTopic, kbSvc.CheckCleanupTransaction)

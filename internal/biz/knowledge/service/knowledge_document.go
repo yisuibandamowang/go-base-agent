@@ -47,6 +47,7 @@ type DocumentService struct {
 	auditRecorder              *auditService.BizChangeLogService
 	parserRegistry             *parser.Registry
 	llm                        chat.LLMService
+	defaultCollectionName      string
 	scheduleMinIntervalSeconds int
 	mqProducer                 mq.Producer
 	mqEnabled                  bool
@@ -139,6 +140,11 @@ func (s *DocumentService) SetParserRegistry(registry *parser.Registry) {
 // SetLLMService 设置 pipeline 增强节点使用的大模型服务。
 func (s *DocumentService) SetLLMService(llm chat.LLMService) {
 	s.llm = llm
+}
+
+// SetDefaultCollectionName 设置 pipeline 索引节点的默认向量集合。
+func (s *DocumentService) SetDefaultCollectionName(collectionName string) {
+	s.defaultCollectionName = strings.TrimSpace(collectionName)
 }
 
 // SetScheduleMinIntervalSeconds 设置文档调度最小周期秒数。
@@ -729,13 +735,15 @@ func (s *DocumentService) documentIngestionNodes() []rag.IngestionNode {
 	if registry == nil {
 		registry = parser.DefaultRegistry()
 	}
+	indexer := coreingestion.NewIndexerNode(s.emb, s.vecStore)
+	indexer.SetDefaultCollectionName(s.defaultCollectionName)
 	return []rag.IngestionNode{
 		coreingestion.NewFetcherNode(nil),
 		coreingestion.NewParserNode(registry),
 		coreingestion.NewEnhancerNode(s.llm),
 		coreingestion.NewChunkerNode(),
 		coreingestion.NewEnricherNode(s.llm),
-		coreingestion.NewIndexerNode(s.emb, s.vecStore),
+		indexer,
 	}
 }
 

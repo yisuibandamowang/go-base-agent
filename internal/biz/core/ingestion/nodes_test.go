@@ -545,6 +545,26 @@ func TestIndexerNode_WritesVectors(t *testing.T) {
 	}
 }
 
+func TestIndexerNode_UsesDefaultCollectionWhenVectorSpaceMissingLikeJava(t *testing.T) {
+	store := &testVectorStore{}
+	node := NewIndexerNode(&testEmbedder{}, store)
+	node.SetDefaultCollectionName("default_collection")
+	ctx := &rag.IngestionContext{
+		TaskID: "task-9",
+		Chunks: []rag.VectorChunk{
+			{Content: "第一段", Index: 0},
+		},
+	}
+
+	result := node.Execute(context.Background(), ctx, rag.NodeConfig{})
+	if !result.Success {
+		t.Fatalf("unexpected indexer result: %+v", result)
+	}
+	if store.collection != "default_collection" {
+		t.Fatalf("expected default collection, got %q", store.collection)
+	}
+}
+
 func TestIndexerNode_EmbedsEmbeddingTextWhenPresent(t *testing.T) {
 	store := &testVectorStore{}
 	embedder := &recordingEmbedder{}
