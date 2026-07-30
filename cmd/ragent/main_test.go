@@ -166,6 +166,35 @@ func TestRagEvalHandlerPassesIntentContextToRetriever(t *testing.T) {
 	}
 }
 
+func TestRagEvalHandlerIncludesMcpContextWhenRetrieverProvidesIt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	api := r.Group("/api/ragent")
+	retriever := &fakeEvalMcpContextRetriever{}
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, retriever, true, fakeEvalIntentResolver{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
+	r.ServeHTTP(w, req)
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d %s", w.Code, body)
+	}
+	if retriever.mcpCalls != 1 {
+		t.Fatalf("expected one mcp context call, got %d", retriever.mcpCalls)
+	}
+	for _, want := range []string{
+		`"hasMcp":true`,
+		`"mcpContext":"\u003ctool-data\u003e`,
+		`weather_query`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected eval response to contain %s, got %s", want, body)
+		}
+	}
+}
+
 func TestBuildDocumentParserRegistryRegistersTikaWhenConfigured(t *testing.T) {
 	cfg := &config.Config{
 		RAG: config.RAGConfig{
@@ -788,4 +817,14 @@ func (f *fakeEvalContextRetriever) RetrieveWithContext(ctx context.Context, sc r
 	f.contextCalls++
 	f.lastContext = sc
 	return []rag.RetrievedChunk{{ID: "context", Text: sc.RewrittenQuestion}}, nil
+}
+
+type fakeEvalMcpContextRetriever struct {
+	fakeEvalContextRetriever
+	mcpCalls int
+}
+
+func (f *fakeEvalMcpContextRetriever) BuildMcpContext(ctx context.Context, question string, subIntents []rag.SubQuestionIntent) (string, error) {
+	f.mcpCalls++
+	return "<tool-data>\n<data>\n工具：weather_query\n北京 今日晴\n</data>\n</tool-data>", nil
 }

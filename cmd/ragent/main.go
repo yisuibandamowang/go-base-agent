@@ -358,6 +358,7 @@ func main() {
 	mcpRegistry := rag.NewMcpToolRegistry()
 	mcpExtractor := rag.NewLLMMcpParameterExtractor(preferredLLMService)
 	mcpSelector := rag.NewLLMMcpToolSelector(preferredLLMService)
+	mcpContextProvider := rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector)
 	if len(cfg.RAG.MCP.Servers) > 0 {
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := rag.RegisterRemoteMcpServers(registerCtx, mcpRegistry, toMcpServerSpecs(cfg.RAG.MCP.Servers), &http.Client{Timeout: 10 * time.Second}); err != nil {
@@ -374,7 +375,7 @@ func main() {
 	)
 	ragPipeline.SetMessageChunkSize(cfg.AI.Stream.MessageChunkSize)
 	ragPipeline.SetPreferredLLMService(preferredLLMService)
-	ragPipeline.SetMcpContextProvider(rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector))
+	ragPipeline.SetMcpContextProvider(mcpContextProvider)
 	ragPipeline.SetIntentResolver(intentResolverSvc)
 	ragPipeline.SetIntentGuidanceService(intentGuidanceSvc)
 	if cfg.RAG.Trace.Enabled {
@@ -487,7 +488,7 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
-		registerRagEvalRoute(api, llmRewriter, enrichedRetriever, cfg.App.Eval.Enabled, intentResolverSvc)
+		registerRagEvalRoute(api, llmRewriter, &ragEvalRetriever{Retriever: enrichedRetriever, mcp: mcpContextProvider}, cfg.App.Eval.Enabled, intentResolverSvc)
 		demoH := newDemoHandler()
 		if hasVLM {
 			demoH = newDemoHandlerWithVLM(vlmService)
@@ -1028,6 +1029,16 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			Intents:           subIntents,
 			TopK:              10,
 		}
+		mcpContext := ""
+		hasMcp := false
+		if provider, ok := retriever.(interface {
+			BuildMcpContext(context.Context, string, []rag.SubQuestionIntent) (string, error)
+		}); ok {
+			if ctxText, err := provider.BuildMcpContext(c.Request.Context(), rewrittenQuestion, subIntents); err == nil {
+				mcpContext = strings.TrimSpace(ctxText)
+				hasMcp = mcpContext != ""
+			}
+		}
 		chunks, err := evalRetrieve(c.Request.Context(), retriever, searchContext)
 		if err != nil {
 			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
@@ -1059,13 +1070,28 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			"retrievedContexts":      contexts,
 			"retrievedContextDocIds": contextDocIDs,
 			"hasKb":                  len(chunks) > 0,
-			"hasMcp":                 false,
-			"mcpContext":             "",
+			"hasMcp":                 hasMcp,
+			"mcpContext":             mcpContext,
 			"subIntents":             subQuestions,
 			"intentLeafIds":          intentLeafIDs,
 			"latencyMs":              time.Since(start).Milliseconds(),
 		}))
 	}
+}
+
+type ragEvalRetriever struct {
+	rag.Retriever
+	mcp rag.McpContextProvider
+}
+
+func (r *ragEvalRetriever) BuildMcpContext(ctx context.Context, question string, subIntents []rag.SubQuestionIntent) (string, error) {
+	if r == nil || r.mcp == nil {
+		return "", nil
+	}
+	if aware, ok := r.mcp.(rag.McpIntentAwareContextProvider); ok {
+		return aware.BuildContextWithIntents(ctx, question, subIntents)
+	}
+	return r.mcp.BuildContext(ctx, question)
 }
 
 func evalRetrieve(ctx context.Context, retriever rag.Retriever, sc rag.SearchContext) ([]rag.RetrievedChunk, error) {

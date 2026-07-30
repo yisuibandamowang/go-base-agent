@@ -117,6 +117,70 @@ func newDocumentServiceTestContext(t *testing.T) (*gorm.DB, *knowledgeModel.Know
 	return gdb, kb, svc
 }
 
+func TestDocumentService_PreviewDocumentRejectsNonMarkdown(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:      kb.ID,
+		DocName:   "会员说明.pdf",
+		FileURL:   "upload://会员说明.pdf",
+		FileType:  "pdf",
+		Status:    "success",
+		CreatedBy: "tester",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeChunk{
+		BaseModel:  db.BaseModel{ID: "chunk-1"},
+		KbID:       kb.ID,
+		DocID:      doc.ID,
+		Content:    "分块内容",
+		ChunkIndex: 1,
+		CreatedBy:  "tester",
+	}).Error; err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
+
+	_, err := svc.PreviewDocument(context.Background(), doc.ID)
+	if err == nil || !strings.Contains(err.Error(), "仅支持预览 markdown 格式文档") {
+		t.Fatalf("expected markdown-only preview error, got %v", err)
+	}
+}
+
+func TestDocumentService_PreviewDocumentReadsMarkdownOriginalFile(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	svc.fileStore = fakeFileReader{data: []byte("# 原始 Markdown\n会员权益说明")}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:      kb.ID,
+		DocName:   "会员说明.md",
+		FileURL:   "upload://会员说明.md",
+		FileType:  "markdown",
+		Status:    "success",
+		CreatedBy: "tester",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeChunk{
+		BaseModel:  db.BaseModel{ID: "chunk-1"},
+		KbID:       kb.ID,
+		DocID:      doc.ID,
+		Content:    "分块内容不应作为预览",
+		ChunkIndex: 1,
+		CreatedBy:  "tester",
+	}).Error; err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
+
+	content, err := svc.PreviewDocument(context.Background(), doc.ID)
+	if err != nil {
+		t.Fatalf("preview document: %v", err)
+	}
+	if content != "# 原始 Markdown\n会员权益说明" {
+		t.Fatalf("expected original markdown file content, got %q", content)
+	}
+}
+
 func TestDocumentService_ListDocumentsMarksChunksEdited(t *testing.T) {
 	gdb, kb, svc := newDocumentServiceTestContext(t)
 	ctx := context.Background()

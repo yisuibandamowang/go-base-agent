@@ -1985,17 +1985,20 @@ func formatOptionalTime(t *time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-// PreviewDocument returns the full text of a document by concatenating all its chunks.
+// PreviewDocument returns the original markdown file content.
 func (s *DocumentService) PreviewDocument(ctx context.Context, docID string) (string, error) {
-	chunks, _, err := s.chunkRepo.ListByDoc(ctx, docID, 1, 500)
+	doc, err := s.docRepo.FindByID(ctx, docID)
 	if err != nil {
-		return "", fmt.Errorf("查询分块失败: %w", err)
+		return "", fmt.Errorf("文档不存在")
 	}
-	var sb strings.Builder
-	for _, c := range chunks {
-		sb.WriteString(c.Content)
+	if !strings.EqualFold(doc.FileType, "markdown") {
+		return "", fmt.Errorf("仅支持预览 markdown 格式文档")
 	}
-	return sb.String(), nil
+	data, err := s.readDocumentBytes(ctx, doc)
+	if err != nil {
+		return "", fmt.Errorf("读取文档内容失败: %w", err)
+	}
+	return string(data), nil
 }
 
 // --- helpers ---
