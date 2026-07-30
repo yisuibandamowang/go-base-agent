@@ -676,8 +676,8 @@ func registerIntentRoutes(api *gin.RouterGroup, intentTreeHandler *intentHandler
 
 	api.GET("/mappings", intentTreeHandler.ListTermMappings)
 	api.GET("/mappings/:id", intentTreeHandler.GetTermMapping)
-	api.POST("/mappings", intentTreeHandler.CreateTermMapping)
-	api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMapping)
+	api.POST("/mappings", intentTreeHandler.CreateTermMappingCompat)
+	api.PUT("/mappings/:id", intentTreeHandler.UpdateTermMappingCompat)
 	api.DELETE("/mappings/:id", intentTreeHandler.DeleteTermMapping)
 }
 

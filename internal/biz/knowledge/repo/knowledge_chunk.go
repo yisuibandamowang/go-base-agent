@@ -46,12 +46,15 @@ func (r *KnowledgeChunkRepo) FindByID(ctx context.Context, id string) (*model.Kn
 }
 
 // ListByDoc 按文档 ID 分页查询分块列表。
-func (r *KnowledgeChunkRepo) ListByDoc(ctx context.Context, docID string, page, size int) ([]model.KnowledgeChunk, int64, error) {
+func (r *KnowledgeChunkRepo) ListByDoc(ctx context.Context, docID string, page, size int, enabled *int16) ([]model.KnowledgeChunk, int64, error) {
 	var (
 		records []model.KnowledgeChunk
 		total   int64
 	)
 	query := r.gdb.WithContext(ctx).Scopes(db.NotDeletedScope()).Model(&model.KnowledgeChunk{}).Where("doc_id = ?", docID)
+	if enabled != nil {
+		query = query.Where("enabled = ?", *enabled)
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}

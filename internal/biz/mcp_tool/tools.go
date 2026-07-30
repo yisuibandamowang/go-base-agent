@@ -200,7 +200,7 @@ func listChunksTool(chunkRepo *repo.KnowledgeChunkRepo) *Tool {
 			if docID == "" {
 				return errorContent("缺少参数: doc_id"), nil
 			}
-			chunks, _, err := chunkRepo.ListByDoc(ctx, docID, 1, 100)
+			chunks, _, err := chunkRepo.ListByDoc(ctx, docID, 1, 100, nil)
 			if err != nil {
 				return errorContent(fmt.Sprintf("查询分块失败: %v", err)), nil
 			}

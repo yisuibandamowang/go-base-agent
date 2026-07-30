@@ -1577,8 +1577,8 @@ func (s *DocumentService) SearchDocuments(ctx context.Context, keyword string, l
 }
 
 // ListChunks 查询文档分块列表。
-func (s *DocumentService) ListChunks(ctx context.Context, docID string, page, size int) ([]dto.ChunkResp, int64, error) {
-	chunks, total, err := s.chunkRepo.ListByDoc(ctx, docID, page, size)
+func (s *DocumentService) ListChunks(ctx context.Context, docID string, page, size int, enabled *int16) ([]dto.ChunkResp, int64, error) {
+	chunks, total, err := s.chunkRepo.ListByDoc(ctx, docID, page, size, enabled)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1861,7 +1861,21 @@ func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, i
 			return fmt.Errorf("Chunk %s 不属于文档 %s", chunks[i].ID, docID)
 		}
 	}
-	if err := s.chunkRepo.BatchUpdateEnabled(ctx, docID, ids, enabled); err != nil {
+	needUpdateChunks := make([]model.KnowledgeChunk, 0, len(chunks))
+	needUpdateIDs := make([]string, 0, len(chunks))
+	for i := range chunks {
+		if chunks[i].Enabled != enabled {
+			needUpdateChunks = append(needUpdateChunks, chunks[i])
+			needUpdateIDs = append(needUpdateIDs, chunks[i].ID)
+		}
+	}
+	if len(needUpdateIDs) == 0 {
+		if enabled == 1 {
+			return fmt.Errorf("所有 Chunk 已全部启用，无需重复操作")
+		}
+		return fmt.Errorf("所有 Chunk 已全部禁用，无需重复操作")
+	}
+	if err := s.chunkRepo.BatchUpdateEnabled(ctx, docID, needUpdateIDs, enabled); err != nil {
 		return err
 	}
 	if s.vecStore != nil {
@@ -1870,27 +1884,27 @@ func (s *DocumentService) BatchToggleChunks(ctx context.Context, docID string, i
 			return fmt.Errorf("知识库不存在: %w", err)
 		}
 		if enabled == 1 {
-			for i := range chunks {
-				vecChunk, err := s.buildChunkVector(ctx, doc, kb, &chunks[i])
+			for i := range needUpdateChunks {
+				vecChunk, err := s.buildChunkVector(ctx, doc, kb, &needUpdateChunks[i])
 				if err != nil {
 					return err
 				}
-				if err := s.vecStore.UpdateChunk(ctx, kb.CollectionName, chunks[i].DocID, vecChunk); err != nil {
+				if err := s.vecStore.UpdateChunk(ctx, kb.CollectionName, needUpdateChunks[i].DocID, vecChunk); err != nil {
 					return fmt.Errorf("update chunk vector: %w", err)
 				}
 			}
-		} else if err := s.vecStore.DeleteChunksByIDs(ctx, kb.CollectionName, ids); err != nil {
+		} else if err := s.vecStore.DeleteChunksByIDs(ctx, kb.CollectionName, needUpdateIDs); err != nil {
 			return fmt.Errorf("delete chunk vectors: %w", err)
 		}
 	}
-	for i := range chunks {
-		before := s.chunkToResp(&chunks[i])
-		chunks[i].Enabled = enabled
-		chunks[i].UpdateTime = time.Now()
-		after := s.chunkToResp(&chunks[i])
+	for i := range needUpdateChunks {
+		before := s.chunkToResp(&needUpdateChunks[i])
+		needUpdateChunks[i].Enabled = enabled
+		needUpdateChunks[i].UpdateTime = time.Now()
+		after := s.chunkToResp(&needUpdateChunks[i])
 		s.recordAudit(ctx, auditService.RecordReq{
 			BizType:        auditService.BizTypeKnowledgeChunk,
-			BizID:          chunks[i].ID,
+			BizID:          needUpdateChunks[i].ID,
 			OperationType:  operationForEnabled(enabled),
 			ActionDesc:     "批量切换分块状态：" + docID,
 			BeforeSnapshot: before,

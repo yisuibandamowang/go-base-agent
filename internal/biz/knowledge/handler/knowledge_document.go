@@ -343,12 +343,12 @@ func (h *DocumentHandler) UpdateDoc(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("参数校验失败: %v", err)))
 		return
 	}
-	resp, err := h.svc.UpdateDocument(c.Request.Context(), id, req, userID(c))
+	_, err := h.svc.UpdateDocument(c.Request.Context(), id, req, userID(c))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // DeleteDoc DELETE /knowledge-base/docs/:docId
@@ -408,7 +408,12 @@ func (h *DocumentHandler) ToggleDoc(c *gin.Context) {
 func (h *DocumentHandler) ListChunks(c *gin.Context) {
 	docID := c.Param("docId")
 	page, size := pagination(c)
-	records, total, err := h.svc.ListChunks(c.Request.Context(), docID, page, size)
+	enabled, err := optionalInt16Query(c, "enabled")
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", err.Error()))
+		return
+	}
+	records, total, err := h.svc.ListChunks(c.Request.Context(), docID, page, size, enabled)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
@@ -516,6 +521,19 @@ func parseSearchLimit(c *gin.Context) int {
 	return limit
 }
 
+func optionalInt16Query(c *gin.Context, name string) (*int16, error) {
+	raw := strings.TrimSpace(c.Query(name))
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s参数必须为数字", name)
+	}
+	v := int16(value)
+	return &v, nil
+}
+
 // ChunkLogs GET /knowledge-base/docs/:docId/chunk-logs
 func (h *DocumentHandler) ChunkLogs(c *gin.Context) {
 	docID := c.Param("docId")
@@ -535,9 +553,7 @@ func (h *DocumentHandler) ChunkDoc(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(map[string]string{
-		"message": "文档分块任务已提交",
-	}))
+	c.JSON(http.StatusOK, convention.Success(map[string]string(nil)))
 }
 
 // CreateChunk POST /knowledge-base/docs/:docId/chunks
@@ -586,13 +602,7 @@ func (h *DocumentHandler) File(c *gin.Context) {
 			return
 		}
 	}
-	// Fallback: return chunk content as inline text
-	content, err := h.svc.PreviewDocument(c.Request.Context(), docID)
-	if err != nil {
-		c.String(http.StatusOK, "")
-		return
-	}
-	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(content))
+	c.JSON(http.StatusOK, convention.Failure("B000001", "读取文档源文件失败"))
 }
 
 func sendStoredFile(c *gin.Context, f *storedFile) {

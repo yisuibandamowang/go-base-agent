@@ -158,6 +158,21 @@ func (h *IntentHandler) CreateTermMapping(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
 
+// CreateTermMappingCompat POST /api/ragent/mappings
+func (h *IntentHandler) CreateTermMappingCompat(c *gin.Context) {
+	var req dto.CreateTermMappingReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
+		return
+	}
+	resp, err := h.svc.CreateTermMapping(c.Request.Context(), req, currentUser(c))
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(resp.ID))
+}
+
 // GetTermMapping GET /api/ragent/mappings/:id
 func (h *IntentHandler) GetTermMapping(c *gin.Context) {
 	resp, err := h.svc.GetTermMapping(c.Request.Context(), c.Param("id"))
@@ -182,6 +197,21 @@ func (h *IntentHandler) UpdateTermMapping(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+// UpdateTermMappingCompat PUT /api/ragent/mappings/:id
+func (h *IntentHandler) UpdateTermMappingCompat(c *gin.Context) {
+	id := c.Param("id")
+	var req dto.UpdateTermMappingReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
+		return
+	}
+	if _, err := h.svc.UpdateTermMapping(c.Request.Context(), id, req, currentUser(c)); err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // DeleteTermMapping DELETE /api/ragent/intent-tree/term-mappings/:id

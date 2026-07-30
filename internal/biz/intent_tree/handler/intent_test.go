@@ -148,3 +148,59 @@ func TestListTermMappingsFiltersByKeywordLikeJavaMappingsPage(t *testing.T) {
 		t.Fatalf("expected keyword-filtered mappings, got %s", body)
 	}
 }
+
+func TestJavaCompatMappingsCreateAndUpdateResponseShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.QueryTermMapping{}); err != nil {
+		t.Fatalf("migrate mapping: %v", err)
+	}
+	h := NewIntentHandler(service.NewIntentService(repo.NewIntentRepo(gdb), repo.NewTermMappingRepo(gdb), gdb))
+	r := gin.New()
+	r.POST("/api/ragent/mappings", h.CreateTermMappingCompat)
+	r.PUT("/api/ragent/mappings/:id", h.UpdateTermMappingCompat)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/mappings", strings.NewReader(`{"domain":"member","sourceTerm":"VIP","targetTerm":"会员","priority":1,"enabled":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var createResp struct {
+		Code string `json:"code"`
+		Data any    `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if createResp.Code != "0" {
+		t.Fatalf("expected code 0, got %s: %s", createResp.Code, w.Body.String())
+	}
+	id, ok := createResp.Data.(string)
+	if !ok || id == "" {
+		t.Fatalf("expected mappings create to return id string, got %T: %v", createResp.Data, createResp.Data)
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/ragent/mappings/"+id, strings.NewReader(`{"remark":"updated"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var updateResp struct {
+		Code string `json:"code"`
+		Data any    `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &updateResp); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updateResp.Code != "0" || updateResp.Data != nil {
+		t.Fatalf("expected mappings update to return null success, got %s %v", updateResp.Code, updateResp.Data)
+	}
+}
