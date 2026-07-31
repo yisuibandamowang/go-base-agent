@@ -47,6 +47,48 @@ func TestLimiter_SingleAcquire(t *testing.T) {
 	}
 }
 
+func TestLimiter_AcquireWaitsForOnAcquire(t *testing.T) {
+	l, cleanup := newTestLimiterT(t, 1)
+	defer cleanup()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = l.Acquire(context.Background(), ratelimit.AcquireRequest{
+			MaxWait: 2 * time.Second,
+			OnAcquire: func() {
+				started <- struct{}{}
+				<-release
+			},
+			OnTimeout: func() {
+				t.Fatal("unexpected timeout")
+			},
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onAcquire did not start")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("acquire returned before onAcquire completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("acquire did not return after onAcquire completed")
+	}
+}
+
 func TestLimiter_ConcurrentWithinLimit(t *testing.T) {
 	l, cleanup := newTestLimiterT(t, 3)
 	defer cleanup()

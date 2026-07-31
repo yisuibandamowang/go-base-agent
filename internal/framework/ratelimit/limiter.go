@@ -215,10 +215,8 @@ func (l *FairQueueLimiter) tryClaim(ctx context.Context, t *ticket) bool {
 	l.mu.Unlock()
 	close(t.done)
 
-	go func() {
-		defer l.releasePermit(context.Background())
-		t.req.OnAcquire()
-	}()
+	defer l.releasePermit(context.Background())
+	t.req.OnAcquire()
 
 	return true
 }
