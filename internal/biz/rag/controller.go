@@ -57,7 +57,7 @@ func (ctl *Controller) Chat(c *gin.Context) {
 	}
 
 	taskID := snowflake.NextIDStr()
-	chatLockKey := chatSubmitLockKey(c)
+	chatLockKey := chatSubmitLockKey(c, conversationID)
 	if !ctl.acquireSubmitLock(c, chatLockKey, 5*time.Minute, "当前会话处理中，请稍后再发起新的对话") {
 		return
 	}
@@ -114,12 +114,16 @@ func (ctl *Controller) releaseSubmitLock(key string) {
 	_ = ctl.guard.Clear(context.Background(), key)
 }
 
-func chatSubmitLockKey(c *gin.Context) string {
+func chatSubmitLockKey(c *gin.Context, conversationID string) string {
 	userID := "anonymous"
 	if user := appctx.User(c.Request.Context()); user != nil && strings.TrimSpace(user.UserID) != "" {
 		userID = strings.TrimSpace(user.UserID)
 	}
-	return "rag:chat:submit:" + userID
+	conversationKey := strings.TrimSpace(conversationID)
+	if conversationKey == "" {
+		conversationKey = "new"
+	}
+	return "rag:chat:submit:" + userID + ":" + conversationKey
 }
 
 func stopSubmitLockKey(c *gin.Context, taskID string) string {

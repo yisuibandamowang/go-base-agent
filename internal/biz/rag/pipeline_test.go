@@ -979,6 +979,25 @@ func TestPipeline_StreamChat_DeepThinking(t *testing.T) {
 	}
 }
 
+func TestPipeline_StreamChat_DisablesThinkingWhenDeepThinkingOff(t *testing.T) {
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
+	p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
+
+	if capturedReq.Thinking == nil || *capturedReq.Thinking {
+		t.Fatal("expected thinking=false in request")
+	}
+}
+
 func TestPipeline_StreamChat_Messages(t *testing.T) {
 	var capturedReq chat.Request
 	done := make(chan struct{})

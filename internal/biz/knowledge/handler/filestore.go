@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,6 +43,11 @@ type storedFile struct {
 	Data        []byte
 }
 
+const (
+	originalNameMetadataKey    = "original-name"
+	originalNameMetadataPrefix = "b64:"
+)
+
 // NewFileStore creates a FileStore.
 func NewFileStore() *FileStore {
 	return &FileStore{backend: &memoryFileBackend{files: make(map[string]*storedFile)}}
@@ -75,6 +81,8 @@ func NewS3FileStore(ctx context.Context, cfg config.RustFSConfig) (*FileStore, e
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(strings.TrimRight(cfg.URL, "/"))
 		o.UsePathStyle = true
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
 	return &FileStore{backend: &s3FileBackend{
 		client: client,
@@ -245,7 +253,7 @@ func (s *s3FileBackend) Put(ctx context.Context, collectionName, docID, name str
 		Body:        bytes.NewReader(data),
 		ContentType: aws.String(detectMIME(name)),
 		Metadata: map[string]string{
-			"original-name": name,
+			originalNameMetadataKey: encodeOriginalName(name),
 		},
 	})
 	if err != nil {
@@ -270,7 +278,7 @@ func (s *s3FileBackend) Get(ctx context.Context, collectionName, docID string) (
 	}
 	name := ""
 	if out.Metadata != nil {
-		name = out.Metadata["original-name"]
+		name = decodeOriginalName(out.Metadata[originalNameMetadataKey])
 	}
 	if name == "" {
 		name = docID
@@ -345,4 +353,27 @@ func (s *s3FileBackend) collectionPrefix(collectionName string) string {
 		return "documents/"
 	}
 	return path.Join("documents", strings.TrimSpace(collectionName)) + "/"
+}
+
+func encodeOriginalName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return ""
+	}
+	return originalNameMetadataPrefix + base64.RawURLEncoding.EncodeToString([]byte(trimmed))
+}
+
+func decodeOriginalName(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, originalNameMetadataPrefix) {
+		return trimmed
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(trimmed, originalNameMetadataPrefix))
+	if err != nil {
+		return trimmed
+	}
+	return string(decoded)
 }

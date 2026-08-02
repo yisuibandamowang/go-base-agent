@@ -328,7 +328,7 @@ func (f *fakeIntentTreeFactoryInitializer) InitFromFactory(context.Context) (int
 	return f.created, nil
 }
 
-func TestBuildLocalPreferredChatConfig_SelectsOllamaQwen36(t *testing.T) {
+func TestBuildPreferredLLMService_UsesFallbackService(t *testing.T) {
 	aiCfg := config.AIConfig{
 		Providers: config.AIProvidersConfig{
 			"ollama": {
@@ -354,63 +354,26 @@ func TestBuildLocalPreferredChatConfig_SelectsOllamaQwen36(t *testing.T) {
 			},
 		},
 	}
+	fallback := &fakePreferredLLMService{}
 
-	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
-	if !ok {
-		t.Fatal("expected local preferred chat config")
-	}
-	if localCfg.Chat.DefaultModel != "qwen3-local" {
-		t.Fatalf("unexpected local default model %q", localCfg.Chat.DefaultModel)
-	}
-	if len(localCfg.Chat.Candidates) != 1 {
-		t.Fatalf("expected one local candidate, got %d", len(localCfg.Chat.Candidates))
-	}
-	candidate := localCfg.Chat.Candidates[0]
-	if candidate.Provider != "ollama" || candidate.Model != "qwen3.6:latest" {
-		t.Fatalf("unexpected local candidate: %+v", candidate)
+	got := buildPreferredLLMService(aiCfg, nil, nil, nil, fallback)
+	if got != fallback {
+		t.Fatal("expected preferred LLM service to use configured fallback instead of local ollama")
 	}
 }
 
-func TestBuildLocalPreferredChatConfig_AddsOllamaQwen36WhenCandidateMissing(t *testing.T) {
-	aiCfg := config.AIConfig{
-		Providers: config.AIProvidersConfig{
-			"ollama": {
-				URL:      "http://localhost:11434",
-				Protocol: "openai-compatible",
-				Endpoints: map[string]string{
-					"chat": "/v1/chat/completions",
-				},
-			},
-			"bailian": {
-				URL:      "https://dashscope.aliyuncs.com",
-				Protocol: "openai-compatible",
-				Endpoints: map[string]string{
-					"chat": "/compatible-mode/v1/chat/completions",
-				},
-			},
-		},
-		Chat: config.AIChatConfig{
-			DefaultModel: "qwen3-max",
-			Candidates: []config.AICandidateConfig{
-				{ID: "qwen3-max", Provider: "bailian", Model: "qwen3-max", Priority: 1},
-			},
-		},
-	}
+type fakePreferredLLMService struct{}
 
-	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
-	if !ok {
-		t.Fatal("expected local preferred chat config")
-	}
-	if localCfg.Chat.DefaultModel != "qwen3-local" {
-		t.Fatalf("unexpected local default model %q", localCfg.Chat.DefaultModel)
-	}
-	if len(localCfg.Chat.Candidates) != 1 {
-		t.Fatalf("expected one local candidate, got %d", len(localCfg.Chat.Candidates))
-	}
-	candidate := localCfg.Chat.Candidates[0]
-	if candidate.Provider != "ollama" || candidate.Model != "qwen3.6:latest" {
-		t.Fatalf("unexpected generated local candidate: %+v", candidate)
-	}
+func (f *fakePreferredLLMService) Chat(context.Context, chat.Request) (string, error) {
+	return "", nil
+}
+
+func (f *fakePreferredLLMService) ChatWithModel(context.Context, chat.Request, string) (string, error) {
+	return "", nil
+}
+
+func (f *fakePreferredLLMService) StreamChat(context.Context, chat.Request, chat.StreamCallback) (chat.StreamHandle, error) {
+	return nil, nil
 }
 
 func TestBuildRerankClients_IncludesHTTPProviderAndNoopFallback(t *testing.T) {

@@ -795,21 +795,7 @@ const preferredLocalChatModel = "qwen3.6:latest"
 const defaultOllamaURL = "http://localhost:11434"
 
 func buildPreferredLLMService(aiCfg config.AIConfig, health *model.HealthStore, executor *model.RoutingExecutor, chatClients []chat.ChatClient, fallback chat.LLMService) chat.LLMService {
-	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
-	if !ok {
-		return fallback
-	}
-
-	localSelector := model.NewSelector(localCfg, health)
-	localService := chat.NewRoutingLLMService(
-		localSelector,
-		health,
-		executor,
-		chatClients,
-		chat.NewFirstPacketProbe(),
-		time.Duration(aiCfg.Selection.FirstPacketTimeoutSeconds)*time.Second,
-	)
-	return chat.NewFallbackLLMService(localService, fallback)
+	return fallback
 }
 
 func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool) {

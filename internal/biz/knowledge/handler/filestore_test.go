@@ -1,11 +1,16 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"go-base-agent/internal/framework/config"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type failingFileBackend struct {
@@ -110,5 +115,76 @@ func TestFileStoreDeleteKnowledgeSpaceRemovesCollectionObjects(t *testing.T) {
 	}
 	if data, err := store.ReadWithCollection(context.Background(), "kb-b", "doc-2"); err != nil || string(data) != "beta" {
 		t.Fatalf("expected kb-b doc to remain, data=%q err=%v", string(data), err)
+	}
+}
+
+type captureS3API struct {
+	putInput *s3.PutObjectInput
+	getInput *s3.GetObjectInput
+}
+
+func (c *captureS3API) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	c.putInput = params
+	return &s3.PutObjectOutput{}, nil
+}
+
+func (c *captureS3API) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	c.getInput = params
+	return &s3.GetObjectOutput{
+		Body: io.NopCloser(bytes.NewReader([]byte("hello"))),
+		Metadata: map[string]string{
+			originalNameMetadataKey: encodeOriginalName("测试 文件.md"),
+		},
+		ContentType: aws.String("text/markdown"),
+	}, nil
+}
+
+func (c *captureS3API) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	return &s3.DeleteObjectOutput{}, nil
+}
+
+func (c *captureS3API) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	return &s3.ListObjectsV2Output{}, nil
+}
+
+func TestS3FileBackend_EncodesOriginalNameMetadata(t *testing.T) {
+	api := &captureS3API{}
+	backend := &s3FileBackend{client: api, bucket: "kb"}
+
+	err := backend.Put(context.Background(), "goknowladge", "doc-1", "测试 文件.md", []byte("hello"))
+	if err != nil {
+		t.Fatalf("put object: %v", err)
+	}
+	if api.putInput == nil {
+		t.Fatal("expected put input to be captured")
+	}
+	meta := api.putInput.Metadata[originalNameMetadataKey]
+	if meta == "" {
+		t.Fatal("expected original-name metadata to be set")
+	}
+	if got := decodeOriginalName(meta); got != "测试 文件.md" {
+		t.Fatalf("unexpected decoded metadata: %q", got)
+	}
+	if meta == "测试 文件.md" {
+		t.Fatal("expected metadata to be encoded before upload")
+	}
+}
+
+func TestS3FileBackend_DecodesOriginalNameMetadata(t *testing.T) {
+	api := &captureS3API{}
+	backend := &s3FileBackend{client: api, bucket: "kb"}
+
+	file, ok, err := backend.Get(context.Background(), "goknowladge", "doc-1")
+	if err != nil {
+		t.Fatalf("get object: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected object to exist")
+	}
+	if file.Name != "测试 文件.md" {
+		t.Fatalf("unexpected file name: %q", file.Name)
+	}
+	if string(file.Data) != "hello" {
+		t.Fatalf("unexpected file data: %q", string(file.Data))
 	}
 }

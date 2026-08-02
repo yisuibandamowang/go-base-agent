@@ -284,6 +284,29 @@ func TestProbeBridge_OnContentDoesNotBlockAfterFirstPacket(t *testing.T) {
 	}
 }
 
+func TestProbeBridge_OnThinkingCountsAsFirstPacket(t *testing.T) {
+	var thinking []string
+	bridge := NewProbeBridge(&captureCallback{
+		onThinking: func(c string) {
+			thinking = append(thinking, c)
+		},
+	})
+
+	go bridge.OnThinking("ponder")
+
+	probe := NewFirstPacketProbe()
+	result, err := probe.AwaitFirstPacket(bridge, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatal("expected thinking to count as first packet")
+	}
+	if len(thinking) != 1 || thinking[0] != "ponder" {
+		t.Fatalf("unexpected forwarded thinking: %v", thinking)
+	}
+}
+
 func TestDefaultFirstPacketProbe_Timeout(t *testing.T) {
 	bridge := NewProbeBridge(&captureCallback{})
 	probe := NewFirstPacketProbe()
@@ -293,6 +316,28 @@ func TestDefaultFirstPacketProbe_Timeout(t *testing.T) {
 	}
 	if result.Success {
 		t.Fatal("expected timeout failure")
+	}
+}
+
+func TestOpenAIClient_BuildRequestBodyDisablesThinkingExplicitly(t *testing.T) {
+	client := NewOpenAICompatibleChatClient("test", nil)
+	falseVal := false
+	req := SimpleRequest("hello")
+	req.Thinking = &falseVal
+	target := model.Target{
+		ID: "test-model",
+		Candidate: config.AICandidateConfig{
+			Model: "test-model",
+		},
+	}
+
+	body := client.buildRequestBody(req, target, false)
+	value, ok := body["enable_thinking"]
+	if !ok {
+		t.Fatal("expected enable_thinking to be set")
+	}
+	if enabled, ok := value.(bool); !ok || enabled {
+		t.Fatalf("expected enable_thinking=false, got %#v", value)
 	}
 }
 

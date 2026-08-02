@@ -47,6 +47,8 @@ func (b *ProbeBridge) OnContent(content string) {
 }
 
 func (b *ProbeBridge) OnThinking(content string) {
+	b.received = true
+	b.notify(ProbeResult{Success: true})
 	b.inner.OnThinking(content)
 }
 

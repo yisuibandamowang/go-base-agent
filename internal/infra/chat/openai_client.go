@@ -118,8 +118,8 @@ func (c *OpenAICompatibleChatClient) buildRequestBody(req Request, target model.
 
 	if c.CustomizeBody != nil {
 		c.CustomizeBody(body, req)
-	} else if req.Thinking != nil && *req.Thinking {
-		body["enable_thinking"] = true
+	} else if req.Thinking != nil {
+		body["enable_thinking"] = *req.Thinking
 	}
 
 	return body

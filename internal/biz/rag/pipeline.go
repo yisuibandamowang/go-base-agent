@@ -192,11 +192,6 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		}
 	}
 
-	var thinkingVal *bool
-	if deepThinking {
-		v := true
-		thinkingVal = &v
-	}
 	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
 
 	req := p.prompt.Build(PromptContext{
@@ -206,7 +201,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		KbContext:    withChunkSources(chunks, kbCtx),
 		McpContext:   mcpCtx,
 	})
-	req.Thinking = thinkingVal
+	thinkingVal := deepThinking
+	req.Thinking = &thinkingVal
 	answerLLM := p.llm
 	if len(chunks) == 0 && strings.TrimSpace(mcpCtx) == "" {
 		answerLLM = p.lightweightLLM()

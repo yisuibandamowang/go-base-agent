@@ -188,7 +188,7 @@ func TestController_Chat_IdempotentBlocksDuplicate(t *testing.T) {
 
 	w1 := httptest.NewRecorder()
 	c1, _ := gin.CreateTestContext(w1)
-	req1 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello", nil)
+	req1 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello&conversationId=conv-1", nil)
 	req1 = req1.WithContext(appctx.WithUser(req1.Context(), &appctx.LoginUser{UserID: "user-1"}))
 	c1.Request = req1
 
@@ -206,7 +206,7 @@ func TestController_Chat_IdempotentBlocksDuplicate(t *testing.T) {
 
 	w2 := httptest.NewRecorder()
 	c2, _ := gin.CreateTestContext(w2)
-	req2 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello&conversationId=conv-1", nil)
 	req2 = req2.WithContext(appctx.WithUser(req2.Context(), &appctx.LoginUser{UserID: "user-1"}))
 	c2.Request = req2
 
@@ -220,6 +220,66 @@ func TestController_Chat_IdempotentBlocksDuplicate(t *testing.T) {
 	case <-done1:
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected first chat request to finish")
+	}
+}
+
+func TestController_Chat_IdempotentAllowsDifferentConversations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	ctl := NewController(&blockingRagService{
+		chatStarted: make(chan struct{}, 2),
+		chatRelease: make(chan struct{}),
+	})
+	ctl.SetIdempotentGuard(idempotent.New(rdb))
+	svc := ctl.svc.(*blockingRagService)
+
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	req1 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello&conversationId=conv-1", nil)
+	req1 = req1.WithContext(appctx.WithUser(req1.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c1.Request = req1
+
+	done1 := make(chan struct{})
+	go func() {
+		ctl.Chat(c1)
+		close(done1)
+	}()
+
+	select {
+	case <-svc.chatStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected first chat request to start")
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	req2 := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=hello&conversationId=conv-2", nil)
+	req2 = req2.WithContext(appctx.WithUser(req2.Context(), &appctx.LoginUser{UserID: "user-1"}))
+	c2.Request = req2
+
+	done2 := make(chan struct{})
+	go func() {
+		ctl.Chat(c2)
+		close(done2)
+	}()
+
+	select {
+	case <-svc.chatStarted:
+	case <-done2:
+		t.Fatalf("expected second chat to start, got response %s", w2.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected different conversation request not to be blocked")
+	}
+
+	close(svc.chatRelease)
+	for _, done := range []chan struct{}{done1, done2} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected chat request to finish")
+		}
 	}
 }
 

@@ -424,7 +424,8 @@ CREATE TABLE t_knowledge_vector (
     collection_name VARCHAR(64) NOT NULL,
     content         TEXT,
     metadata        JSONB,
-    embedding       vector(1536)
+    embedding       vector(1536),
+    deleted         SMALLINT    NOT NULL DEFAULT 0
 );
 
 CREATE INDEX idx_kv_collection_name ON t_knowledge_vector (collection_name);
@@ -436,6 +437,7 @@ COMMENT ON COLUMN t_knowledge_vector.collection_name IS '知识库Collection';
 COMMENT ON COLUMN t_knowledge_vector.content IS '分块文本内容';
 COMMENT ON COLUMN t_knowledge_vector.metadata IS '元数据';
 COMMENT ON COLUMN t_knowledge_vector.embedding IS '向量';
+COMMENT ON COLUMN t_knowledge_vector.deleted IS '是否删除 0：正常 1：删除';
 
 -- ============================================
 -- Column Comments

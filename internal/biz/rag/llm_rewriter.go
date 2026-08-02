@@ -64,13 +64,17 @@ func (r *LLMRewriter) Rewrite(ctx context.Context, question string, history []ch
 	}
 	messages = append(messages, chat.Message{Role: chat.RoleUser, Content: "当前问题：" + question + "\n\n请返回 JSON："})
 
-	req := chat.Request{Messages: messages}
+	falseVal := false
+	req := chat.Request{Messages: messages, Thinking: &falseVal}
 
 	var builder strings.Builder
-	_, err := r.llm.StreamChat(ctx, req, &rewriteCallback{builder: &builder})
+	handle, err := r.llm.StreamChat(ctx, req, &rewriteCallback{builder: &builder})
 	if err != nil {
 		slog.Warn("llm rewriter: stream chat failed", "err", err)
 		return &RewriteResult{RewrittenQuestion: question}, nil
+	}
+	if handle != nil {
+		handle.Wait()
 	}
 
 	rewritten, subQuestions := parseRewriteAndSplitResponse(builder.String(), question)
