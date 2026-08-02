@@ -59,6 +59,8 @@ func NewRustFSUploader(ctx context.Context, cfg config.RustFSConfig, bucket stri
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(strings.TrimRight(cfg.URL, "/"))
 		o.UsePathStyle = true
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
 	return &RustFSUploader{
 		client:  client,
