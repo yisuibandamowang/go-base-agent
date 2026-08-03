@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go-base-agent/internal/biz/audit/model"
@@ -13,7 +14,9 @@ import (
 
 // BizChangeLogRepo 业务变更审计日志数据访问层。
 type BizChangeLogRepo struct {
-	db *gorm.DB
+	db          *gorm.DB
+	migrateErr  error
+	migrateOnce sync.Once
 }
 
 // NewBizChangeLogRepo 创建 BizChangeLogRepo。
@@ -23,7 +26,20 @@ func NewBizChangeLogRepo(database *gorm.DB) *BizChangeLogRepo {
 
 // Create 新增审计日志。
 func (r *BizChangeLogRepo) Create(ctx context.Context, item *model.BizChangeLog) error {
+	if err := r.ensureTable(ctx); err != nil {
+		return err
+	}
 	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *BizChangeLogRepo) ensureTable(ctx context.Context) error {
+	r.migrateOnce.Do(func() {
+		r.migrateErr = r.db.WithContext(ctx).AutoMigrate(&model.BizChangeLog{})
+	})
+	if r.migrateErr != nil {
+		return fmt.Errorf("migrate biz change log table: %w", r.migrateErr)
+	}
+	return nil
 }
 
 // BizChangeLogQuery 变更日志查询条件。

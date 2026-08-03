@@ -56,3 +56,31 @@ func TestBizChangeLogService_Record(t *testing.T) {
 		t.Fatalf("expected after snapshot to include username, got %q", item.AfterSnapshot)
 	}
 }
+
+func TestBizChangeLogService_RecordAutoMigratesMissingTable(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	svc := NewBizChangeLogService(repo.NewBizChangeLogRepo(gdb))
+	if err := svc.Record(context.Background(), RecordReq{
+		BizType:       BizTypeKnowledgeDocument,
+		BizID:         "doc-1",
+		OperationType: OperationDelete,
+		ActionDesc:    "删除文档：guide.md",
+	}); err != nil {
+		t.Fatalf("record without pre-migration: %v", err)
+	}
+
+	if !gdb.Migrator().HasTable(&auditModel.BizChangeLog{}) {
+		t.Fatal("expected biz change log table to be created automatically")
+	}
+	var count int64
+	if err := gdb.Model(&auditModel.BizChangeLog{}).Count(&count).Error; err != nil {
+		t.Fatalf("count audit records: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one audit record, got %d", count)
+	}
+}

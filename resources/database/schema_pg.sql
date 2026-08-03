@@ -109,6 +109,33 @@ CREATE TABLE t_sample_question (
 CREATE INDEX idx_sample_question_deleted ON t_sample_question (deleted);
 COMMENT ON TABLE t_sample_question IS '示例问题表';
 
+CREATE TABLE t_biz_change_log (
+    id             VARCHAR(20)   NOT NULL PRIMARY KEY,
+    biz_type       VARCHAR(64)   NOT NULL,
+    biz_id         VARCHAR(64)   NOT NULL,
+    operation_type VARCHAR(32)   NOT NULL,
+    action_desc    VARCHAR(512)  NOT NULL,
+    before_snapshot JSONB,
+    after_snapshot  JSONB,
+    change_diff     JSONB,
+    operator_id    VARCHAR(64),
+    operator_name  VARCHAR(128),
+    operator_role  VARCHAR(64),
+    success        BOOLEAN       NOT NULL,
+    error_message  VARCHAR(512),
+    class_name     VARCHAR(255),
+    method_name    VARCHAR(255),
+    ip             VARCHAR(64),
+    user_agent     VARCHAR(512),
+    create_time    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_biz_change_log_biz_type ON t_biz_change_log (biz_type);
+CREATE INDEX idx_biz_change_log_biz_id ON t_biz_change_log (biz_id);
+CREATE INDEX idx_biz_change_log_operation_type ON t_biz_change_log (operation_type);
+CREATE INDEX idx_biz_change_log_operator_id ON t_biz_change_log (operator_id);
+CREATE INDEX idx_biz_change_log_create_time ON t_biz_change_log (create_time);
+COMMENT ON TABLE t_biz_change_log IS '业务变更审计日志表';
+
 -- ============================================
 -- Knowledge Base Tables
 -- ============================================
