@@ -84,3 +84,15 @@ func TestBizChangeLogService_RecordAutoMigratesMissingTable(t *testing.T) {
 		t.Fatalf("expected one audit record, got %d", count)
 	}
 }
+
+func TestMustJSONHandlesEmptyValues(t *testing.T) {
+	if got := mustJSON(nil); got != "null" {
+		t.Fatalf("expected nil to serialize to null, got %q", got)
+	}
+	if got := mustJSON(""); got != `""` {
+		t.Fatalf("expected empty string to serialize as JSON string, got %q", got)
+	}
+	if got := mustJSON(`{"id":"1"}`); got != `{"id":"1"}` {
+		t.Fatalf("expected valid JSON string to pass through, got %q", got)
+	}
+}

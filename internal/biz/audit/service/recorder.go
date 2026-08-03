@@ -108,14 +108,25 @@ func (s *BizChangeLogService) Record(ctx context.Context, req RecordReq) error {
 
 func mustJSON(value any) string {
 	if value == nil {
-		return ""
+		return "null"
 	}
 	if raw, ok := value.(string); ok {
-		return raw
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return `""`
+		}
+		if json.Valid([]byte(trimmed)) {
+			return trimmed
+		}
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return `""`
+		}
+		return string(data)
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
-		return ""
+		return "null"
 	}
 	return string(data)
 }
