@@ -175,6 +175,15 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 		req.FileType = "unknown"
 	}
 
+	kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), kbID)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "查询知识库失败: "+err.Error()))
+		return
+	}
+	if strings.TrimSpace(kb.CollectionName) != "" {
+		req.FileURL = fmt.Sprintf("upload://%s/%s", kb.CollectionName, req.DocName)
+	}
+
 	_ = file // processed in pipeline
 
 	resp, err := h.svc.CreateDocument(c.Request.Context(), kbID, req, userID(c))
@@ -186,22 +195,12 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	// Save file content for later retrieval
 	if file != nil {
 		data, _ := io.ReadAll(file)
-		kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), kbID)
-		if err != nil {
-			c.JSON(http.StatusOK, convention.Failure("B000001", "查询知识库失败: "+err.Error()))
-			return
-		}
 		if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, resp.ID, header.Filename, data); err != nil {
 			c.JSON(http.StatusOK, convention.Failure("B000001", "保存上传文件失败: "+err.Error()))
 			return
 		}
 	}
 	if remoteData != nil {
-		kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), kbID)
-		if err != nil {
-			c.JSON(http.StatusOK, convention.Failure("B000001", "查询知识库失败: "+err.Error()))
-			return
-		}
 		if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, resp.ID, remoteName, remoteData); err != nil {
 			c.JSON(http.StatusOK, convention.Failure("B000001", "保存远程文件失败: "+err.Error()))
 			return

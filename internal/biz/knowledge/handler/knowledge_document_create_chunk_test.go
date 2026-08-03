@@ -96,6 +96,13 @@ func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
 	if resp.Data.DocName != "guide.md" || resp.Data.FileType != "md" || resp.Data.FileSize != int64(len(remoteBody)) {
 		t.Fatalf("expected remote file metadata, got %s", w.Body.String())
 	}
+	var storedDoc model.KnowledgeDocument
+	if err := gdb.First(&storedDoc, "id = ?", resp.Data.ID).Error; err != nil {
+		t.Fatalf("load stored doc: %v", err)
+	}
+	if storedDoc.FileURL != "upload://kb_collection/guide.md" {
+		t.Fatalf("expected upload file url to carry collection hint, got %q", storedDoc.FileURL)
+	}
 	stored, err := fileStore.ReadWithCollection(context.Background(), kb.CollectionName, resp.Data.ID)
 	if err != nil {
 		t.Fatalf("read stored remote file: %v", err)

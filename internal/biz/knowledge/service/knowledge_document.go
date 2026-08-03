@@ -502,12 +502,35 @@ func (s *DocumentService) collectionNameForKB(ctx context.Context, kbID string) 
 	return strings.TrimSpace(kb.CollectionName)
 }
 
+func collectionNameFromUploadFileURL(fileURL string) string {
+	trimmed := strings.TrimSpace(fileURL)
+	if !strings.HasPrefix(trimmed, "upload://") {
+		return ""
+	}
+	trimmed = strings.TrimPrefix(trimmed, "upload://")
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func (s *DocumentService) collectionNameForDocument(ctx context.Context, doc *model.KnowledgeDocument) string {
+	if doc == nil {
+		return ""
+	}
+	if collectionName := collectionNameFromUploadFileURL(doc.FileURL); collectionName != "" {
+		return collectionName
+	}
+	return s.collectionNameForKB(ctx, doc.KbID)
+}
+
 func (s *DocumentService) readDocumentBytes(ctx context.Context, doc *model.KnowledgeDocument) ([]byte, error) {
 	if s.fileStore == nil {
 		return nil, fmt.Errorf("file store is nil")
 	}
 	if reader, ok := s.fileStore.(knowledgeFileCollectionReader); ok {
-		if collectionName := s.collectionNameForKB(ctx, doc.KbID); collectionName != "" {
+		if collectionName := s.collectionNameForDocument(ctx, doc); collectionName != "" {
 			if data, err := reader.ReadWithCollection(ctx, collectionName, doc.ID); err == nil {
 				return data, nil
 			}
@@ -521,7 +544,7 @@ func (s *DocumentService) deleteDocumentFile(ctx context.Context, doc *model.Kno
 		return nil
 	}
 	if deleter, ok := s.fileStore.(knowledgeFileCollectionDeleter); ok {
-		if collectionName := s.collectionNameForKB(ctx, doc.KbID); collectionName != "" {
+		if collectionName := s.collectionNameForDocument(ctx, doc); collectionName != "" {
 			if err := deleter.DeleteWithCollection(ctx, collectionName, doc.ID); err == nil {
 				return nil
 			}
