@@ -138,8 +138,9 @@ func (s *PgVectorStore) searchCollections(ctx context.Context, collectionNames [
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		applyPgVectorSearchTuning(ctx, tx)
 		return tx.Raw(
-			`SELECT *, 1 - (embedding <=> ?) AS score FROM t_knowledge_vector 
-			 WHERE collection_name IN ? 
+			`SELECT id, collection_name, content, metadata, embedding, 1 - (embedding <=> ?) AS score FROM t_knowledge_vector
+			 WHERE collection_name IN ?
+			   AND deleted = 0
 			 ORDER BY embedding <=> ? 
 			 LIMIT ?`,
 			vecToString(vec), collections, vecToString(vec), topK,
@@ -152,8 +153,12 @@ func (s *PgVectorStore) searchCollections(ctx context.Context, collectionNames [
 }
 
 type searchRow struct {
-	pgVectorRow
-	Score float64 `gorm:"column:score"`
+	ID             string  `gorm:"column:id"`
+	CollectionName string  `gorm:"column:collection_name"`
+	Content        string  `gorm:"column:content"`
+	Metadata       string  `gorm:"column:metadata"`
+	Embedding      string  `gorm:"column:embedding"`
+	Score          float64 `gorm:"column:score"`
 }
 
 func pgVectorSearchTuningStatements() []string {

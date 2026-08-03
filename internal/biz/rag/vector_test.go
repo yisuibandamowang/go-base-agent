@@ -2,8 +2,12 @@ package rag
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestNoopVectorStoreService(t *testing.T) {
@@ -170,5 +174,43 @@ func TestPgVectorSearchTuningStatementsMatchJavaDefaults(t *testing.T) {
 		if statements[i] != want[i] {
 			t.Fatalf("statement %d mismatch: got %q, want %q", i, statements[i], want[i])
 		}
+	}
+}
+
+func TestSearchRowScanPopulatesEmbeddedVectorFields(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.Exec(`CREATE TABLE t_knowledge_vector (
+		id TEXT PRIMARY KEY,
+		collection_name TEXT,
+		content TEXT,
+		metadata TEXT,
+		embedding TEXT,
+		create_time TEXT
+	)`).Error; err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if err := gdb.Exec(`INSERT INTO t_knowledge_vector (id, collection_name, content, metadata, embedding, create_time)
+		VALUES ('chunk-1', 'goknowladge', '支持的查询接口：', '{"doc_id":"doc-1","chunk_index":"4"}', '[0.1,0.2]', '2026-08-03T14:00:00Z')`).Error; err != nil {
+		t.Fatalf("insert row: %v", err)
+	}
+
+	var rows []searchRow
+	if err := gdb.Raw(`SELECT id, collection_name, content, metadata, embedding, 0.9 AS score FROM t_knowledge_vector LIMIT 1`).Scan(&rows).Error; err != nil {
+		t.Fatalf("scan rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %+v", rows)
+	}
+	if rows[0].ID != "chunk-1" || rows[0].CollectionName != "goknowladge" || rows[0].Content != "支持的查询接口：" {
+		t.Fatalf("expected embedded row fields to scan, got %+v", rows[0])
+	}
+	if rows[0].Score != 0.9 {
+		t.Fatalf("expected score to scan, got %+v", rows[0])
+	}
+	if !reflect.DeepEqual(rows[0].Embedding, "[0.1,0.2]") {
+		t.Fatalf("expected embedding to scan, got %+v", rows[0].Embedding)
 	}
 }

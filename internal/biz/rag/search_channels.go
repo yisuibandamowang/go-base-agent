@@ -135,6 +135,9 @@ func intentScoreStats(intents []SubQuestionIntent) (float64, int) {
 	maxScore := 0.0
 	for _, subIntent := range intents {
 		for _, nodeScore := range subIntent.NodeScores {
+			if nodeScore.Node.Kind != IntentKindKB || strings.TrimSpace(nodeScore.Node.CollectionName) == "" {
+				continue
+			}
 			if count == 0 || nodeScore.Score > maxScore {
 				maxScore = nodeScore.Score
 			}

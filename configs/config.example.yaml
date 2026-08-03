@@ -206,18 +206,23 @@ ai:
         priority: 2
 
   embedding:
-    default-model: qwen-emb-8b
+    default-model: text-embedding-v2
     candidates:
+      - id: text-embedding-v2
+        provider: bailian
+        model: text-embedding-v2
+        dimension: 1536
+        priority: 1
       - id: qwen-emb-8b
         provider: siliconflow
         model: Qwen/Qwen3-Embedding-8B
         dimension: 1536
-        priority: 1
+        priority: 2
       - id: qwen-emb-local
         provider: ollama
         model: qwen3-embedding:8b-fp16
         dimension: 1536
-        priority: 2
+        priority: 3
 
   rerank:
     default-model: qwen3-rerank

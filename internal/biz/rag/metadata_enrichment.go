@@ -24,6 +24,11 @@ type ChunkMetadataResolver interface {
 	ResolveChunkMetadata(ctx context.Context, ids []string) (map[string]ChunkMetadata, error)
 }
 
+// ChunkContextResolver resolves nearby chunks that should be included as prompt context.
+type ChunkContextResolver interface {
+	ResolveContextChunks(ctx context.Context, ids []string, window int) ([]RetrievedChunk, error)
+}
+
 // MetadataEnrichingRetriever fills document metadata after retrieval/rerank.
 type MetadataEnrichingRetriever struct {
 	base     Retriever
@@ -100,7 +105,29 @@ func (r *MetadataEnrichingRetriever) enrich(ctx context.Context, chunks []Retrie
 			chunks[i].Metadata["doc_name"] = meta.DocName
 		}
 	}
+	if contextResolver, ok := r.resolver.(ChunkContextResolver); ok {
+		contextChunks, err := contextResolver.ResolveContextChunks(ctx, ids, 1)
+		if err == nil && len(contextChunks) > 0 {
+			chunks = appendMissingContextChunks(chunks, contextChunks)
+		}
+	}
 	return chunks, nil
+}
+
+func appendMissingContextChunks(chunks []RetrievedChunk, contextChunks []RetrievedChunk) []RetrievedChunk {
+	seen := make(map[string]bool, len(chunks)+len(contextChunks))
+	for _, chunk := range chunks {
+		seen[chunkKey(chunk)] = true
+	}
+	for _, chunk := range contextChunks {
+		key := chunkKey(chunk)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		chunks = append(chunks, chunk)
+	}
+	return chunks
 }
 
 // DBChunkMetadataResolver resolves chunk ownership from knowledge chunk and document tables.
@@ -173,4 +200,98 @@ func (r *DBChunkMetadataResolver) ResolveChunkMetadata(ctx context.Context, ids 
 		}
 	}
 	return result, nil
+}
+
+// ResolveContextChunks resolves active adjacent chunks from the same documents as the hit chunks.
+func (r *DBChunkMetadataResolver) ResolveContextChunks(ctx context.Context, ids []string, window int) ([]RetrievedChunk, error) {
+	if r == nil || r.db == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	if window < 0 {
+		window = 0
+	}
+	metaByID, err := r.ResolveChunkMetadata(ctx, ids)
+	if err != nil || len(metaByID) == 0 {
+		return nil, err
+	}
+
+	conditions := make([]string, 0, len(metaByID))
+	args := make([]any, 0, len(metaByID)*3)
+	seenRanges := make(map[string]bool, len(metaByID))
+	for _, meta := range metaByID {
+		docID := strings.TrimSpace(meta.DocID)
+		if docID == "" {
+			continue
+		}
+		start := meta.ChunkIndex - window
+		if start < 0 {
+			start = 0
+		}
+		end := meta.ChunkIndex + window
+		rangeKey := docID + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(end)
+		if seenRanges[rangeKey] {
+			continue
+		}
+		seenRanges[rangeKey] = true
+		conditions = append(conditions, "(c.doc_id = ? AND c.chunk_index BETWEEN ? AND ?)")
+		args = append(args, docID, start, end)
+	}
+	if len(conditions) == 0 {
+		return nil, nil
+	}
+
+	type row struct {
+		ID         string `gorm:"column:id"`
+		DocID      string `gorm:"column:doc_id"`
+		ChunkIndex int    `gorm:"column:chunk_index"`
+		Content    string `gorm:"column:content"`
+		Metadata   string `gorm:"column:metadata"`
+		DocName    string `gorm:"column:doc_name"`
+		Collection string `gorm:"column:collection_name"`
+	}
+	rows := make([]row, 0)
+	sql := `SELECT c.id, c.doc_id, c.chunk_index, c.content, v.metadata, d.doc_name, v.collection_name
+		FROM t_knowledge_chunk c
+		JOIN t_knowledge_vector v
+		  ON v.id = c.id
+		 AND v.deleted = 0
+		LEFT JOIN t_knowledge_document d
+		  ON d.id = c.doc_id
+		 AND d.deleted = 0
+		WHERE c.deleted = 0
+		  AND c.enabled = 1
+		  AND (` + strings.Join(conditions, " OR ") + `)
+		ORDER BY c.doc_id ASC, c.chunk_index ASC, c.id ASC`
+	if err := r.db.WithContext(ctx).Raw(sql, args...).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("resolve context chunks: %w", err)
+	}
+
+	chunks := make([]RetrievedChunk, 0, len(rows))
+	seenIndex := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		key := row.DocID + ":" + strconv.Itoa(row.ChunkIndex)
+		if seenIndex[key] {
+			continue
+		}
+		seenIndex[key] = true
+		meta := parseVectorMetadata(row.Metadata)
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta["doc_id"] = row.DocID
+		meta["chunk_index"] = strconv.Itoa(row.ChunkIndex)
+		meta["index"] = strconv.Itoa(row.ChunkIndex)
+		if strings.TrimSpace(row.DocName) != "" {
+			meta["doc_name"] = row.DocName
+		}
+		if strings.TrimSpace(row.Collection) != "" {
+			meta["collection_name"] = row.Collection
+		}
+		chunks = append(chunks, RetrievedChunk{
+			ID:       row.ID,
+			Text:     row.Content,
+			Metadata: meta,
+		})
+	}
+	return chunks, nil
 }

@@ -115,6 +115,39 @@ func TestRetrieverSearchChannelVectorGlobalSupplementsSingleMediumConfidenceInte
 	}
 }
 
+func TestRetrieverSearchChannelVectorGlobalIgnoresNonKbIntents(t *testing.T) {
+	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, &recordingTopKRetriever{})
+	channel.SetVectorGlobalOptions(true, 0.6, 3, 0.8)
+
+	systemIntent := SearchContext{
+		OriginalQuestion: "收银台诊断工具支持哪些接口",
+		TopK:             5,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "sys-about", Kind: IntentKindSystem},
+				Score: 0.95,
+			}},
+		}},
+	}
+	if !channel.IsEnabled(systemIntent) {
+		t.Fatalf("expected vector global channel to remain enabled for non-kb intents")
+	}
+
+	kbWithoutCollection := SearchContext{
+		OriginalQuestion: "收银台诊断工具支持哪些接口",
+		TopK:             5,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "kb-empty", Kind: IntentKindKB},
+				Score: 0.95,
+			}},
+		}},
+	}
+	if !channel.IsEnabled(kbWithoutCollection) {
+		t.Fatalf("expected vector global channel to remain enabled for kb intents without collection")
+	}
+}
+
 func TestRetrieverSearchChannelVectorGlobalUsesCandidateBudgetForGlobalRetriever(t *testing.T) {
 	retriever := &recordingGlobalRetriever{supports: true}
 	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, retriever)
