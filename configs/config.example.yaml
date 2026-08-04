@@ -3,7 +3,7 @@
 # configs/config.yaml 不提交到 git。
 
 server:
-  port: 9090
+  port: 9091
 
 database:
   host: ${POSTGRES_HOST}

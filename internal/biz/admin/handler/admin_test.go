@@ -275,6 +275,64 @@ func TestUserListUsesJavaStyleCurrentKeywordAndUpdateTimeOrder(t *testing.T) {
 	}
 }
 
+func TestUserMutationResponseShapesAlignJavaController(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&userModel.User{}); err != nil {
+		t.Fatalf("migrate users: %v", err)
+	}
+	existing := &userModel.User{Username: "target", Password: "pwd", Role: "user"}
+	if err := gdb.Create(existing).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	svc := adminService.NewAdminService(adminRepo.NewAdminRepo(gdb), adminRepo.NewSampleQuestionRepo(gdb), gdb)
+	h := adminHandler.NewAdminHandler(svc)
+	r := gin.New()
+	api := r.Group("/api/ragent", middleware.Auth(staticTokenParser{
+		users: map[string]*frameworkctx.LoginUser{
+			"admin-token": {UserID: "admin-1", Username: "admin", Role: "admin"},
+		},
+	}))
+	api.POST("/users", h.CreateUser)
+	api.PUT("/users/:id", h.UpdateUser)
+
+	createW := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/ragent/users", strings.NewReader(`{"username":"created","password":"pwd"}`))
+	createReq.Header.Set("Authorization", "Bearer admin-token")
+	createReq.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(createW, createReq)
+
+	var createResp map[string]interface{}
+	if err := json.Unmarshal(createW.Body.Bytes(), &createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if createResp["code"] != "0" {
+		t.Fatalf("expected create success, got %s", createW.Body.String())
+	}
+	if _, ok := createResp["data"].(string); !ok {
+		t.Fatalf("expected create data to be new user id string, got %T: %s", createResp["data"], createW.Body.String())
+	}
+
+	updateW := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/ragent/users/"+existing.ID, strings.NewReader(`{"role":"admin"}`))
+	updateReq.Header.Set("Authorization", "Bearer admin-token")
+	updateReq.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(updateW, updateReq)
+
+	var updateResp map[string]interface{}
+	if err := json.Unmarshal(updateW.Body.Bytes(), &updateResp); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updateResp["code"] != "0" || updateResp["data"] != nil {
+		t.Fatalf("expected update data to be null success, got %s", updateW.Body.String())
+	}
+}
+
 type staticTokenParser struct {
 	users map[string]*frameworkctx.LoginUser
 }

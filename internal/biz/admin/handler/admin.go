@@ -204,7 +204,7 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success(resp.ID))
 }
 
 // UpdateUser PUT /api/ragent/admin/users/:id
@@ -218,12 +218,12 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "参数校验失败: "+err.Error()))
 		return
 	}
-	resp, err := h.svc.UpdateUser(c.Request.Context(), id, req)
+	_, err := h.svc.UpdateUser(c.Request.Context(), id, req)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, convention.Success(resp))
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 // DeleteUser DELETE /api/ragent/admin/users/:id
