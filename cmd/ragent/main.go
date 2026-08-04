@@ -299,10 +299,11 @@ func main() {
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
 	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
 
-	vectorRetriever := rag.NewPgRetriever(vecStore, embService, kbRepo, 10)
+	vectorRetriever := rag.NewVectorRetriever(vecStore, embService, kbRepo, 10)
+	searchBackend := rag.NewKnowledgeSearchBackend(gormDB, kbRepo)
 	searchChannels := make([]rag.SearchChannel, 0, 4)
 	if cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault() {
-		intentChannel := rag.NewPgIntentDirectedVectorSearchChannel(gormDB, vecStore, embService, kbRepo, 1)
+		intentChannel := rag.NewBackendIntentDirectedSearchChannel(searchBackend, vecStore, embService, 1)
 		intentChannel.SetIntentOptions(
 			cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
 			cfg.RAG.Search.Channels.IntentDirected.TopKMultiplier,
@@ -310,7 +311,7 @@ func main() {
 		searchChannels = append(searchChannels, intentChannel)
 	}
 	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefault() {
-		keywordChannel := rag.NewPgKeywordSearchChannel(gormDB, kbRepo, 5)
+		keywordChannel := rag.NewBackendKeywordSearchChannel(searchBackend, 5)
 		keywordChannel.SetKeywordOptions(
 			cfg.RAG.Search.Channels.Keyword.Mode,
 			cfg.RAG.Search.Channels.Keyword.TopKMultiplier,

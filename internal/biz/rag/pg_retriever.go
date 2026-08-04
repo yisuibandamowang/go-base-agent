@@ -45,6 +45,19 @@ func NewPgRetriever(
 	}
 }
 
+// VectorRetriever is the business-neutral alias for PgRetriever.
+type VectorRetriever = PgRetriever
+
+// NewVectorRetriever creates a business-neutral vector retriever alias.
+func NewVectorRetriever(
+	vectorSearch VectorSearchService,
+	emb embedding.Service,
+	kbRepo *repo.KnowledgeBaseRepo,
+	topK int,
+) *VectorRetriever {
+	return NewPgRetriever(vectorSearch, emb, kbRepo, topK)
+}
+
 // Retrieve performs pgvector similarity search across all knowledge bases.
 func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
 	if topK <= 0 {

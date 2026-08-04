@@ -40,6 +40,43 @@ func (r *recordingGlobalRetriever) RetrieveGlobal(_ context.Context, _ string, t
 	return []RetrievedChunk{{ID: "global", Text: "global vector result"}}, nil
 }
 
+type recordingSearchBackend struct {
+	kbs                []knowledgeModel.KnowledgeBase
+	keywordCollections []string
+	keywordQueries     []string
+	keywordTopKs       []int
+	recentCollections  []string
+	recentTopKs        []int
+	intentQueries      []string
+	intentLimits       []int
+	keywordChunks      []RetrievedChunk
+	recentChunks       []RetrievedChunk
+	intentCollections  []string
+}
+
+func (b *recordingSearchBackend) ListKnowledgeBases(context.Context) ([]knowledgeModel.KnowledgeBase, error) {
+	return b.kbs, nil
+}
+
+func (b *recordingSearchBackend) SearchKeywordChunks(_ context.Context, kb knowledgeModel.KnowledgeBase, query string, topK int) ([]RetrievedChunk, error) {
+	b.keywordCollections = append(b.keywordCollections, kb.CollectionName)
+	b.keywordQueries = append(b.keywordQueries, query)
+	b.keywordTopKs = append(b.keywordTopKs, topK)
+	return b.keywordChunks, nil
+}
+
+func (b *recordingSearchBackend) SearchRecentChunks(_ context.Context, collectionName string, topK int) ([]RetrievedChunk, error) {
+	b.recentCollections = append(b.recentCollections, collectionName)
+	b.recentTopKs = append(b.recentTopKs, topK)
+	return b.recentChunks, nil
+}
+
+func (b *recordingSearchBackend) MatchIntentCollections(_ context.Context, query string, limit int) ([]string, error) {
+	b.intentQueries = append(b.intentQueries, query)
+	b.intentLimits = append(b.intentLimits, limit)
+	return b.intentCollections, nil
+}
+
 func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
 	sc := SearchContext{
 		TopK: 10,
@@ -62,6 +99,45 @@ func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
 	}
 	if targets[1].collectionName != "collection_b" || targets[1].topK != 5 {
 		t.Fatalf("unexpected second target: %+v", targets[1])
+	}
+}
+
+func TestBackendKeywordSearchChannelUsesSearchBackend(t *testing.T) {
+	backend := &recordingSearchBackend{
+		kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "会员知识库", CollectionName: "collection_a"},
+			{Name: "支付知识库", CollectionName: "collection_b"},
+		},
+		keywordChunks: []RetrievedChunk{{ID: "kw-1", Text: "会员等级规则", Score: 0.5}},
+	}
+	channel := NewBackendKeywordSearchChannel(backend, 5)
+	channel.SetKeywordOptions("both", 2)
+
+	result, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion:  "会员怎么算",
+		RewrittenQuestion: "会员等级规则",
+		TopK:              5,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "kb", CollectionName: "collection_b", Kind: IntentKindKB},
+				Score: 0.8,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := backend.keywordCollections, []string{"collection_b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("collections mismatch: got %v, want %v", got, want)
+	}
+	if got, want := backend.keywordQueries, []string{"会员等级规则"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("queries mismatch: got %v, want %v", got, want)
+	}
+	if got, want := backend.keywordTopKs, []int{10}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("topK mismatch: got %v, want %v", got, want)
+	}
+	if len(result.Chunks) != 1 || result.Chunks[0].ID != "kw-1" {
+		t.Fatalf("unexpected chunks: %+v", result.Chunks)
 	}
 }
 
@@ -168,6 +244,36 @@ func TestRetrieverSearchChannelVectorGlobalUsesCandidateBudgetForGlobalRetriever
 		t.Fatalf("expected per-collection retrieve not to be used, got %v", retriever.topKs)
 	}
 	if len(result.Chunks) != 1 || result.Chunks[0].ID != "global" {
+		t.Fatalf("unexpected chunks: %+v", result.Chunks)
+	}
+}
+
+func TestBackendIntentDirectedSearchChannelUsesSearchBackendFallback(t *testing.T) {
+	backend := &recordingSearchBackend{
+		recentChunks: []RetrievedChunk{{ID: "recent-1", Text: "最新会员规则", Score: 0.7}},
+	}
+	channel := NewBackendIntentDirectedSearchChannel(backend, nil, nil, 1)
+
+	result, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "会员等级规则",
+		TopK:             10,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "intent-1", CollectionName: "collection_a", TopK: 3, Kind: IntentKindKB},
+				Score: 0.96,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := backend.recentCollections, []string{"collection_a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("recent collections mismatch: got %v, want %v", got, want)
+	}
+	if got, want := backend.recentTopKs, []int{3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("recent topK mismatch: got %v, want %v", got, want)
+	}
+	if len(result.Chunks) != 1 || result.Chunks[0].ID != "recent-1" {
 		t.Fatalf("unexpected chunks: %+v", result.Chunks)
 	}
 }

@@ -147,22 +147,29 @@ func intentScoreStats(intents []SubQuestionIntent) (float64, int) {
 	return maxScore, count
 }
 
-// PgKeywordSearchChannel performs simple PostgreSQL content keyword recall.
-type PgKeywordSearchChannel struct {
-	vectorDB       *gorm.DB
-	kbRepo         knowledgeBaseLister
+// BackendKeywordSearchChannel keeps keyword recall behind a search backend abstraction.
+type BackendKeywordSearchChannel struct {
+	backend        KnowledgeSearchBackend
 	mode           string
 	topKMultiplier int
 	priority       int
 }
 
-// NewPgKeywordSearchChannel creates a PostgreSQL keyword recall channel.
-func NewPgKeywordSearchChannel(vectorDB *gorm.DB, kbRepo knowledgeBaseLister, priority int) *PgKeywordSearchChannel {
-	return &PgKeywordSearchChannel{vectorDB: vectorDB, kbRepo: kbRepo, priority: priority}
+// PgKeywordSearchChannel is kept as a compatibility alias.
+type PgKeywordSearchChannel = BackendKeywordSearchChannel
+
+// NewBackendKeywordSearchChannel creates a keyword recall channel backed by the unified backend.
+func NewBackendKeywordSearchChannel(backend KnowledgeSearchBackend, priority int) *BackendKeywordSearchChannel {
+	return &BackendKeywordSearchChannel{backend: backend, priority: priority}
+}
+
+// NewPgKeywordSearchChannel keeps the old constructor for compatibility.
+func NewPgKeywordSearchChannel(vectorDB *gorm.DB, kbRepo knowledgeBaseLister, priority int) *BackendKeywordSearchChannel {
+	return NewBackendKeywordSearchChannel(NewPgKnowledgeSearchBackend(vectorDB, kbRepo), priority)
 }
 
 // SetKeywordOptions configures Java-compatible keyword search scope and candidate expansion.
-func (c *PgKeywordSearchChannel) SetKeywordOptions(mode string, topKMultiplier int) {
+func (c *BackendKeywordSearchChannel) SetKeywordOptions(mode string, topKMultiplier int) {
 	if c == nil {
 		return
 	}
@@ -173,14 +180,14 @@ func (c *PgKeywordSearchChannel) SetKeywordOptions(mode string, topKMultiplier i
 	c.topKMultiplier = topKMultiplier
 }
 
-func (c *PgKeywordSearchChannel) Name() string            { return "KeywordSearch" }
-func (c *PgKeywordSearchChannel) Priority() int           { return c.priority }
-func (c *PgKeywordSearchChannel) Type() SearchChannelType { return ChannelKeyword }
-func (c *PgKeywordSearchChannel) IsEnabled(sc SearchContext) bool {
-	return c != nil && c.vectorDB != nil && c.kbRepo != nil && strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != ""
+func (c *BackendKeywordSearchChannel) Name() string            { return "KeywordSearch" }
+func (c *BackendKeywordSearchChannel) Priority() int           { return c.priority }
+func (c *BackendKeywordSearchChannel) Type() SearchChannelType { return ChannelKeyword }
+func (c *BackendKeywordSearchChannel) IsEnabled(sc SearchContext) bool {
+	return c != nil && c.backend != nil && strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != ""
 }
 
-func (c *PgKeywordSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
+func (c *BackendKeywordSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
 	start := time.Now()
 	query := strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion))
 	kbs, err := c.resolveKnowledgeBases(ctx, sc)
@@ -189,41 +196,13 @@ func (c *PgKeywordSearchChannel) Search(ctx context.Context, sc SearchContext) (
 	}
 	topK := c.resolveTopK(sc.TopK)
 
-	type row struct {
-		ID             string  `gorm:"column:id"`
-		Content        string  `gorm:"column:content"`
-		Metadata       string  `gorm:"column:metadata"`
-		DocName        string  `gorm:"column:doc_name"`
-		SourceLocation string  `gorm:"column:source_location"`
-		FileURL        string  `gorm:"column:file_url"`
-		Score          float64 `gorm:"column:score"`
-	}
 	chunks := make([]RetrievedChunk, 0)
 	for _, kb := range kbs {
-		rows := make([]row, 0)
-		err := c.vectorDB.WithContext(ctx).Raw(
-			`SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url, 0.5 AS score
-			 FROM t_knowledge_vector v
-			 LEFT JOIN t_knowledge_document d
-			   ON d.id = v.metadata::jsonb->>'doc_id'
-			  AND d.deleted = 0
-			 WHERE v.collection_name = ?
-			   AND LOWER(v.content) LIKE LOWER(?)
-			 ORDER BY v.create_time DESC
-			 LIMIT ?`,
-			kb.CollectionName, "%"+query+"%", topK,
-		).Scan(&rows).Error
+		result, err := c.backend.SearchKeywordChunks(ctx, kb, query, topK)
 		if err != nil {
 			continue
 		}
-		for _, row := range rows {
-			chunks = append(chunks, RetrievedChunk{
-				ID:       row.ID,
-				Text:     row.Content,
-				Score:    row.Score,
-				Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), knowledgeModel.KnowledgeBase(kb), row.DocName, row.SourceLocation, row.FileURL),
-			})
-		}
+		chunks = append(chunks, result...)
 	}
 	return SearchChannelResult{
 		ChannelType: ChannelKeyword,
@@ -233,11 +212,11 @@ func (c *PgKeywordSearchChannel) Search(ctx context.Context, sc SearchContext) (
 	}, nil
 }
 
-func (c *PgKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context, sc SearchContext) ([]knowledgeModel.KnowledgeBase, error) {
-	if c == nil || c.kbRepo == nil {
+func (c *BackendKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context, sc SearchContext) ([]knowledgeModel.KnowledgeBase, error) {
+	if c == nil || c.backend == nil {
 		return nil, nil
 	}
-	kbs, _, err := c.kbRepo.List(ctx, 1, 100, "")
+	kbs, err := c.backend.ListKnowledgeBases(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +240,7 @@ func (c *PgKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context, sc S
 	}
 }
 
-func (c *PgKeywordSearchChannel) resolveTopK(topK int) int {
+func (c *BackendKeywordSearchChannel) resolveTopK(topK int) int {
 	if topK <= 0 {
 		topK = 10
 	}
@@ -272,76 +251,36 @@ func (c *PgKeywordSearchChannel) resolveTopK(topK int) int {
 	return topK * multiplier
 }
 
-func keywordIntentCollections(sc SearchContext) []string {
-	seen := make(map[string]bool)
-	collections := make([]string, 0)
-	for _, subIntent := range sc.Intents {
-		for _, nodeScore := range subIntent.NodeScores {
-			if nodeScore.Node.Kind != IntentKindKB {
-				continue
-			}
-			collectionName := strings.TrimSpace(nodeScore.Node.CollectionName)
-			if collectionName == "" || seen[collectionName] {
-				continue
-			}
-			seen[collectionName] = true
-			collections = append(collections, collectionName)
-		}
-	}
-	return collections
-}
-
-func filterKnowledgeBasesByCollections(kbs []knowledgeModel.KnowledgeBase, collections []string) []knowledgeModel.KnowledgeBase {
-	if len(kbs) == 0 || len(collections) == 0 {
-		return nil
-	}
-	allowed := make(map[string]bool, len(collections))
-	for _, collection := range collections {
-		if strings.TrimSpace(collection) != "" {
-			allowed[collection] = true
-		}
-	}
-	filtered := make([]knowledgeModel.KnowledgeBase, 0, len(collections))
-	for _, kb := range kbs {
-		if allowed[strings.TrimSpace(kb.CollectionName)] {
-			filtered = append(filtered, kb)
-		}
-	}
-	return filtered
-}
-
-func firstSearchText(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-// PgIntentDirectedSearchChannel recalls chunks from intent-bound collections.
-type PgIntentDirectedSearchChannel struct {
-	vectorDB     *gorm.DB
+// BackendIntentDirectedSearchChannel keeps intent recall behind a search backend abstraction.
+type BackendIntentDirectedSearchChannel struct {
+	backend      KnowledgeSearchBackend
 	vectorSearch VectorSearchService
 	emb          embedding.Service
-	kbRepo       knowledgeBaseLister
 	minScore     float64
 	topKMultiple int
 	priority     int
 }
 
-// NewPgIntentDirectedSearchChannel creates an intent-directed recall channel.
-func NewPgIntentDirectedSearchChannel(vectorDB *gorm.DB, priority int) *PgIntentDirectedSearchChannel {
-	return &PgIntentDirectedSearchChannel{vectorDB: vectorDB, priority: priority}
+// PgIntentDirectedSearchChannel is kept as a compatibility alias.
+type PgIntentDirectedSearchChannel = BackendIntentDirectedSearchChannel
+
+// NewBackendIntentDirectedSearchChannel creates an intent-directed channel backed by a search backend.
+func NewBackendIntentDirectedSearchChannel(backend KnowledgeSearchBackend, vectorSearch VectorSearchService, emb embedding.Service, priority int) *BackendIntentDirectedSearchChannel {
+	return &BackendIntentDirectedSearchChannel{backend: backend, vectorSearch: vectorSearch, emb: emb, priority: priority}
 }
 
-// NewPgIntentDirectedVectorSearchChannel creates an intent-directed channel backed by vector search.
-func NewPgIntentDirectedVectorSearchChannel(vectorDB *gorm.DB, vectorSearch VectorSearchService, emb embedding.Service, kbRepo knowledgeBaseLister, priority int) *PgIntentDirectedSearchChannel {
-	return &PgIntentDirectedSearchChannel{vectorDB: vectorDB, vectorSearch: vectorSearch, emb: emb, kbRepo: kbRepo, priority: priority}
+// NewPgIntentDirectedSearchChannel keeps the old constructor for compatibility.
+func NewPgIntentDirectedSearchChannel(vectorDB *gorm.DB, priority int) *BackendIntentDirectedSearchChannel {
+	return NewBackendIntentDirectedSearchChannel(NewPgKnowledgeSearchBackend(vectorDB, nil), nil, nil, priority)
+}
+
+// NewPgIntentDirectedVectorSearchChannel keeps the old constructor for compatibility.
+func NewPgIntentDirectedVectorSearchChannel(vectorDB *gorm.DB, vectorSearch VectorSearchService, emb embedding.Service, kbRepo knowledgeBaseLister, priority int) *BackendIntentDirectedSearchChannel {
+	return NewBackendIntentDirectedSearchChannel(NewPgKnowledgeSearchBackend(vectorDB, kbRepo), vectorSearch, emb, priority)
 }
 
 // SetIntentOptions configures intent score filtering and per-intent TopK expansion.
-func (c *PgIntentDirectedSearchChannel) SetIntentOptions(minScore float64, topKMultiplier int) {
+func (c *BackendIntentDirectedSearchChannel) SetIntentOptions(minScore float64, topKMultiplier int) {
 	if c == nil {
 		return
 	}
@@ -352,35 +291,33 @@ func (c *PgIntentDirectedSearchChannel) SetIntentOptions(minScore float64, topKM
 	c.topKMultiple = topKMultiplier
 }
 
-func (c *PgIntentDirectedSearchChannel) Name() string            { return "IntentDirectedSearch" }
-func (c *PgIntentDirectedSearchChannel) Priority() int           { return c.priority }
-func (c *PgIntentDirectedSearchChannel) Type() SearchChannelType { return ChannelIntentDirected }
-func (c *PgIntentDirectedSearchChannel) IsEnabled(sc SearchContext) bool {
-	hasBackend := c != nil && (c.vectorDB != nil || c.canVectorSearch())
-	if !hasBackend {
+func (c *BackendIntentDirectedSearchChannel) Name() string            { return "IntentDirectedSearch" }
+func (c *BackendIntentDirectedSearchChannel) Priority() int           { return c.priority }
+func (c *BackendIntentDirectedSearchChannel) Type() SearchChannelType { return ChannelIntentDirected }
+func (c *BackendIntentDirectedSearchChannel) IsEnabled(sc SearchContext) bool {
+	if c == nil || c.backend == nil {
 		return false
 	}
 	if len(sc.Intents) > 0 {
 		return len(c.intentDirectedTargets(sc)) > 0
 	}
-	return c.vectorDB != nil && strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != ""
+	return strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)) != ""
 }
 
-func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
+func (c *BackendIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchContext) (SearchChannelResult, error) {
 	start := time.Now()
 	query := strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion))
 	targets := c.intentDirectedTargets(sc)
 	if len(targets) == 0 {
 		if len(sc.Intents) > 0 {
-			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
-		}
-		collections, err := c.matchIntentCollections(ctx, query)
-		if err != nil || len(collections) == 0 {
-			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
-		}
-		targets = make([]intentDirectedTarget, 0, len(collections))
-		for _, collection := range collections {
-			targets = append(targets, intentDirectedTarget{collectionName: collection, topK: sc.TopK})
+			collections, err := c.matchIntentCollections(ctx, query)
+			if err != nil || len(collections) == 0 {
+				return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+			}
+			targets = make([]intentDirectedTarget, 0, len(collections))
+			for _, collection := range collections {
+				targets = append(targets, intentDirectedTarget{collectionName: collection, topK: sc.TopK})
+			}
 		}
 	}
 	if c.canVectorSearch() && len(targets) > 0 {
@@ -388,57 +325,30 @@ func (c *PgIntentDirectedSearchChannel) Search(ctx context.Context, sc SearchCon
 			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
 		}
 	}
-	if c.vectorDB == nil {
-		return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
-	}
-	type row struct {
-		ID             string  `gorm:"column:id"`
-		Content        string  `gorm:"column:content"`
-		Metadata       string  `gorm:"column:metadata"`
-		DocName        string  `gorm:"column:doc_name"`
-		SourceLocation string  `gorm:"column:source_location"`
-		FileURL        string  `gorm:"column:file_url"`
-		Score          float64 `gorm:"column:score"`
-	}
 	chunks := make([]RetrievedChunk, 0)
 	for _, target := range targets {
-		rows := make([]row, 0)
 		topK := target.topK
 		if topK <= 0 {
 			topK = 10
 		}
-		err := c.vectorDB.WithContext(ctx).Raw(
-			`SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url, 0.7 AS score
-			 FROM t_knowledge_vector v
-			 LEFT JOIN t_knowledge_document d
-			   ON d.id = v.metadata::jsonb->>'doc_id'
-			  AND d.deleted = 0
-			 WHERE v.collection_name = ?
-			 ORDER BY v.create_time DESC
-			 LIMIT ?`,
-			target.collectionName, topK,
-		).Scan(&rows).Error
+		result, err := c.backend.SearchRecentChunks(ctx, target.collectionName, topK)
 		if err != nil {
 			continue
 		}
-		for _, row := range rows {
-			chunks = append(chunks, RetrievedChunk{
-				ID:       row.ID,
-				Text:     row.Content,
-				Score:    row.Score,
-				Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), knowledgeModel.KnowledgeBase{CollectionName: target.collectionName}, row.DocName, row.SourceLocation, row.FileURL),
-			})
-		}
+		chunks = append(chunks, result...)
 	}
 	return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
 }
 
-func (c *PgIntentDirectedSearchChannel) canVectorSearch() bool {
-	return c != nil && c.vectorSearch != nil && c.emb != nil && c.kbRepo != nil
+func (c *BackendIntentDirectedSearchChannel) canVectorSearch() bool {
+	return c != nil && c.backend != nil && c.vectorSearch != nil && c.emb != nil
 }
 
-func (c *PgIntentDirectedSearchChannel) searchIntentVectors(ctx context.Context, query string, targets []intentDirectedTarget) ([]RetrievedChunk, bool) {
-	kbs, _, err := c.kbRepo.List(ctx, 1, 100, "")
+func (c *BackendIntentDirectedSearchChannel) searchIntentVectors(ctx context.Context, query string, targets []intentDirectedTarget) ([]RetrievedChunk, bool) {
+	if c == nil || c.backend == nil {
+		return nil, false
+	}
+	kbs, err := c.backend.ListKnowledgeBases(ctx)
 	if err != nil {
 		return nil, false
 	}
@@ -487,7 +397,7 @@ type intentDirectedTarget struct {
 	topK           int
 }
 
-func (c *PgIntentDirectedSearchChannel) intentDirectedTargets(sc SearchContext) []intentDirectedTarget {
+func (c *BackendIntentDirectedSearchChannel) intentDirectedTargets(sc SearchContext) []intentDirectedTarget {
 	minScore := 0.0
 	topKMultiplier := 1
 	if c != nil {
@@ -549,37 +459,58 @@ func resolveIntentDirectedTopK(ns NodeScore, fallbackTopK int) int {
 	return topK
 }
 
-func (c *PgIntentDirectedSearchChannel) matchIntentCollections(ctx context.Context, query string) ([]string, error) {
-	like := "%" + query + "%"
-	type row struct {
-		CollectionName string `gorm:"column:collection_name"`
+func (c *BackendIntentDirectedSearchChannel) matchIntentCollections(ctx context.Context, query string) ([]string, error) {
+	if c == nil || c.backend == nil {
+		return nil, nil
 	}
-	rows := make([]row, 0)
-	err := c.vectorDB.WithContext(ctx).Raw(
-		`SELECT DISTINCT collection_name
-		 FROM t_intent_node
-		 WHERE deleted = 0
-		   AND enabled = 1
-		   AND collection_name <> ''
-		   AND (
-		     LOWER(name) LIKE LOWER(?)
-		     OR LOWER(description) LIKE LOWER(?)
-		     OR LOWER(examples) LIKE LOWER(?)
-		   )
-		 ORDER BY collection_name ASC
-		 LIMIT 5`,
-		like, like, like,
-	).Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	collections := make([]string, 0, len(rows))
-	for _, row := range rows {
-		if strings.TrimSpace(row.CollectionName) != "" {
-			collections = append(collections, row.CollectionName)
+	return c.backend.MatchIntentCollections(ctx, query, 5)
+}
+
+func keywordIntentCollections(sc SearchContext) []string {
+	seen := make(map[string]bool)
+	collections := make([]string, 0)
+	for _, subIntent := range sc.Intents {
+		for _, nodeScore := range subIntent.NodeScores {
+			if nodeScore.Node.Kind != IntentKindKB {
+				continue
+			}
+			collectionName := strings.TrimSpace(nodeScore.Node.CollectionName)
+			if collectionName == "" || seen[collectionName] {
+				continue
+			}
+			seen[collectionName] = true
+			collections = append(collections, collectionName)
 		}
 	}
-	return collections, nil
+	return collections
+}
+
+func filterKnowledgeBasesByCollections(kbs []knowledgeModel.KnowledgeBase, collections []string) []knowledgeModel.KnowledgeBase {
+	if len(kbs) == 0 || len(collections) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(collections))
+	for _, collection := range collections {
+		if strings.TrimSpace(collection) != "" {
+			allowed[collection] = true
+		}
+	}
+	filtered := make([]knowledgeModel.KnowledgeBase, 0, len(collections))
+	for _, kb := range kbs {
+		if allowed[strings.TrimSpace(kb.CollectionName)] {
+			filtered = append(filtered, kb)
+		}
+	}
+	return filtered
+}
+
+func firstSearchText(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // YouComWebSearchChannel recalls public web snippets from a You.com-compatible API.
