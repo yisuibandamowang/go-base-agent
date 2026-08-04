@@ -263,7 +263,7 @@ func (s *IntentService) CreateTermMapping(ctx context.Context, req dto.CreateTer
 	if matchType == 0 {
 		matchType = 1
 	}
-	enabled := req.Enabled
+	enabled := int16(req.Enabled)
 	if !req.EnabledSet && enabled == 0 {
 		enabled = 1
 	}
@@ -668,7 +668,7 @@ func toTermResp(m *model.QueryTermMapping) *dto.TermMappingResp {
 		TargetTerm: m.TargetTerm,
 		MatchType:  m.MatchType,
 		Priority:   m.Priority,
-		Enabled:    m.Enabled,
+		Enabled:    m.Enabled == 1,
 		Remark:     m.Remark,
 		CreateTime: m.CreateTime,
 	}
@@ -725,7 +725,7 @@ func applyTermUpdate(m *model.QueryTermMapping, req dto.UpdateTermMappingReq) {
 		m.Priority = *req.Priority
 	}
 	if req.Enabled != nil {
-		m.Enabled = *req.Enabled
+		m.Enabled = int16(*req.Enabled)
 	}
 	if req.Remark != nil {
 		m.Remark = strings.TrimSpace(*req.Remark)

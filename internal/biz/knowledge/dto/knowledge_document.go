@@ -6,6 +6,7 @@ type CreateDocumentReq struct {
 	FileURL         string `json:"fileUrl" binding:"required"`
 	FileType        string `json:"fileType" binding:"required"`
 	FileSize        int64  `json:"fileSize"`
+	Enabled         *int16 `json:"enabled"`
 	SourceType      string `json:"sourceType"`
 	SourceLocation  string `json:"sourceLocation"`
 	ScheduleEnabled int16  `json:"scheduleEnabled"`
@@ -35,7 +36,7 @@ type DocumentResp struct {
 	KbID            string `json:"kbId"`
 	KbName          string `json:"kbName,omitempty"`
 	DocName         string `json:"docName"`
-	Enabled         int16  `json:"enabled"`
+	Enabled         bool   `json:"enabled"`
 	ChunkCount      int    `json:"chunkCount"`
 	FileURL         string `json:"fileUrl"`
 	FileType        string `json:"fileType"`

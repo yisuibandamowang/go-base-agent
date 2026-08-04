@@ -6,6 +6,30 @@ import (
 	"time"
 )
 
+// EnabledValue 兼容 Java Boolean 与 Go 数值形态的启用标记。
+type EnabledValue int16
+
+// UnmarshalJSON 支持 enabled 传入布尔值或数字。
+func (e *EnabledValue) UnmarshalJSON(data []byte) error {
+	switch string(data) {
+	case "null":
+		*e = 0
+		return nil
+	case "true":
+		*e = 1
+		return nil
+	case "false":
+		*e = 0
+		return nil
+	}
+	var value int16
+	if err := json.Unmarshal(data, &value); err == nil {
+		*e = EnabledValue(value)
+		return nil
+	}
+	return fmt.Errorf("enabled must be boolean or integer")
+}
+
 // IntentExamples 兼容 Java 侧 examples 数组与 Go 侧历史字符串形态。
 type IntentExamples string
 
@@ -159,33 +183,33 @@ type TermMappingResp struct {
 	TargetTerm string    `json:"targetTerm"`
 	MatchType  int16     `json:"matchType"`
 	Priority   int       `json:"priority"`
-	Enabled    int16     `json:"enabled"`
+	Enabled    bool      `json:"enabled"`
 	Remark     string    `json:"remark"`
 	CreateTime time.Time `json:"createTime"`
 }
 
 // CreateTermMappingReq 创建关键词映射请求。
 type CreateTermMappingReq struct {
-	Domain     string `json:"domain"`
-	SourceTerm string `json:"sourceTerm" binding:"required"`
-	TargetTerm string `json:"targetTerm" binding:"required"`
-	MatchType  int16  `json:"matchType"`
-	Priority   int    `json:"priority"`
-	Enabled    int16  `json:"enabled"`
-	Remark     string `json:"remark"`
-	EnabledSet bool   `json:"-"`
+	Domain     string       `json:"domain"`
+	SourceTerm string       `json:"sourceTerm" binding:"required"`
+	TargetTerm string       `json:"targetTerm" binding:"required"`
+	MatchType  int16        `json:"matchType"`
+	Priority   int          `json:"priority"`
+	Enabled    EnabledValue `json:"enabled"`
+	Remark     string       `json:"remark"`
+	EnabledSet bool         `json:"-"`
 }
 
 // UnmarshalJSON 记录 enabled 是否由请求显式传入。
 func (r *CreateTermMappingReq) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Domain     string `json:"domain"`
-		SourceTerm string `json:"sourceTerm"`
-		TargetTerm string `json:"targetTerm"`
-		MatchType  int16  `json:"matchType"`
-		Priority   int    `json:"priority"`
-		Enabled    *int16 `json:"enabled"`
-		Remark     string `json:"remark"`
+		Domain     string        `json:"domain"`
+		SourceTerm string        `json:"sourceTerm"`
+		TargetTerm string        `json:"targetTerm"`
+		MatchType  int16         `json:"matchType"`
+		Priority   int           `json:"priority"`
+		Enabled    *EnabledValue `json:"enabled"`
+		Remark     string        `json:"remark"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -205,11 +229,11 @@ func (r *CreateTermMappingReq) UnmarshalJSON(data []byte) error {
 
 // UpdateTermMappingReq 更新关键词映射请求。
 type UpdateTermMappingReq struct {
-	Domain     *string `json:"domain"`
-	SourceTerm *string `json:"sourceTerm"`
-	TargetTerm *string `json:"targetTerm"`
-	MatchType  *int16  `json:"matchType"`
-	Priority   *int    `json:"priority"`
-	Enabled    *int16  `json:"enabled"`
-	Remark     *string `json:"remark"`
+	Domain     *string       `json:"domain"`
+	SourceTerm *string       `json:"sourceTerm"`
+	TargetTerm *string       `json:"targetTerm"`
+	MatchType  *int16        `json:"matchType"`
+	Priority   *int          `json:"priority"`
+	Enabled    *EnabledValue `json:"enabled"`
+	Remark     *string       `json:"remark"`
 }

@@ -145,6 +145,10 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	if vals, ok := form.Value["scheduleCron"]; ok && len(vals) > 0 {
 		req.ScheduleCron = vals[0]
 	}
+	if vals, ok := form.Value["enabled"]; ok && len(vals) > 0 {
+		enabled := parseInt16(vals[0])
+		req.Enabled = &enabled
+	}
 
 	// Process mode & chunk strategy
 	if vals, ok := form.Value["processMode"]; ok && len(vals) > 0 {
@@ -450,6 +454,7 @@ func (h *DocumentHandler) DeleteChunk(c *gin.Context) {
 
 // ToggleChunk PATCH /knowledge-base/docs/:docId/chunks/:chunkId/enable
 func (h *DocumentHandler) ToggleChunk(c *gin.Context) {
+	docID := c.Param("docId")
 	chunkID := c.Param("chunkId")
 	enabled, ok, err := enabledFromValueQuery(c)
 	if err != nil {
@@ -464,7 +469,7 @@ func (h *DocumentHandler) ToggleChunk(c *gin.Context) {
 		}
 		enabled = req.Enabled
 	}
-	if err := h.svc.ToggleChunk(c.Request.Context(), chunkID, enabled); err != nil {
+	if err := h.svc.ToggleChunk(c.Request.Context(), docID, chunkID, enabled); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
@@ -649,6 +654,6 @@ func detectMIME(name string) string {
 	case ".txt", ".json":
 		return "text/plain; charset=utf-8"
 	default:
-		return "text/plain; charset=utf-8"
+		return "application/octet-stream"
 	}
 }

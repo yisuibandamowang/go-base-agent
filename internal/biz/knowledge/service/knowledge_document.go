@@ -195,6 +195,9 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		CreatedBy:      userID,
 		SourceLocation: req.SourceLocation,
 	}
+	if req.Enabled != nil {
+		doc.Enabled = normalizeDocumentEnabled(*req.Enabled)
+	}
 	doc.CreateTime = time.Now()
 	doc.UpdateTime = time.Now()
 	if err := validateCreateDocumentScheduleConfig(doc, req.ScheduleEnabled, req.ScheduleCron); err != nil {
@@ -238,6 +241,12 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 
 	if err := s.docRepo.Create(ctx, doc); err != nil {
 		return nil, fmt.Errorf("failed to create document: %w", err)
+	}
+	if req.Enabled != nil {
+		doc.Enabled = normalizeDocumentEnabled(*req.Enabled)
+		if err := s.db.WithContext(ctx).Model(doc).Update("enabled", doc.Enabled).Error; err != nil {
+			return nil, fmt.Errorf("update document enabled: %w", err)
+		}
 	}
 	if err := s.syncDocumentSchedule(ctx, doc, req.ScheduleEnabled, req.ScheduleCron); err != nil {
 		return nil, err
@@ -1634,9 +1643,9 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 	if doc.Enabled != 1 {
 		return nil, fmt.Errorf("文档未启用，暂不支持新增 Chunk")
 	}
-	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		return nil, fmt.Errorf("分块内容不能为空")
+	content := req.Content
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("Chunk 内容不能为空")
 	}
 	var nextIndex int
 	if req.Index != nil {
@@ -1718,9 +1727,9 @@ func (s *DocumentService) UpdateChunk(ctx context.Context, docID, chunkID string
 	if chunk.DocID != docID {
 		return nil, fmt.Errorf("Chunk 不属于该文档")
 	}
-	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		return nil, fmt.Errorf("分块内容不能为空")
+	content := req.Content
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("Chunk 内容不能为空")
 	}
 	before := s.chunkToResp(chunk)
 	if content == chunk.Content {
@@ -1809,10 +1818,13 @@ func (s *DocumentService) DeleteChunk(ctx context.Context, docID, chunkID string
 }
 
 // ToggleChunk 切换分块启用状态。
-func (s *DocumentService) ToggleChunk(ctx context.Context, chunkID string, enabled int16) error {
+func (s *DocumentService) ToggleChunk(ctx context.Context, docID, chunkID string, enabled int16) error {
 	chunk, err := s.chunkRepo.FindByID(ctx, chunkID)
 	if err != nil {
 		return err
+	}
+	if chunk.DocID != docID {
+		return fmt.Errorf("Chunk 不属于该文档")
 	}
 	doc, err := s.docRepo.FindByID(ctx, chunk.DocID)
 	if err != nil {
@@ -2055,7 +2067,7 @@ func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentR
 		ID:              doc.ID,
 		KbID:            doc.KbID,
 		DocName:         doc.DocName,
-		Enabled:         doc.Enabled,
+		Enabled:         doc.Enabled == 1,
 		ChunkCount:      doc.ChunkCount,
 		FileURL:         doc.FileURL,
 		FileType:        doc.FileType,
@@ -2271,6 +2283,13 @@ func operationForEnabled(enabled int16) string {
 		return auditService.OperationEnable
 	}
 	return auditService.OperationDisable
+}
+
+func normalizeDocumentEnabled(enabled int16) int16 {
+	if enabled == 0 {
+		return 0
+	}
+	return 1
 }
 
 func (s *DocumentService) chunkToResp(c *model.KnowledgeChunk) *dto.ChunkResp {

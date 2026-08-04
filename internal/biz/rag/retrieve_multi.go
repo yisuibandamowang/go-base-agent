@@ -159,17 +159,46 @@ type DedupPostProcessor struct{}
 func (d *DedupPostProcessor) Name() string { return "dedup" }
 func (d *DedupPostProcessor) Order() int   { return 1 }
 func (d *DedupPostProcessor) Process(chunks []RetrievedChunk, results []SearchChannelResult) []RetrievedChunk {
-	seen := make(map[string]bool)
+	if len(chunks) == 0 {
+		return chunks
+	}
+	orderedResults := append([]SearchChannelResult(nil), results...)
+	if len(orderedResults) == 0 {
+		orderedResults = []SearchChannelResult{{Chunks: chunks}}
+	}
+	sort.SliceStable(orderedResults, func(i, j int) bool {
+		return dedupChannelPriority(orderedResults[i].ChannelType) < dedupChannelPriority(orderedResults[j].ChannelType)
+	})
+
+	indexByKey := make(map[string]int)
 	deduped := make([]RetrievedChunk, 0, len(chunks))
-	for _, c := range chunks {
-		key := chunkKey(c)
-		if seen[key] {
-			continue
+	for _, result := range orderedResults {
+		for _, chunk := range result.Chunks {
+			key := chunkKey(chunk)
+			if idx, ok := indexByKey[key]; ok {
+				if chunk.Score > deduped[idx].Score {
+					deduped[idx] = chunk
+				}
+				continue
+			}
+			indexByKey[key] = len(deduped)
+			deduped = append(deduped, chunk)
 		}
-		seen[key] = true
-		deduped = append(deduped, c)
 	}
 	return deduped
+}
+
+func dedupChannelPriority(typ SearchChannelType) int {
+	switch typ {
+	case ChannelIntentDirected:
+		return 1
+	case ChannelKeyword:
+		return 2
+	case ChannelVectorGlobal:
+		return 3
+	default:
+		return 99
+	}
 }
 
 // FusionPostProcessor applies reciprocal rank fusion across channel results.

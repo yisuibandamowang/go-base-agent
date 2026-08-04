@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"go-base-agent/internal/biz/ingestion/dto"
 	"go-base-agent/internal/biz/ingestion/service"
@@ -109,7 +110,10 @@ func (h *TaskHandler) Create(c *gin.Context) {
 
 // Upload POST /api/ragent/ingestion/tasks/upload
 func (h *TaskHandler) Upload(c *gin.Context) {
-	pipelineID := c.Query("pipelineId")
+	pipelineID := strings.TrimSpace(c.PostForm("pipelineId"))
+	if pipelineID == "" {
+		pipelineID = strings.TrimSpace(c.Query("pipelineId"))
+	}
 	file, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "读取上传文件失败: "+err.Error()))

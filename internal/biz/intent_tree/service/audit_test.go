@@ -254,8 +254,8 @@ func TestIntentService_CreateTermMappingAppliesJavaDefaultsAndTrim(t *testing.T)
 	if created.SourceTerm != "VIP" || created.TargetTerm != "会员" || created.Remark != "常用说法" {
 		t.Fatalf("expected trimmed fields, got %+v", created)
 	}
-	if created.MatchType != 1 || created.Priority != 0 || created.Enabled != 1 {
-		t.Fatalf("expected Java defaults matchType=1 priority=0 enabled=1, got %+v", created)
+	if created.MatchType != 1 || created.Priority != 0 || !created.Enabled {
+		t.Fatalf("expected Java defaults matchType=1 priority=0 enabled=true, got %+v", created)
 	}
 }
 

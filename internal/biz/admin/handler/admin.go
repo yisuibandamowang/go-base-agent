@@ -102,7 +102,7 @@ func (h *AdminHandler) TraceNodes(c *gin.Context) {
 // ListSampleQuestions GET /api/ragent/admin/sample-questions
 func (h *AdminHandler) ListSampleQuestions(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
 	items, total, err := h.svc.ListSampleQuestions(c.Request.Context(), page, size, c.Query("keyword"))
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))

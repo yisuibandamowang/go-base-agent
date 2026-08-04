@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -47,6 +48,7 @@ func TestIngestionHandlers_PipelineAndTaskFlow(t *testing.T) {
 	api.PUT("/ingestion/pipelines/:id", pipelineHandler.Update)
 	api.DELETE("/ingestion/pipelines/:id", pipelineHandler.Delete)
 	api.POST("/ingestion/tasks", taskHandler.Create)
+	api.POST("/ingestion/tasks/upload", taskHandler.Upload)
 	api.GET("/ingestion/tasks", taskHandler.List)
 	api.GET("/ingestion/tasks/:id", taskHandler.Get)
 	api.GET("/ingestion/tasks/:id/nodes", taskHandler.Nodes)
@@ -100,6 +102,46 @@ func TestIngestionHandlers_PipelineAndTaskFlow(t *testing.T) {
 	if !bytes.Contains(resp.Body.Bytes(), []byte(`"nodeId":"fetch"`)) || !bytes.Contains(resp.Body.Bytes(), []byte(`"status":"success"`)) {
 		t.Fatalf("expected task node records, got %s", resp.Body.String())
 	}
+
+	t.Run("upload reads pipelineId from multipart form field", func(t *testing.T) {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		if err := writer.WriteField("pipelineId", createResult.Data.ID); err != nil {
+			t.Fatalf("write pipelineId field: %v", err)
+		}
+		part, err := writer.CreateFormFile("file", "doc.md")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write([]byte("# 会员说明")); err != nil {
+			t.Fatalf("write form file: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/ragent/ingestion/tasks/upload", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		resp := httptest.NewRecorder()
+		r.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+		}
+		var uploadResult struct {
+			Code string `json:"code"`
+			Data struct {
+				TaskID     string `json:"taskId"`
+				PipelineID string `json:"pipelineId"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &uploadResult); err != nil {
+			t.Fatalf("decode upload response: %v", err)
+		}
+		if uploadResult.Code != "0" || uploadResult.Data.TaskID == "" || uploadResult.Data.PipelineID != createResult.Data.ID {
+			t.Fatalf("unexpected upload response: %s", resp.Body.String())
+		}
+	})
 }
 
 type fakeTaskExecutor struct {

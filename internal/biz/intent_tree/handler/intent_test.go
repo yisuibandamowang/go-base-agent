@@ -112,8 +112,25 @@ func TestGetTermMapping(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if body := w.Body.String(); !strings.Contains(body, `"sourceTerm":"VIP"`) || !strings.Contains(body, `"targetTerm":"会员"`) {
-		t.Fatalf("expected mapping detail, got %s", body)
+	var detailResp struct {
+		Code string `json:"code"`
+		Data struct {
+			SourceTerm string `json:"sourceTerm"`
+			TargetTerm string `json:"targetTerm"`
+			Enabled    bool   `json:"enabled"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detailResp); err != nil {
+		t.Fatalf("decode mapping detail: %v", err)
+	}
+	if detailResp.Code != "0" {
+		t.Fatalf("expected code 0, got %s: %s", detailResp.Code, w.Body.String())
+	}
+	if detailResp.Data.SourceTerm != "VIP" || detailResp.Data.TargetTerm != "会员" {
+		t.Fatalf("expected mapping detail, got %+v", detailResp.Data)
+	}
+	if !detailResp.Data.Enabled {
+		t.Fatalf("expected Java-compatible enabled true, got %+v", detailResp.Data)
 	}
 }
 
@@ -164,7 +181,7 @@ func TestJavaCompatMappingsCreateAndUpdateResponseShape(t *testing.T) {
 	r.PUT("/api/ragent/mappings/:id", h.UpdateTermMappingCompat)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/ragent/mappings", strings.NewReader(`{"domain":"member","sourceTerm":"VIP","targetTerm":"会员","priority":1,"enabled":1}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/mappings", strings.NewReader(`{"domain":"member","sourceTerm":"VIP","targetTerm":"会员","priority":1,"enabled":false}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 
@@ -185,9 +202,16 @@ func TestJavaCompatMappingsCreateAndUpdateResponseShape(t *testing.T) {
 	if !ok || id == "" {
 		t.Fatalf("expected mappings create to return id string, got %T: %v", createResp.Data, createResp.Data)
 	}
+	var mapping model.QueryTermMapping
+	if err := gdb.First(&mapping, "id = ?", id).Error; err != nil {
+		t.Fatalf("load created mapping: %v", err)
+	}
+	if mapping.Enabled != 0 {
+		t.Fatalf("expected Java-compatible boolean false to store enabled=0, got %d", mapping.Enabled)
+	}
 
 	w = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPut, "/api/ragent/mappings/"+id, strings.NewReader(`{"remark":"updated"}`))
+	req = httptest.NewRequest(http.MethodPut, "/api/ragent/mappings/"+id, strings.NewReader(`{"enabled":true,"remark":"updated"}`))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -202,5 +226,11 @@ func TestJavaCompatMappingsCreateAndUpdateResponseShape(t *testing.T) {
 	}
 	if updateResp.Code != "0" || updateResp.Data != nil {
 		t.Fatalf("expected mappings update to return null success, got %s %v", updateResp.Code, updateResp.Data)
+	}
+	if err := gdb.First(&mapping, "id = ?", id).Error; err != nil {
+		t.Fatalf("load updated mapping: %v", err)
+	}
+	if mapping.Enabled != 1 {
+		t.Fatalf("expected Java-compatible boolean true to store enabled=1, got %d", mapping.Enabled)
 	}
 }

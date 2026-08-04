@@ -347,7 +347,11 @@ func main() {
 	}
 	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors))
 	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
-	enrichedRetriever := rag.NewMetadataEnrichingRetriever(retriever, rag.NewDBChunkMetadataResolver(gormDB))
+	enrichedRetriever := maybeWrapMetadataEnrichingRetriever(
+		retriever,
+		rag.NewDBChunkMetadataResolver(gormDB),
+		cfg.RAG.Context.Enrich.IsEnabledByDefault(),
+	)
 	queryNormalizer := rag.NewDBQueryTermNormalizer(termMappingRepo)
 	queryNormalizer.SetCacheManager(queryTermCacheManager)
 	baseRewriter := rag.NewLLMRewriter(preferredLLMService,
@@ -1080,6 +1084,13 @@ func (r *ragEvalRetriever) BuildMcpContext(ctx context.Context, question string,
 		return aware.BuildContextWithIntents(ctx, question, subIntents)
 	}
 	return r.mcp.BuildContext(ctx, question)
+}
+
+func maybeWrapMetadataEnrichingRetriever(base rag.Retriever, resolver rag.ChunkMetadataResolver, enabled bool) rag.Retriever {
+	if !enabled {
+		return base
+	}
+	return rag.NewMetadataEnrichingRetriever(base, resolver)
 }
 
 func evalRetrieve(ctx context.Context, retriever rag.Retriever, sc rag.SearchContext) ([]rag.RetrievedChunk, error) {

@@ -1718,7 +1718,7 @@ func TestDocumentService_RecordsToggleAuditLogs(t *testing.T) {
 		Role:     "admin",
 	})
 
-	if err := svc.ToggleChunk(ctx, chunkA.ID, 0); err != nil {
+	if err := svc.ToggleChunk(ctx, doc.ID, chunkA.ID, 0); err != nil {
 		t.Fatalf("toggle chunk: %v", err)
 	}
 	if err := svc.BatchToggleChunks(ctx, doc.ID, []string{chunkB.ID}, 1); err != nil {
@@ -1734,8 +1734,8 @@ func TestDocumentService_RecordsToggleAuditLogs(t *testing.T) {
 		t.Fatalf("load document audit logs: %v", err)
 	}
 	if len(docLogs) != 1 || docLogs[0].OperationType != auditService.OperationDisable ||
-		!strings.Contains(docLogs[0].BeforeSnapshot, `"enabled":1`) ||
-		!strings.Contains(docLogs[0].AfterSnapshot, `"enabled":0`) {
+		!strings.Contains(docLogs[0].BeforeSnapshot, `"enabled":true`) ||
+		!strings.Contains(docLogs[0].AfterSnapshot, `"enabled":false`) {
 		t.Fatalf("unexpected document toggle audit logs: %+v", docLogs)
 	}
 
@@ -2202,7 +2202,7 @@ func TestDocumentService_ToggleChunkRequiresEnabledDocument(t *testing.T) {
 		emb:       fakeEmbeddingService{},
 		vecStore:  &capturingVectorStore{},
 	}
-	err = svc.ToggleChunk(context.Background(), chunk.ID, 1)
+	err = svc.ToggleChunk(context.Background(), doc.ID, chunk.ID, 1)
 	if err == nil || !strings.Contains(err.Error(), "文档未启用") {
 		t.Fatalf("expected document enabled validation error, got %v", err)
 	}
@@ -2273,7 +2273,7 @@ func TestDocumentService_ToggleChunkRejectsRunningDocument(t *testing.T) {
 		kbRepo:    knowledgeRepo.NewKnowledgeBaseRepo(gdb),
 		db:        gdb,
 	}
-	err = svc.ToggleChunk(context.Background(), chunk.ID, 0)
+	err = svc.ToggleChunk(context.Background(), doc.ID, chunk.ID, 0)
 	if err == nil || !strings.Contains(err.Error(), "文档正在分块处理中") {
 		t.Fatalf("expected running document validation error, got %v", err)
 	}
@@ -2374,13 +2374,13 @@ func TestDocumentService_ToggleChunkSyncsVectors(t *testing.T) {
 		emb:       fakeEmbeddingService{},
 		vecStore:  vecStore,
 	}
-	if err := svc.ToggleChunk(context.Background(), chunk.ID, 1); err != nil {
+	if err := svc.ToggleChunk(context.Background(), doc.ID, chunk.ID, 1); err != nil {
 		t.Fatalf("enable chunk: %v", err)
 	}
 	if len(vecStore.updatedChunks) != 1 || vecStore.updatedChunks[0].ChunkID != chunk.ID {
 		t.Fatalf("expected vector update on enable, got %+v", vecStore.updatedChunks)
 	}
-	if err := svc.ToggleChunk(context.Background(), chunk.ID, 0); err != nil {
+	if err := svc.ToggleChunk(context.Background(), doc.ID, chunk.ID, 0); err != nil {
 		t.Fatalf("disable chunk: %v", err)
 	}
 	if len(vecStore.deletedChunkIDs) != 1 || vecStore.deletedChunkIDs[0] != chunk.ID {
@@ -2463,8 +2463,8 @@ func TestDocumentService_CreateUpdateDeleteChunkSyncsVectorAndDocumentCount(t *t
 	if err != nil {
 		t.Fatalf("create chunk: %v", err)
 	}
-	if created.ID != "manual-chunk-1" || created.ChunkIndex != 7 || created.Content != "第一段 内容" {
-		t.Fatalf("expected Java create chunk fields, got %+v", created)
+	if created.ID != "manual-chunk-1" || created.ChunkIndex != 7 || created.Content != "  第一段 内容  " {
+		t.Fatalf("expected Java create chunk fields preserving content, got %+v", created)
 	}
 	if len(vecStore.indexedChunks) != 1 || vecStore.indexedChunks[0].ChunkID != created.ID {
 		t.Fatalf("expected vector index on create, got %+v", vecStore.indexedChunks)
@@ -2478,15 +2478,15 @@ func TestDocumentService_CreateUpdateDeleteChunkSyncsVectorAndDocumentCount(t *t
 	}
 
 	updated, err := svc.UpdateChunk(context.Background(), doc.ID, created.ID, knowledgeDto.UpdateChunkReq{
-		Content: "更新 后 内容",
+		Content: "  更新 后 内容  ",
 	}, "tester")
 	if err != nil {
 		t.Fatalf("update chunk: %v", err)
 	}
-	if updated.ContentHash == created.ContentHash || updated.CharCount != len([]rune("更新 后 内容")) || updated.TokenCount != 3 {
+	if updated.ContentHash == created.ContentHash || updated.Content != "  更新 后 内容  " || updated.CharCount != len([]rune("  更新 后 内容  ")) || updated.TokenCount != 3 {
 		t.Fatalf("expected refreshed content metadata, got %+v", updated)
 	}
-	if len(vecStore.updatedChunks) != 1 || vecStore.updatedChunks[0].Content != "更新 后 内容" {
+	if len(vecStore.updatedChunks) != 1 || vecStore.updatedChunks[0].Content != "  更新 后 内容  " {
 		t.Fatalf("expected vector update on content update, got %+v", vecStore.updatedChunks)
 	}
 

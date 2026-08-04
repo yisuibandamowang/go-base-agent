@@ -41,12 +41,12 @@ func newSalesQueryTool() *Tool {
 		Description: "查询软件销售数据，支持按地区、时间、产品、销售人员等维度筛选，支持汇总统计、排名、明细列表等多种查询",
 		Domains:     []string{"sales"},
 		Properties: map[string]propDesc{
-			"region":      {Type: "string", Description: "地区筛选：华东、华南、华北、西南、西北，不填则查询全国"},
-			"period":      {Type: "string", Description: "时间段：本月、上月、本季度、上季度、本年，默认本月"},
-			"product":     {Type: "string", Description: "产品筛选：企业版、专业版、基础版，不填则查询全部产品"},
+			"region":      {Type: "string", Description: "地区筛选：华东、华南、华北、西南、西北，不填则查询全国", Enum: []string{"华东", "华南", "华北", "西南", "西北"}},
+			"period":      {Type: "string", Description: "时间段：本月、上月、本季度、上季度、本年，默认本月", Enum: []string{"本月", "上月", "本季度", "上季度", "本年"}, Default: "本月"},
+			"product":     {Type: "string", Description: "产品筛选：企业版、专业版、基础版，不填则查询全部产品", Enum: []string{"企业版", "专业版", "基础版"}},
 			"salesPerson": {Type: "string", Description: "销售人员姓名，不填则查询全部销售"},
-			"queryType":   {Type: "string", Description: "查询类型：summary(汇总)、ranking(排名)、detail(明细)、trend(趋势)"},
-			"limit":       {Type: "integer", Description: "返回记录数限制，默认10"},
+			"queryType":   {Type: "string", Description: "查询类型：summary(汇总)、ranking(排名)、detail(明细)、trend(趋势)", Enum: []string{"summary", "ranking", "detail", "trend"}, Default: "summary"},
+			"limit":       {Type: "integer", Description: "返回记录数限制，默认10", Default: 10},
 		},
 		Required: []string{},
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
@@ -93,8 +93,8 @@ func newWeatherQueryTool() *Tool {
 		Description: "查询城市天气信息，支持查看当前实时天气和未来多天天气预报，包含温度、湿度、风力、天气状况等信息",
 		Properties: map[string]propDesc{
 			"city":      {Type: "string", Description: "城市名称，如北京、上海、广州等"},
-			"queryType": {Type: "string", Description: "查询类型：current(当前天气)、forecast(未来预报)"},
-			"days":      {Type: "integer", Description: "预报天数，仅forecast模式有效，默认3天，最多7天"},
+			"queryType": {Type: "string", Description: "查询类型：current(当前天气)、forecast(未来预报)", Enum: []string{"current", "forecast"}, Default: "current"},
+			"days":      {Type: "integer", Description: "预报天数，仅forecast模式有效，默认3天，最多7天", Default: 3},
 		},
 		Required: []string{"city"},
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
@@ -143,8 +143,8 @@ func newYouComSearchTool(apiURL, apiKey string, client *http.Client) *Tool {
 		Description: "基于 You.com Search API 的联网搜索，返回带来源链接和摘录片段的网页与新闻结果。需要配置 YDC_API_KEY 环境变量",
 		Properties: map[string]propDesc{
 			"query":     {Type: "string", Description: "检索关键词或问题"},
-			"count":     {Type: "integer", Description: "最多返回的结果条数（网页+新闻合计），默认 5，最大 20"},
-			"freshness": {Type: "string", Description: "结果时效过滤：day、week、month、year，不传则不限"},
+			"count":     {Type: "integer", Description: "最多返回的结果条数（网页+新闻合计），默认 5，最大 20", Default: defaultYouComCount},
+			"freshness": {Type: "string", Description: "结果时效过滤：day、week、month、year，不传则不限", Enum: []string{"day", "week", "month", "year"}},
 		},
 		Required: []string{"query"},
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {

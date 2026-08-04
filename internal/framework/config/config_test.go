@@ -225,6 +225,36 @@ rag:
 	}
 }
 
+func TestLoadParsesRAGContextEnrichConfig(t *testing.T) {
+	yaml := `
+rag:
+  context:
+    enrich:
+      enabled: false
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Context.Enrich.IsEnabledByDefault() {
+		t.Fatal("expected explicit context enrich false to disable metadata enrichment")
+	}
+}
+
+func TestRAGContextEnrichDefaultEnabled(t *testing.T) {
+	var cfg RAGContextEnrichConfig
+	if !cfg.IsEnabledByDefault() {
+		t.Fatal("expected omitted context enrich enabled to default true like Java")
+	}
+}
+
 func TestLoadParsesRAGKnowledgeScheduleRunningTimeout(t *testing.T) {
 	yaml := `
 rag:

@@ -36,6 +36,10 @@ rag:
     dimension: 1536
     metric-type: COSINE
 
+  context:
+    enrich:
+      enabled: true
+
   query-rewrite:
     enabled: true
     max-history-messages: 4

@@ -172,6 +172,9 @@ func TestController_Stop(t *testing.T) {
 	if !strings.Contains(body, `"code":"0"`) {
 		t.Fatal("expected success code")
 	}
+	if strings.Contains(body, `"message":"success"`) || strings.Contains(body, `"data"`) {
+		t.Fatalf("expected Java Result<Void> empty success, got %s", body)
+	}
 }
 
 func TestController_Chat_IdempotentBlocksDuplicate(t *testing.T) {

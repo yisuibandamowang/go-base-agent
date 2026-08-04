@@ -37,3 +37,50 @@ func TestServer_FiltersToolsByTenantDomain(t *testing.T) {
 		t.Fatalf("expected unauthorized tool to be hidden, got %s", callRec.Body.String())
 	}
 }
+
+func TestServer_ToolsListExposesJavaEnumAndDefaultSchema(t *testing.T) {
+	server := NewServer([]*Tool{
+		newSalesQueryTool(),
+		newTicketQueryTool(),
+		newWeatherQueryTool(),
+		newYouComSearchTool("http://example.invalid/search", "key", nil),
+	})
+
+	listTools := func(domain string) string {
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"jsonrpc":"2.0","id":"1","method":"tools/list"}`))
+		if domain != "" {
+			req.Header.Set("X-Tenant-Domain", domain)
+		}
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+
+	for _, want := range []string{
+		`"enum":["current","forecast"]`,
+		`"default":"current"`,
+		`"default":3`,
+		`"enum":["day","week","month","year"]`,
+	} {
+		if body := listTools(""); !strings.Contains(body, want) {
+			t.Fatalf("expected public tools/list schema to contain %s, got %s", want, body)
+		}
+	}
+	for _, want := range []string{
+		`"enum":["summary","ranking","detail","trend"]`,
+		`"default":"本月"`,
+		`"default":10`,
+	} {
+		if body := listTools("sales"); !strings.Contains(body, want) {
+			t.Fatalf("expected sales tools/list schema to contain %s, got %s", want, body)
+		}
+	}
+	for _, want := range []string{
+		`"enum":["summary","list","stats"]`,
+		`"default":10`,
+	} {
+		if body := listTools("ticket"); !strings.Contains(body, want) {
+			t.Fatalf("expected ticket tools/list schema to contain %s, got %s", want, body)
+		}
+	}
+}

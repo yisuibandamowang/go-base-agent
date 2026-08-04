@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,36 @@ func TestSampleQuestionsResponseShapes(t *testing.T) {
 		first, ok := recordsData[0].(map[string]interface{})
 		if !ok || first["id"] != records[1].ID {
 			t.Fatalf("expected newest matching record first, got %s", w.Body.String())
+		}
+	})
+
+	t.Run("sample questions default page size matches Java", func(t *testing.T) {
+		for i := 4; i < 12; i++ {
+			if err := gdb.Create(&adminModel.SampleQuestion{Title: strconv.Itoa(i), Question: "Q" + strconv.Itoa(i)}).Error; err != nil {
+				t.Fatalf("seed extra sample question %d: %v", i, err)
+			}
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/sample-questions", nil)
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		data, ok := resp["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected page object, got %T: %s", resp["data"], w.Body.String())
+		}
+		if data["size"] != float64(10) {
+			t.Fatalf("expected default size 10, got %v body=%s", data["size"], w.Body.String())
+		}
+		recordsData, ok := data["records"].([]interface{})
+		if !ok || len(recordsData) != 10 {
+			t.Fatalf("expected 10 records on default page, got %s", w.Body.String())
 		}
 	})
 

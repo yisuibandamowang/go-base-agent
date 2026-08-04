@@ -8,6 +8,7 @@ import (
 	"time"
 
 	appctx "go-base-agent/internal/framework/context"
+	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/idempotent"
 	"go-base-agent/internal/framework/snowflake"
 	"go-base-agent/internal/framework/sse"
@@ -89,7 +90,7 @@ func (ctl *Controller) Stop(c *gin.Context) {
 	}
 	defer ctl.releaseSubmitLock(stopLockKey)
 	ctl.svc.StopTask(taskID)
-	c.JSON(http.StatusOK, gin.H{"code": "0", "message": "success"})
+	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
 func (ctl *Controller) acquireSubmitLock(c *gin.Context, key string, ttl time.Duration, duplicateMessage string) bool {

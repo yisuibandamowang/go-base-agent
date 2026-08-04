@@ -112,6 +112,85 @@ func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
 	}
 }
 
+func TestUploadDocumentHonorsEnabledFlagLikeJavaCreateRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	svc := service.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "disabled.md")
+	if err != nil {
+		t.Fatalf("create file field: %v", err)
+	}
+	if _, err := part.Write([]byte("# disabled")); err != nil {
+		t.Fatalf("write file body: %v", err)
+	}
+	if err := writer.WriteField("sourceType", "file"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("enabled", "0"); err != nil {
+		t.Fatalf("write enabled: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kb.ID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Code string `json:"code"`
+		Data struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if resp.Code != "0" {
+		t.Fatalf("expected success, got %s", w.Body.String())
+	}
+	if resp.Data.Enabled {
+		t.Fatalf("expected Java-compatible response enabled false, got body=%s", w.Body.String())
+	}
+	var stored model.KnowledgeDocument
+	if err := gdb.First(&stored, "id = ?", resp.Data.ID).Error; err != nil {
+		t.Fatalf("load stored doc: %v", err)
+	}
+	if stored.Enabled != 0 {
+		t.Fatalf("expected stored enabled 0, got %d", stored.Enabled)
+	}
+}
+
 func TestUploadPipelineDocumentRequiresPipelineID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -661,6 +740,54 @@ func TestToggleDocumentAcceptsJavaValueQuery(t *testing.T) {
 	}
 }
 
+func TestToggleChunkRequiresMatchingDocPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	docA := &model.KnowledgeDocument{KbID: kb.ID, DocName: "doc-a.md", FileURL: "upload://doc-a.md", FileType: "md", Status: "success", Enabled: 1, CreatedBy: "tester"}
+	docB := &model.KnowledgeDocument{KbID: kb.ID, DocName: "doc-b.md", FileURL: "upload://doc-b.md", FileType: "md", Status: "success", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create([]*model.KnowledgeDocument{docA, docB}).Error; err != nil {
+		t.Fatalf("seed docs: %v", err)
+	}
+	chunkB := &model.KnowledgeChunk{KbID: kb.ID, DocID: docB.ID, ChunkIndex: 0, Content: "chunk-b", Enabled: 1, CreatedBy: "tester"}
+	if err := gdb.Create(chunkB).Error; err != nil {
+		t.Fatalf("seed chunk b: %v", err)
+	}
+
+	svc := service.NewDocumentService(repo.NewKnowledgeDocumentRepo(gdb), repo.NewKnowledgeChunkRepo(gdb), repo.NewKnowledgeBaseRepo(gdb), gdb, nil, nil, nil)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.PATCH("/api/ragent/knowledge-base/docs/:docId/chunks/:chunkId/enable", h.ToggleChunk)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/ragent/knowledge-base/docs/"+docA.ID+"/chunks/"+chunkB.ID+"/enable?value=false", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"code":"B000001"`) || !strings.Contains(body, "Chunk 不属于该文档") {
+		t.Fatalf("expected doc-bound validation error, got %s", body)
+	}
+	var enabled int16
+	if err := gdb.Model(&model.KnowledgeChunk{}).Select("enabled").Where("id = ?", chunkB.ID).Scan(&enabled).Error; err != nil {
+		t.Fatalf("load chunk enabled: %v", err)
+	}
+	if enabled != 1 {
+		t.Fatalf("expected chunk state unchanged, got %d", enabled)
+	}
+}
+
 func TestBatchToggleChunksAcceptsJavaChunkIDsAndValueQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -835,6 +962,7 @@ func TestDetectMIMEAlignsJavaDocumentFileTypes(t *testing.T) {
 		{name: "csv", file: "会员数据.csv", want: "text/csv"},
 		{name: "xls", file: "会员数据.xls", want: "application/vnd.ms-excel"},
 		{name: "xlsx", file: "会员数据.xlsx", want: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+		{name: "unknown", file: "会员数据.bin", want: "application/octet-stream"},
 	}
 
 	for _, tt := range tests {

@@ -82,8 +82,10 @@ type inputSchema struct {
 }
 
 type propDesc struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	Type        string   `json:"type"`
+	Description string   `json:"description"`
+	Default     any      `json:"default,omitempty"`
+	Enum        []string `json:"enum,omitempty"`
 }
 
 // tools/call params/result.

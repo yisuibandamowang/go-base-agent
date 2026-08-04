@@ -96,6 +96,7 @@ type MinerUConfig struct {
 type RAGConfig struct {
 	Vector       RAGVectorConfig       `mapstructure:"vector"`
 	Default      RAGDefaultConfig      `mapstructure:"default"`
+	Context      RAGContextConfig      `mapstructure:"context"`
 	QueryRewrite RAGQueryRewriteConfig `mapstructure:"query-rewrite"`
 	RateLimit    RAGRateLimitConfig    `mapstructure:"rate-limit"`
 	Memory       RAGMemoryConfig       `mapstructure:"memory"`
@@ -117,6 +118,21 @@ type RAGDefaultConfig struct {
 	CollectionName string `mapstructure:"collection-name"`
 	Dimension      int    `mapstructure:"dimension"`
 	MetricType     string `mapstructure:"metric-type"`
+}
+
+type RAGContextConfig struct {
+	Enrich RAGContextEnrichConfig `mapstructure:"enrich"`
+}
+
+type RAGContextEnrichConfig struct {
+	Enabled *bool `mapstructure:"enabled"`
+}
+
+func (c RAGContextEnrichConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type RAGQueryRewriteConfig struct {

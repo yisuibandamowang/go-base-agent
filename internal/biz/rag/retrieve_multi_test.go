@@ -84,6 +84,28 @@ func TestDedupPostProcessor(t *testing.T) {
 	}
 }
 
+func TestDedupPostProcessorKeepsHighestScoreForDuplicateChunk(t *testing.T) {
+	d := &DedupPostProcessor{}
+	chunks := []RetrievedChunk{
+		{ID: "a", Text: "intent hit", Score: 0.2},
+		{ID: "b", Text: "keyword hit", Score: 0.8},
+		{ID: "a", Text: "vector hit", Score: 0.95},
+	}
+	results := []SearchChannelResult{
+		{ChannelType: ChannelIntentDirected, Chunks: []RetrievedChunk{chunks[0]}},
+		{ChannelType: ChannelKeyword, Chunks: []RetrievedChunk{chunks[1]}},
+		{ChannelType: ChannelVectorGlobal, Chunks: []RetrievedChunk{chunks[2]}},
+	}
+
+	result := d.Process(chunks, results)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 after dedup, got %+v", result)
+	}
+	if result[0].ID != "a" || result[0].Text != "vector hit" || result[0].Score != 0.95 {
+		t.Fatalf("expected duplicate chunk to keep highest score while preserving position, got %+v", result)
+	}
+}
+
 func TestDedupPostProcessorUsesTextFallback(t *testing.T) {
 	d := &DedupPostProcessor{}
 	chunks := []RetrievedChunk{

@@ -67,6 +67,22 @@ func TestStatusProbeRoutes(t *testing.T) {
 	}
 }
 
+func TestMaybeWrapMetadataEnrichingRetrieverDisabled(t *testing.T) {
+	base := &rag.NoopRetriever{}
+	got := maybeWrapMetadataEnrichingRetriever(base, nil, false)
+	if got != base {
+		t.Fatalf("expected context enrich disabled to keep base retriever, got %T", got)
+	}
+}
+
+func TestMaybeWrapMetadataEnrichingRetrieverEnabled(t *testing.T) {
+	base := &rag.NoopRetriever{}
+	got := maybeWrapMetadataEnrichingRetriever(base, nil, true)
+	if _, ok := got.(*rag.MetadataEnrichingRetriever); !ok {
+		t.Fatalf("expected context enrich enabled to wrap metadata retriever, got %T", got)
+	}
+}
+
 func TestRagEvalHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
