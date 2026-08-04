@@ -38,7 +38,7 @@ func (r *KnowledgeDocumentRepo) FindByID(ctx context.Context, id string) (*model
 // Update 更新文档字段。
 func (r *KnowledgeDocumentRepo) Update(ctx context.Context, doc *model.KnowledgeDocument) error {
 	result := r.gdb.WithContext(ctx).Model(doc).
-		Select("doc_name", "enabled", "source_location", "schedule_enabled", "schedule_cron", "chunk_strategy", "chunk_config", "updated_by", "update_time").
+		Select("doc_name", "enabled", "source_location", "schedule_enabled", "schedule_cron", "process_mode", "chunk_strategy", "chunk_config", "pipeline_id", "updated_by", "update_time").
 		Updates(doc)
 	if result.Error != nil {
 		return result.Error

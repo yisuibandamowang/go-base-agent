@@ -643,7 +643,7 @@ func TestDocumentService_UpdateDocumentValidatesProcessModeAndChunkConfig(t *tes
 	}
 
 	_, err = svc.UpdateDocument(context.Background(), created.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:     "会员Agent说明.md",
+		DocName:     ptrString("会员Agent说明.md"),
 		ProcessMode: "pipeline",
 	}, "admin-1")
 	if err == nil || !strings.Contains(err.Error(), "使用Pipeline模式时，必须指定Pipeline ID") {
@@ -651,7 +651,7 @@ func TestDocumentService_UpdateDocumentValidatesProcessModeAndChunkConfig(t *tes
 	}
 
 	_, err = svc.UpdateDocument(context.Background(), created.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:       "会员Agent说明.md",
+		DocName:       ptrString("会员Agent说明.md"),
 		ProcessMode:   "chunk",
 		ChunkStrategy: "structure_aware",
 		ChunkConfig:   `{"targetChars":1400}`,
@@ -700,7 +700,7 @@ func TestDocumentService_ValidatesPipelineExists(t *testing.T) {
 
 	svc.SetIngestionPipelineGetter(fakeIngestionPipelineGetter{err: errors.New("not found")})
 	_, err = svc.UpdateDocument(context.Background(), created.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:     "会员Agent说明.md",
+		DocName:     ptrString("会员Agent说明.md"),
 		ProcessMode: "pipeline",
 		PipelineID:  "missing-pipe",
 	}, "admin-1")
@@ -1127,7 +1127,7 @@ func TestDocumentService_RecordsAuditLogs(t *testing.T) {
 
 	updatedName := "会员Agent能力说明.md"
 	updated, err := svc.UpdateDocument(ctx, created.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:       updatedName,
+		DocName:       ptrString(updatedName),
 		ChunkStrategy: "paragraph",
 		ChunkConfig:   `{"maxChars":1000}`,
 	}, "admin-1")
@@ -1390,7 +1390,7 @@ func TestDocumentService_UpdateDocumentRejectsTooShortScheduleCron(t *testing.T)
 	}
 
 	_, err = svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:         "会员Agent说明.md",
+		DocName:         ptrString("会员Agent说明.md"),
 		ScheduleEnabled: ptrInt16(1),
 		ScheduleCron:    "@every 30s",
 	}, "admin-1")
@@ -1416,7 +1416,7 @@ func TestDocumentService_UpdateDocumentRejectsEnabledScheduleWithoutCron(t *test
 	}
 
 	_, err := svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:         "会员Agent说明.md",
+		DocName:         ptrString("会员Agent说明.md"),
 		ScheduleEnabled: ptrInt16(1),
 	}, "admin-1")
 	if err == nil || !strings.Contains(err.Error(), "启用定时拉取时必须设置定时表达式") {
@@ -1461,7 +1461,7 @@ func TestDocumentService_UpdateDocumentRejectsRunningDocument(t *testing.T) {
 	}
 
 	_, err = svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
-		DocName: "新文档名.md",
+		DocName: ptrString("新文档名.md"),
 	}, "admin-1")
 	if err == nil || !strings.Contains(err.Error(), "正在分块中") {
 		t.Fatalf("expected running document rejection on update, got %v", err)
@@ -1490,7 +1490,7 @@ func TestDocumentService_UpdateDocumentRejectsEmptyName(t *testing.T) {
 	}
 
 	_, err = svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
-		DocName: "   ",
+		DocName: ptrString("   "),
 	}, "admin-1")
 	if err == nil || !strings.Contains(err.Error(), "文档名称不能为空") {
 		t.Fatalf("expected empty name rejection, got %v", err)
@@ -1538,7 +1538,7 @@ func TestDocumentService_UpdateDocumentPersistsScheduleFields(t *testing.T) {
 	}
 
 	updated, err := svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
-		DocName:         "会员Agent能力说明.md",
+		DocName:         ptrString("会员Agent能力说明.md"),
 		SourceLocation:  "https://example.com/new.md",
 		ScheduleEnabled: ptrInt16(1),
 		ScheduleCron:    "@every 1h",
@@ -2755,5 +2755,9 @@ func TestDocumentService_RunChunkProcessUsesDocumentParser(t *testing.T) {
 }
 
 func ptrInt16(v int16) *int16 {
+	return &v
+}
+
+func ptrString(v string) *string {
 	return &v
 }

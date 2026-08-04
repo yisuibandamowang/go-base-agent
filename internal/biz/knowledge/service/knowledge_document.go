@@ -1379,11 +1379,13 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	if doc.Status == "running" {
 		return nil, fmt.Errorf("文档正在分块中，无法修改")
 	}
-	if strings.TrimSpace(req.DocName) == "" {
-		return nil, fmt.Errorf("文档名称不能为空")
-	}
 	before := s.docToResp(doc)
-	doc.DocName = strings.TrimSpace(req.DocName)
+	if req.DocName != nil {
+		if strings.TrimSpace(*req.DocName) == "" {
+			return nil, fmt.Errorf("文档名称不能为空")
+		}
+		doc.DocName = strings.TrimSpace(*req.DocName)
+	}
 	doc.UpdatedBy = userID
 	if strings.TrimSpace(req.SourceLocation) != "" && strings.EqualFold(normalizeKnowledgeSourceType(doc.SourceType), "url") {
 		doc.SourceLocation = strings.TrimSpace(req.SourceLocation)

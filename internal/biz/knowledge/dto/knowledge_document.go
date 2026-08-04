@@ -18,15 +18,15 @@ type CreateDocumentReq struct {
 
 // UpdateDocumentReq 更新文档请求。
 type UpdateDocumentReq struct {
-	DocName         string `json:"docName" binding:"required"`
-	Enabled         *int16 `json:"enabled"`
-	SourceLocation  string `json:"sourceLocation"`
-	ScheduleEnabled *int16 `json:"scheduleEnabled"`
-	ScheduleCron    string `json:"scheduleCron"`
-	ProcessMode     string `json:"processMode"`
-	ChunkStrategy   string `json:"chunkStrategy"`
-	ChunkConfig     string `json:"chunkConfig"`
-	PipelineID      string `json:"pipelineId"`
+	DocName         *string `json:"docName"`
+	Enabled         *int16  `json:"enabled"`
+	SourceLocation  string  `json:"sourceLocation"`
+	ScheduleEnabled *int16  `json:"scheduleEnabled"`
+	ScheduleCron    string  `json:"scheduleCron"`
+	ProcessMode     string  `json:"processMode"`
+	ChunkStrategy   string  `json:"chunkStrategy"`
+	ChunkConfig     string  `json:"chunkConfig"`
+	PipelineID      string  `json:"pipelineId"`
 }
 
 // DocumentResp 文档响应。

@@ -460,6 +460,68 @@ func TestUpdateDocumentReturnsEmptySuccessLikeJava(t *testing.T) {
 	}
 }
 
+func TestUpdateDocumentAllowsPartialPayloadLikeJava(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "会员知识库", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	doc := &model.KnowledgeDocument{
+		KbID:          kb.ID,
+		DocName:       "原文档.md",
+		FileURL:       "upload://old.md",
+		FileType:      "md",
+		Status:        "success",
+		Enabled:       1,
+		ProcessMode:   "chunk",
+		ChunkStrategy: "fixed_size",
+		CreatedBy:     "tester",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+
+	svc := service.NewDocumentService(repo.NewKnowledgeDocumentRepo(gdb), repo.NewKnowledgeChunkRepo(gdb), repo.NewKnowledgeBaseRepo(gdb), gdb, nil, nil, nil)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.PUT("/api/ragent/knowledge-base/docs/:docId", h.UpdateDoc)
+
+	w := httptest.NewRecorder()
+	body := `{"processMode":"pipeline","chunkStrategy":"structure_aware","chunkConfig":"{\"targetChars\":1400}","pipelineId":"pipe-1"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/ragent/knowledge-base/docs/"+doc.ID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] != "0" {
+		t.Fatalf("expected code 0, got body=%s", w.Body.String())
+	}
+
+	var updated model.KnowledgeDocument
+	if err := gdb.First(&updated, "id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("load updated doc: %v", err)
+	}
+	if updated.DocName != "原文档.md" {
+		t.Fatalf("expected docName unchanged, got %q", updated.DocName)
+	}
+	if updated.ProcessMode != "pipeline" || updated.ChunkStrategy != "" || updated.PipelineID != "pipe-1" {
+		t.Fatalf("expected pipeline mode persisted, got mode=%q strategy=%q pipeline=%q", updated.ProcessMode, updated.ChunkStrategy, updated.PipelineID)
+	}
+}
+
 func TestChunkDocReturnsEmptySuccessLikeJava(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
