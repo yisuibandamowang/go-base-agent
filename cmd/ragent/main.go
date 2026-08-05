@@ -310,7 +310,7 @@ func main() {
 		)
 		searchChannels = append(searchChannels, intentChannel)
 	}
-	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefault() {
+	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefaultWith(false) {
 		keywordChannel := rag.NewBackendKeywordSearchChannel(searchBackend, 5)
 		keywordChannel.SetKeywordOptions(
 			cfg.RAG.Search.Channels.Keyword.Mode,
@@ -357,7 +357,7 @@ func main() {
 	baseRewriter := rag.NewLLMRewriter(preferredLLMService,
 		cfg.RAG.QueryRewrite.MaxHistoryMessages,
 		cfg.RAG.QueryRewrite.MaxHistoryChars,
-		cfg.RAG.QueryRewrite.Enabled,
+		cfg.RAG.QueryRewrite.IsEnabledByDefault(),
 	)
 	llmRewriter := rag.NewNormalizingRewriter(queryNormalizer, baseRewriter)
 

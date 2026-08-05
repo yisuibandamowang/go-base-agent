@@ -450,6 +450,8 @@ func TestToMcpServerSpecsCarriesDomains(t *testing.T) {
 
 func TestRagSettingsExposesFullConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	queryRewriteEnabled := true
+	rateLimitEnabled := true
 
 	cfg := &config.Config{
 		RAG: config.RAGConfig{
@@ -460,13 +462,13 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				MetricType:     "COSINE",
 			},
 			QueryRewrite: config.RAGQueryRewriteConfig{
-				Enabled:            true,
+				Enabled:            &queryRewriteEnabled,
 				MaxHistoryMessages: 4,
 				MaxHistoryChars:    500,
 			},
 			RateLimit: config.RAGRateLimitConfig{
 				Global: config.RAGRateLimitGlobalConfig{
-					Enabled:        true,
+					Enabled:        &rateLimitEnabled,
 					MaxConcurrent:  1,
 					MaxWaitSeconds: 3,
 					LeaseSeconds:   30,

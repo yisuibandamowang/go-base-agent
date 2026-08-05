@@ -137,9 +137,16 @@ func (c RAGContextEnrichConfig) IsEnabledByDefault() bool {
 }
 
 type RAGQueryRewriteConfig struct {
-	Enabled            bool `mapstructure:"enabled"`
-	MaxHistoryMessages int  `mapstructure:"max-history-messages"`
-	MaxHistoryChars    int  `mapstructure:"max-history-chars"`
+	Enabled            *bool `mapstructure:"enabled"`
+	MaxHistoryMessages int   `mapstructure:"max-history-messages"`
+	MaxHistoryChars    int   `mapstructure:"max-history-chars"`
+}
+
+func (c RAGQueryRewriteConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type RAGRerankConfig struct {
@@ -158,11 +165,18 @@ type RAGRateLimitConfig struct {
 }
 
 type RAGRateLimitGlobalConfig struct {
-	Enabled        bool `mapstructure:"enabled"`
-	MaxConcurrent  int  `mapstructure:"max-concurrent"`
-	MaxWaitSeconds int  `mapstructure:"max-wait-seconds"`
-	LeaseSeconds   int  `mapstructure:"lease-seconds"`
-	PollIntervalMs int  `mapstructure:"poll-interval-ms"`
+	Enabled        *bool `mapstructure:"enabled"`
+	MaxConcurrent  int   `mapstructure:"max-concurrent"`
+	MaxWaitSeconds int   `mapstructure:"max-wait-seconds"`
+	LeaseSeconds   int   `mapstructure:"lease-seconds"`
+	PollIntervalMs int   `mapstructure:"poll-interval-ms"`
+}
+
+func (c RAGRateLimitGlobalConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type RAGMemoryConfig struct {
@@ -271,6 +285,13 @@ type RAGGuidanceConfig struct {
 func (c RAGSearchChannelConfig) IsEnabledByDefault() bool {
 	if c.Enabled == nil {
 		return true
+	}
+	return *c.Enabled
+}
+
+func (c RAGSearchChannelConfig) IsEnabledByDefaultWith(defaultEnabled bool) bool {
+	if c.Enabled == nil {
+		return defaultEnabled
 	}
 	return *c.Enabled
 }

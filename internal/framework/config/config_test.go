@@ -284,6 +284,65 @@ func TestRAGRerankDefaultEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadParsesRAGQueryRewriteEnabledConfig(t *testing.T) {
+	yaml := `
+rag:
+  query-rewrite:
+    enabled: false
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.QueryRewrite.IsEnabledByDefault() {
+		t.Fatal("expected explicit query rewrite false to disable rewrite")
+	}
+}
+
+func TestRAGQueryRewriteDefaultEnabled(t *testing.T) {
+	var cfg RAGQueryRewriteConfig
+	if !cfg.IsEnabledByDefault() {
+		t.Fatal("expected omitted query rewrite enabled to default true like Java")
+	}
+}
+
+func TestLoadParsesRAGRateLimitGlobalEnabledConfig(t *testing.T) {
+	yaml := `
+rag:
+  rate-limit:
+    global:
+      enabled: false
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.RateLimit.Global.IsEnabledByDefault() {
+		t.Fatal("expected explicit rate limit false to disable limiter")
+	}
+}
+
+func TestRAGRateLimitGlobalDefaultEnabled(t *testing.T) {
+	var cfg RAGRateLimitGlobalConfig
+	if !cfg.IsEnabledByDefault() {
+		t.Fatal("expected omitted rate limit enabled to default true like Java")
+	}
+}
+
 func TestLoadParsesRAGKnowledgeScheduleRunningTimeout(t *testing.T) {
 	yaml := `
 rag:

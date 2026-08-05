@@ -242,14 +242,14 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 				"metricType":     cfg.RAG.Default.MetricType,
 			},
 			"queryRewrite": map[string]any{
-				"enabled":            cfg.RAG.QueryRewrite.Enabled,
+				"enabled":            cfg.RAG.QueryRewrite.IsEnabledByDefault(),
 				"maxHistoryMessages": cfg.RAG.QueryRewrite.MaxHistoryMessages,
 				"maxHistoryChars":    cfg.RAG.QueryRewrite.MaxHistoryChars,
 			},
 			"deepThinkingEnabled": hasDeepThinkingSupport(cfg),
 			"rateLimit": map[string]any{
 				"global": map[string]any{
-					"enabled":        cfg.RAG.RateLimit.Global.Enabled,
+					"enabled":        cfg.RAG.RateLimit.Global.IsEnabledByDefault(),
 					"maxConcurrent":  cfg.RAG.RateLimit.Global.MaxConcurrent,
 					"maxWaitSeconds": cfg.RAG.RateLimit.Global.MaxWaitSeconds,
 					"leaseSeconds":   cfg.RAG.RateLimit.Global.LeaseSeconds,
