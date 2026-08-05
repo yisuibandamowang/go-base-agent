@@ -45,6 +45,9 @@ rag:
     max-history-messages: 4
     max-history-chars: 500
 
+  rerank:
+    enabled: true
+
   rate-limit:
     global:
       enabled: true

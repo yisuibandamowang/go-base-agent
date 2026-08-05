@@ -98,6 +98,7 @@ type RAGConfig struct {
 	Default      RAGDefaultConfig      `mapstructure:"default"`
 	Context      RAGContextConfig      `mapstructure:"context"`
 	QueryRewrite RAGQueryRewriteConfig `mapstructure:"query-rewrite"`
+	Rerank       RAGRerankConfig       `mapstructure:"rerank"`
 	RateLimit    RAGRateLimitConfig    `mapstructure:"rate-limit"`
 	Memory       RAGMemoryConfig       `mapstructure:"memory"`
 	Parser       RAGParserConfig       `mapstructure:"parser"`
@@ -139,6 +140,17 @@ type RAGQueryRewriteConfig struct {
 	Enabled            bool `mapstructure:"enabled"`
 	MaxHistoryMessages int  `mapstructure:"max-history-messages"`
 	MaxHistoryChars    int  `mapstructure:"max-history-chars"`
+}
+
+type RAGRerankConfig struct {
+	Enabled *bool `mapstructure:"enabled"`
+}
+
+func (c RAGRerankConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type RAGRateLimitConfig struct {

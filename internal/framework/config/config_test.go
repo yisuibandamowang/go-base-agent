@@ -255,6 +255,35 @@ func TestRAGContextEnrichDefaultEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadParsesRAGRerankEnabledConfig(t *testing.T) {
+	yaml := `
+rag:
+  rerank:
+    enabled: false
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Rerank.IsEnabledByDefault() {
+		t.Fatal("expected explicit rerank false to disable rerank")
+	}
+}
+
+func TestRAGRerankDefaultEnabled(t *testing.T) {
+	var cfg RAGRerankConfig
+	if !cfg.IsEnabledByDefault() {
+		t.Fatal("expected omitted rerank enabled to default true like Java")
+	}
+}
+
 func TestLoadParsesRAGKnowledgeScheduleRunningTimeout(t *testing.T) {
 	yaml := `
 rag:

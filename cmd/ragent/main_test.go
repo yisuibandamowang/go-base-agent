@@ -83,6 +83,22 @@ func TestMaybeWrapMetadataEnrichingRetrieverEnabled(t *testing.T) {
 	}
 }
 
+func TestMaybeWrapRerankRetrieverDisabled(t *testing.T) {
+	base := &rag.NoopRetriever{}
+	got := maybeWrapRerankRetriever(base, nil, false)
+	if got != base {
+		t.Fatalf("expected rerank disabled to keep base retriever, got %T", got)
+	}
+}
+
+func TestMaybeWrapRerankRetrieverEnabled(t *testing.T) {
+	base := &rag.NoopRetriever{}
+	got := maybeWrapRerankRetriever(base, nil, true)
+	if _, ok := got.(*rag.RerankRetriever); !ok {
+		t.Fatalf("expected rerank enabled to wrap rerank retriever, got %T", got)
+	}
+}
+
 func TestRagEvalHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

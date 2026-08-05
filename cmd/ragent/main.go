@@ -346,7 +346,7 @@ func main() {
 		))
 	}
 	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors))
-	retriever := rag.NewRerankRetriever(multiRetriever, rerankService)
+	retriever := maybeWrapRerankRetriever(multiRetriever, rerankService, cfg.RAG.Rerank.IsEnabledByDefault())
 	enrichedRetriever := maybeWrapMetadataEnrichingRetriever(
 		retriever,
 		rag.NewDBChunkMetadataResolver(gormDB),
@@ -1091,6 +1091,13 @@ func maybeWrapMetadataEnrichingRetriever(base rag.Retriever, resolver rag.ChunkM
 		return base
 	}
 	return rag.NewMetadataEnrichingRetriever(base, resolver)
+}
+
+func maybeWrapRerankRetriever(base rag.Retriever, rerankSvc rerank.Service, enabled bool) rag.Retriever {
+	if !enabled {
+		return base
+	}
+	return rag.NewRerankRetriever(base, rerankSvc)
 }
 
 func evalRetrieve(ctx context.Context, retriever rag.Retriever, sc rag.SearchContext) ([]rag.RetrievedChunk, error) {
