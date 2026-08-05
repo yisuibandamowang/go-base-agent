@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +72,11 @@ func (f fakeEmbeddingService) EmbedBatchWithModel(context.Context, []string, str
 
 func (f fakeEmbeddingService) Dimension() int {
 	return 2
+}
+
+func testSHA256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 type fakeKnowledgeBaseFinder struct {
@@ -2501,6 +2507,92 @@ func TestDocumentService_CreateUpdateDeleteChunkSyncsVectorAndDocumentCount(t *t
 	}
 	if storedDoc.ChunkCount != 0 {
 		t.Fatalf("expected chunk count 0 after delete, got %d", storedDoc.ChunkCount)
+	}
+}
+
+func TestDocumentService_ChunkDocumentStoresSourceLocationMetadata(t *testing.T) {
+	_, kb, svc := newDocumentServiceTestContext(t)
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:          kb.ID,
+		DocName:       "source.txt",
+		FileType:      "txt",
+		Status:        "success",
+		ChunkStrategy: "fixed_size",
+		ChunkConfig:   `{"chunkSize":4,"overlapSize":2}`,
+		CreatedBy:     "tester",
+	}
+
+	chunks := svc.chunkDocument(context.Background(), doc, nil, "abcdefgh")
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	if chunks[0].SourceStartOffset != 0 || chunks[0].SourceEndOffset != 4 || chunks[0].CoreStartOffset != 0 || chunks[0].CoreEndOffset != 2 {
+		t.Fatalf("unexpected first chunk source location: %+v", chunks[0])
+	}
+	if chunks[1].SourceStartOffset != 2 || chunks[1].SourceEndOffset != 6 || chunks[1].CoreStartOffset != 2 || chunks[1].CoreEndOffset != 4 {
+		t.Fatalf("unexpected overlap chunk source location: %+v", chunks[1])
+	}
+	if chunks[0].SourceVersion != testSHA256Hex("abcdefgh") || chunks[0].SourceHash != testSHA256Hex("abcd") || chunks[0].ChunkConfigHash == "" {
+		t.Fatalf("expected source hashes to be stored, got %+v", chunks[0])
+	}
+}
+
+func TestDocumentService_UpdateChunkWithOverlapRebuildsDocumentVectors(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	sourceText := "abcdefgh"
+	svc.fileStore = fakeFileReader{data: []byte(sourceText)}
+	vecStore := &capturingVectorStore{}
+	svc.vecStore = vecStore
+
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:          kb.ID,
+		DocName:       "source.txt",
+		FileURL:       "upload://source.txt",
+		FileType:      "txt",
+		Enabled:       1,
+		Status:        "success",
+		ChunkStrategy: "fixed_size",
+		ChunkConfig:   `{"chunkSize":4,"overlapSize":2}`,
+		ChunkCount:    3,
+		CreatedBy:     "tester",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	chunks := svc.chunkDocument(context.Background(), doc, nil, sourceText)
+	if err := gdb.Create(chunks).Error; err != nil {
+		t.Fatalf("create chunks: %v", err)
+	}
+
+	updated, err := svc.UpdateChunk(context.Background(), doc.ID, chunks[1].ID, knowledgeDto.UpdateChunkReq{
+		Content: "cXef",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("update overlap chunk: %v", err)
+	}
+	if updated.ID == chunks[1].ID {
+		t.Fatalf("expected overlap update to return rebuilt chunk, got original id %s", updated.ID)
+	}
+	if len(vecStore.updatedChunks) != 0 {
+		t.Fatalf("expected no single chunk vector update, got %+v", vecStore.updatedChunks)
+	}
+	if len(vecStore.deletedDocCalls) != 1 || len(vecStore.indexedChunks) != 3 {
+		t.Fatalf("expected full vector rebuild, deleted=%+v indexed=%+v", vecStore.deletedDocCalls, vecStore.indexedChunks)
+	}
+
+	var stored []knowledgeModel.KnowledgeChunk
+	if err := gdb.Where("doc_id = ? AND deleted = 0", doc.ID).Order("chunk_index ASC").Find(&stored).Error; err != nil {
+		t.Fatalf("load rebuilt chunks: %v", err)
+	}
+	gotContents := make([]string, 0, len(stored))
+	for _, chunk := range stored {
+		gotContents = append(gotContents, chunk.Content)
+		if chunk.SourceVersion != testSHA256Hex("abcXefgh") || chunk.ChunkConfigHash == "" {
+			t.Fatalf("expected rebuilt chunk source metadata, got %+v", chunk)
+		}
+	}
+	if strings.Join(gotContents, "|") != "abcX|cXef|efgh" {
+		t.Fatalf("unexpected rebuilt chunk contents: %v", gotContents)
 	}
 }
 

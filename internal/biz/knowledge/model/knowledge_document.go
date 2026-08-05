@@ -34,16 +34,25 @@ func (KnowledgeDocument) TableName() string {
 type KnowledgeChunk struct {
 	db.BaseModel
 
-	KbID        string `gorm:"column:kb_id;type:varchar(20);not null" json:"kbId"`
-	DocID       string `gorm:"column:doc_id;type:varchar(20);not null;index:idx_doc_id" json:"docId"`
-	ChunkIndex  int    `gorm:"column:chunk_index;not null" json:"chunkIndex"`
-	Content     string `gorm:"column:content;type:text;not null" json:"content"`
-	ContentHash string `gorm:"column:content_hash;type:varchar(64)" json:"contentHash"`
-	CharCount   int    `gorm:"column:char_count" json:"charCount"`
-	TokenCount  int    `gorm:"column:token_count" json:"tokenCount"`
-	Enabled     int16  `gorm:"column:enabled;type:smallint;default:1" json:"enabled"`
-	CreatedBy   string `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
-	UpdatedBy   string `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`
+	KbID              string `gorm:"column:kb_id;type:varchar(20);not null" json:"kbId"`
+	DocID             string `gorm:"column:doc_id;type:varchar(20);not null;index:idx_doc_id" json:"docId"`
+	ChunkIndex        int    `gorm:"column:chunk_index;not null" json:"chunkIndex"`
+	Content           string `gorm:"column:content;type:text;not null" json:"content"`
+	ContentHash       string `gorm:"column:content_hash;type:varchar(64)" json:"contentHash"`
+	CharCount         int    `gorm:"column:char_count" json:"charCount"`
+	TokenCount        int    `gorm:"column:token_count" json:"tokenCount"`
+	SourceVersion     string `gorm:"column:source_version;type:varchar(64)" json:"sourceVersion"`
+	SourceHash        string `gorm:"column:source_hash;type:varchar(64)" json:"sourceHash"`
+	ChunkConfigHash   string `gorm:"column:chunk_config_hash;type:varchar(64)" json:"chunkConfigHash"`
+	BlockIndex        int    `gorm:"column:block_index" json:"blockIndex"`
+	BlockType         string `gorm:"column:block_type;type:varchar(64)" json:"blockType"`
+	SourceStartOffset int    `gorm:"column:source_start_offset" json:"sourceStartOffset"`
+	SourceEndOffset   int    `gorm:"column:source_end_offset" json:"sourceEndOffset"`
+	CoreStartOffset   int    `gorm:"column:core_start_offset" json:"coreStartOffset"`
+	CoreEndOffset     int    `gorm:"column:core_end_offset" json:"coreEndOffset"`
+	Enabled           int16  `gorm:"column:enabled;type:smallint;default:1" json:"enabled"`
+	CreatedBy         string `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
+	UpdatedBy         string `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`
 }
 
 func (KnowledgeChunk) TableName() string {

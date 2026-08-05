@@ -5,20 +5,28 @@ import "context"
 // VectorChunk represents a document chunk with its embedding vector.
 // Aligns with Java VectorChunk.
 type VectorChunk struct {
-	ChunkID        string
-	DocID          string
-	Content        string
-	EmbeddingText  string
-	Embedding      []float32
-	Score          float64
-	Index          int
-	BlockType      string
-	OutlinePath    []string
-	SourceBlockIDs []string
-	Assets         []AssetRef
-	SectionContext string
-	Provenance     Provenance
-	Metadata       map[string]string
+	ChunkID           string
+	DocID             string
+	Content           string
+	EmbeddingText     string
+	Embedding         []float32
+	Score             float64
+	Index             int
+	BlockType         string
+	BlockIndex        int
+	SourceVersion     string
+	SourceHash        string
+	ChunkConfigHash   string
+	SourceStartOffset int
+	SourceEndOffset   int
+	CoreStartOffset   int
+	CoreEndOffset     int
+	OutlinePath       []string
+	SourceBlockIDs    []string
+	Assets            []AssetRef
+	SectionContext    string
+	Provenance        Provenance
+	Metadata          map[string]string
 }
 
 // VectorStoreService provides vector index CRUD operations.

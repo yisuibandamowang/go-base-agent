@@ -956,12 +956,21 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 		}
 		lineRange := lineRanges[i]
 		vecChunks = append(vecChunks, rag.VectorChunk{
-			ChunkID:       c.ID,
-			DocID:         doc.ID,
-			Content:       c.Content,
-			Embedding:     vec,
-			EmbeddingText: c.Content,
-			Index:         c.ChunkIndex,
+			ChunkID:           c.ID,
+			DocID:             doc.ID,
+			Content:           c.Content,
+			Embedding:         vec,
+			EmbeddingText:     c.Content,
+			Index:             c.ChunkIndex,
+			BlockIndex:        c.BlockIndex,
+			BlockType:         c.BlockType,
+			SourceVersion:     c.SourceVersion,
+			SourceHash:        c.SourceHash,
+			ChunkConfigHash:   c.ChunkConfigHash,
+			SourceStartOffset: c.SourceStartOffset,
+			SourceEndOffset:   c.SourceEndOffset,
+			CoreStartOffset:   c.CoreStartOffset,
+			CoreEndOffset:     c.CoreEndOffset,
 			Metadata: map[string]string{
 				"doc_id":      doc.ID,
 				"doc_name":    doc.DocName,
@@ -983,10 +992,20 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 	return extractDuration, chunkDuration, embedDuration, vecChunks, nil
 }
 
+type chunkSourceLocation struct {
+	sourceStart int
+	sourceEnd   int
+	coreStart   int
+	coreEnd     int
+	blockIndex  int
+	blockType   string
+}
+
 // chunkText splits text into chunks using simple paragraph-based splitting.
 func (s *DocumentService) chunkDocument(ctx context.Context, doc *model.KnowledgeDocument, blocks []rag.Block, fallbackText string) []*model.KnowledgeChunk {
 	opts := chunkingOptionsForDocument(doc)
 	var chunkTexts []string
+	var locations []chunkSourceLocation
 	if len(blocks) > 0 {
 		chunker := &rag.StructureAwareChunker{}
 		vecChunks := chunker.ChunkBlocks(blocks, opts)
@@ -996,20 +1015,44 @@ func (s *DocumentService) chunkDocument(ctx context.Context, doc *model.Knowledg
 				chunkTexts = append(chunkTexts, chunk.Content)
 			}
 		}
+		locations = locateChunkTextsInSource(fallbackText, chunkTexts)
 	}
 	if len(chunkTexts) == 0 {
 		chunkTexts = splitToChunks(fallbackText, opts.ChunkSize, opts.OverlapSize)
+		locations = fixedSizeChunkLocations(fallbackText, opts.ChunkSize, opts.OverlapSize, len(chunkTexts))
 	}
 	result := make([]*model.KnowledgeChunk, 0, len(chunkTexts))
+	sourceVersion := stringSHA256Hex(fallbackText)
+	configHash := chunkConfigHash(doc)
 	for i, content := range chunkTexts {
+		contentHash := stringSHA256Hex(content)
+		loc := chunkSourceLocation{sourceEnd: len([]rune(content)), coreEnd: len([]rune(content))}
+		if i < len(locations) {
+			loc = locations[i]
+		}
+		sourceHash := contentHash
+		if sourcePart, ok := sourceTextByRange(fallbackText, loc.sourceStart, loc.sourceEnd); ok {
+			sourceHash = stringSHA256Hex(sourcePart)
+		}
 		c := &model.KnowledgeChunk{
-			KbID:       doc.KbID,
-			DocID:      doc.ID,
-			ChunkIndex: i,
-			Content:    content,
-			CharCount:  len([]rune(content)),
-			Enabled:    1,
-			CreatedBy:  doc.CreatedBy,
+			KbID:              doc.KbID,
+			DocID:             doc.ID,
+			ChunkIndex:        i,
+			Content:           content,
+			ContentHash:       contentHash,
+			CharCount:         len([]rune(content)),
+			TokenCount:        len(strings.Fields(content)),
+			SourceVersion:     sourceVersion,
+			SourceHash:        sourceHash,
+			ChunkConfigHash:   configHash,
+			BlockIndex:        loc.blockIndex,
+			BlockType:         loc.blockType,
+			SourceStartOffset: loc.sourceStart,
+			SourceEndOffset:   loc.sourceEnd,
+			CoreStartOffset:   loc.coreStart,
+			CoreEndOffset:     loc.coreEnd,
+			Enabled:           1,
+			CreatedBy:         doc.CreatedBy,
 		}
 		c.CreateTime = time.Now()
 		c.UpdateTime = time.Now()
@@ -1017,6 +1060,102 @@ func (s *DocumentService) chunkDocument(ctx context.Context, doc *model.Knowledg
 	}
 	_ = ctx
 	return result
+}
+
+func fixedSizeChunkLocations(text string, size, overlap, count int) []chunkSourceLocation {
+	runes := []rune(text)
+	total := len(runes)
+	if size <= 0 || count == 0 {
+		return nil
+	}
+	step := size - overlap
+	if step <= 0 {
+		step = size
+	}
+	locations := make([]chunkSourceLocation, 0, count)
+	for i := 0; i < count; i++ {
+		start := i * step
+		if start > total {
+			start = total
+		}
+		end := start + size
+		if end > total {
+			end = total
+		}
+		coreEnd := start + step
+		if i == count-1 || coreEnd > total {
+			coreEnd = total
+		}
+		if coreEnd > end {
+			coreEnd = end
+		}
+		locations = append(locations, chunkSourceLocation{
+			sourceStart: start,
+			sourceEnd:   end,
+			coreStart:   start,
+			coreEnd:     coreEnd,
+			blockIndex:  i,
+			blockType:   "fixed_size",
+		})
+	}
+	return locations
+}
+
+func locateChunkTextsInSource(text string, chunkTexts []string) []chunkSourceLocation {
+	locations := make([]chunkSourceLocation, 0, len(chunkTexts))
+	sourceRunes := []rune(text)
+	cursor := 0
+	for i, chunkText := range chunkTexts {
+		chunkRunes := []rune(chunkText)
+		start := indexRunes(sourceRunes, chunkRunes, cursor)
+		if start < 0 {
+			start = cursor
+		}
+		end := start + len(chunkRunes)
+		if end > len(sourceRunes) {
+			end = len(sourceRunes)
+		}
+		locations = append(locations, chunkSourceLocation{
+			sourceStart: start,
+			sourceEnd:   end,
+			coreStart:   start,
+			coreEnd:     end,
+			blockIndex:  i,
+			blockType:   "structure_aware",
+		})
+		cursor = end
+	}
+	return locations
+}
+
+func indexRunes(source, needle []rune, start int) int {
+	if len(needle) == 0 {
+		return start
+	}
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i+len(needle) <= len(source); i++ {
+		matched := true
+		for j := range needle {
+			if source[i+j] != needle[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
+}
+
+func sourceTextByRange(text string, start, end int) (string, bool) {
+	runes := []rune(text)
+	if start < 0 || end < start || end > len(runes) {
+		return "", false
+	}
+	return string(runes[start:end]), true
 }
 
 func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOptions {
@@ -1031,7 +1170,7 @@ func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOption
 	if v := intFromChunkConfig(raw, "chunkSize", "size", "targetChars"); v > 0 {
 		opts.ChunkSize = v
 	}
-	if v := intFromChunkConfig(raw, "overlapSize", "overlap"); v >= 0 {
+	if v := intFromChunkConfig(raw, "overlapSize", "overlapChars", "overlap"); v >= 0 {
 		opts.OverlapSize = v
 	}
 	return opts
@@ -1053,6 +1192,47 @@ func intFromChunkConfig(raw map[string]any, keys ...string) int {
 		}
 	}
 	return -1
+}
+
+func stringSHA256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func chunkConfigHash(doc *model.KnowledgeDocument) string {
+	if doc == nil {
+		return ""
+	}
+	return stringSHA256Hex(strings.TrimSpace(doc.ChunkStrategy) + ":" + strings.TrimSpace(doc.ChunkConfig))
+}
+
+func documentOverlapSize(doc *model.KnowledgeDocument) int {
+	if doc == nil {
+		return 0
+	}
+	if strings.TrimSpace(doc.ChunkConfig) == "" {
+		return 0
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(doc.ChunkConfig), &raw); err != nil {
+		return 0
+	}
+	if v := intFromChunkConfig(raw, "overlapSize", "overlapChars", "overlap"); v > 0 {
+		return v
+	}
+	return 0
+}
+
+func chunkRequiresOverlapUpdate(doc *model.KnowledgeDocument, chunk *model.KnowledgeChunk) bool {
+	if documentOverlapSize(doc) > 0 {
+		return true
+	}
+	if chunk == nil {
+		return false
+	}
+	sourceWidth := chunk.SourceEndOffset - chunk.SourceStartOffset
+	coreWidth := chunk.CoreEndOffset - chunk.CoreStartOffset
+	return sourceWidth > 0 && coreWidth > 0 && sourceWidth > coreWidth
 }
 
 func detectDocumentMIME(doc *model.KnowledgeDocument) string {
@@ -1202,13 +1382,24 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 	chunks := make([]*model.KnowledgeChunk, 0, len(vecChunks))
 	for _, vc := range vecChunks {
 		chunks = append(chunks, &model.KnowledgeChunk{
-			KbID:       doc.KbID,
-			DocID:      doc.ID,
-			ChunkIndex: vc.Index,
-			Content:    vc.Content,
-			CharCount:  len([]rune(vc.Content)),
-			Enabled:    1,
-			CreatedBy:  doc.CreatedBy,
+			KbID:              doc.KbID,
+			DocID:             doc.ID,
+			ChunkIndex:        vc.Index,
+			Content:           vc.Content,
+			ContentHash:       stringSHA256Hex(vc.Content),
+			CharCount:         len([]rune(vc.Content)),
+			TokenCount:        len(strings.Fields(vc.Content)),
+			SourceVersion:     vc.SourceVersion,
+			SourceHash:        vc.SourceHash,
+			ChunkConfigHash:   vc.ChunkConfigHash,
+			BlockIndex:        vc.BlockIndex,
+			BlockType:         vc.BlockType,
+			SourceStartOffset: vc.SourceStartOffset,
+			SourceEndOffset:   vc.SourceEndOffset,
+			CoreStartOffset:   vc.CoreStartOffset,
+			CoreEndOffset:     vc.CoreEndOffset,
+			Enabled:           1,
+			CreatedBy:         doc.CreatedBy,
 		})
 	}
 
@@ -1248,11 +1439,13 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 		completeVectorChunkMetadata(doc, &vecChunks[i])
 	}
 
-	// 向量写入（事务外，避免长事务）
-	_ = s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID)
-	if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, vecChunks); err != nil {
-		slog.Error("persist vectors failed", "docId", doc.ID, "err", err)
-		return 0, fmt.Errorf("persist vectors: %w", err)
+	if s.vecStore != nil {
+		// 向量写入（事务外，避免长事务）
+		_ = s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID)
+		if err := s.vecStore.IndexDocumentChunks(ctx, kb.CollectionName, doc.ID, vecChunks); err != nil {
+			slog.Error("persist vectors failed", "docId", doc.ID, "err", err)
+			return 0, fmt.Errorf("persist vectors: %w", err)
+		}
 	}
 
 	return len(chunks), nil
@@ -1280,11 +1473,20 @@ func (s *DocumentService) buildChunkVector(ctx context.Context, doc *model.Knowl
 		return rag.VectorChunk{}, fmt.Errorf("embed chunk %s: %w", chunk.ID, err)
 	}
 	vecChunk := rag.VectorChunk{
-		ChunkID:   chunk.ID,
-		DocID:     doc.ID,
-		Content:   chunk.Content,
-		Embedding: vec,
-		Index:     chunk.ChunkIndex,
+		ChunkID:           chunk.ID,
+		DocID:             doc.ID,
+		Content:           chunk.Content,
+		Embedding:         vec,
+		Index:             chunk.ChunkIndex,
+		BlockIndex:        chunk.BlockIndex,
+		BlockType:         chunk.BlockType,
+		SourceVersion:     chunk.SourceVersion,
+		SourceHash:        chunk.SourceHash,
+		ChunkConfigHash:   chunk.ChunkConfigHash,
+		SourceStartOffset: chunk.SourceStartOffset,
+		SourceEndOffset:   chunk.SourceEndOffset,
+		CoreStartOffset:   chunk.CoreStartOffset,
+		CoreEndOffset:     chunk.CoreEndOffset,
 	}
 	completeVectorChunkMetadata(doc, &vecChunk)
 	return vecChunk, nil
@@ -1735,6 +1937,9 @@ func (s *DocumentService) UpdateChunk(ctx context.Context, docID, chunkID string
 	if content == chunk.Content {
 		return before, nil
 	}
+	if chunkRequiresOverlapUpdate(doc, chunk) {
+		return s.updateChunkWithOverlap(ctx, doc, chunk, content, userID, before)
+	}
 	hash := sha256.Sum256([]byte(content))
 	chunk.Content = content
 	chunk.ContentHash = fmt.Sprintf("%x", hash[:])
@@ -1767,6 +1972,226 @@ func (s *DocumentService) UpdateChunk(ctx context.Context, docID, chunkID string
 		AfterSnapshot:  resp,
 	})
 	return resp, nil
+}
+
+func (s *DocumentService) updateChunkWithOverlap(ctx context.Context, doc *model.KnowledgeDocument, chunk *model.KnowledgeChunk, content, userID string, before *dto.ChunkResp) (*dto.ChunkResp, error) {
+	sourceText, sourceMode, err := s.canonicalTextForChunkUpdate(ctx, doc, chunk)
+	if err != nil {
+		return nil, err
+	}
+	updatedText, applyMode, err := applyChunkContentToSource(sourceText, doc, chunk, content)
+	if err != nil {
+		return nil, err
+	}
+	rebuilt, err := s.rebuildDocumentChunksFromText(ctx, doc, updatedText, chunk.ChunkIndex, userID)
+	if err != nil {
+		return nil, err
+	}
+	resp := s.chunkToResp(rebuilt)
+	after := map[string]any{
+		"chunk":            resp,
+		"rebuildMode":      "full_rebuild",
+		"sourceMode":       sourceMode,
+		"applyMode":        applyMode,
+		"oldChunkId":       chunk.ID,
+		"newChunkId":       resp.ID,
+		"oldContentHash":   chunk.ContentHash,
+		"newContentHash":   resp.ContentHash,
+		"sourceVersion":    rebuilt.SourceVersion,
+		"chunkConfigHash":  rebuilt.ChunkConfigHash,
+		"affectedDocument": doc.ID,
+	}
+	s.recordAudit(ctx, auditService.RecordReq{
+		BizType:        auditService.BizTypeKnowledgeChunk,
+		BizID:          chunk.ID,
+		OperationType:  auditService.OperationUpdate,
+		ActionDesc:     "更新 overlap 分块并重建文档：" + doc.ID,
+		BeforeSnapshot: before,
+		AfterSnapshot:  after,
+	})
+	slog.Info("overlap chunk update rebuilt document",
+		"docId", doc.ID,
+		"oldChunkId", chunk.ID,
+		"newChunkId", resp.ID,
+		"sourceMode", sourceMode,
+		"applyMode", applyMode,
+		"sourceVersion", rebuilt.SourceVersion,
+		"chunkConfigHash", rebuilt.ChunkConfigHash,
+	)
+	return resp, nil
+}
+
+func (s *DocumentService) canonicalTextForChunkUpdate(ctx context.Context, doc *model.KnowledgeDocument, chunk *model.KnowledgeChunk) (string, string, error) {
+	fileText, fileErr := s.loadDocumentCanonicalText(ctx, doc)
+	if fileErr == nil {
+		if chunk.SourceVersion == "" || stringSHA256Hex(fileText) == chunk.SourceVersion {
+			return fileText, "source_file", nil
+		}
+	}
+	reconstructed, reconstructErr := s.reconstructDocumentTextFromChunks(ctx, doc.ID)
+	if reconstructErr == nil {
+		if chunk.SourceVersion == "" || stringSHA256Hex(reconstructed) == chunk.SourceVersion {
+			return reconstructed, "chunk_core", nil
+		}
+	}
+	if fileErr == nil {
+		return fileText, "source_file_unverified", nil
+	}
+	if reconstructErr == nil {
+		return reconstructed, "chunk_core_unverified", nil
+	}
+	return "", "", fmt.Errorf("读取用于更新的文档内容失败: source=%v reconstruct=%v", fileErr, reconstructErr)
+}
+
+func (s *DocumentService) loadDocumentCanonicalText(ctx context.Context, doc *model.KnowledgeDocument) (string, error) {
+	fileBytes, err := s.readDocumentBytes(ctx, doc)
+	if err != nil {
+		return "", fmt.Errorf("读取文件内容失败: %w", err)
+	}
+	if len(fileBytes) == 0 {
+		return "", fmt.Errorf("文件内容为空")
+	}
+	registry := s.parserRegistry
+	if registry == nil {
+		registry = parser.DefaultRegistry()
+	}
+	parsed, err := registry.Parse(ctx, fileBytes, detectDocumentMIME(doc), map[string]string{
+		"sourceFile":    doc.DocName,
+		"documentId":    doc.ID,
+		"sourceURL":     documentSourceURL(doc),
+		"sourceType":    doc.SourceType,
+		"knowledgeBase": doc.KbID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("文件解析失败: %w", err)
+	}
+	text := sanitizeText(rag.RenderBlocks(parsed.Blocks))
+	if text == "" {
+		return "", fmt.Errorf("文件无有效文本内容")
+	}
+	return text, nil
+}
+
+func (s *DocumentService) reconstructDocumentTextFromChunks(ctx context.Context, docID string) (string, error) {
+	var chunks []model.KnowledgeChunk
+	if err := s.db.WithContext(ctx).Where("doc_id = ? AND deleted = 0", docID).Order("chunk_index ASC").Find(&chunks).Error; err != nil {
+		return "", fmt.Errorf("load chunks: %w", err)
+	}
+	if len(chunks) == 0 {
+		return "", fmt.Errorf("文档没有可重建的分块")
+	}
+	var b strings.Builder
+	for _, c := range chunks {
+		if c.CoreEndOffset < c.CoreStartOffset || c.CoreStartOffset < c.SourceStartOffset || c.CoreEndOffset > c.SourceEndOffset {
+			return "", fmt.Errorf("分块 %s 缺少有效来源定位", c.ID)
+		}
+		localStart := c.CoreStartOffset - c.SourceStartOffset
+		localEnd := c.CoreEndOffset - c.SourceStartOffset
+		runes := []rune(c.Content)
+		if localStart < 0 || localEnd < localStart || localEnd > len(runes) {
+			return "", fmt.Errorf("分块 %s 来源定位越界", c.ID)
+		}
+		b.WriteString(string(runes[localStart:localEnd]))
+	}
+	text := b.String()
+	if text == "" {
+		return "", fmt.Errorf("重建后的文档内容为空")
+	}
+	return text, nil
+}
+
+func applyChunkContentToSource(sourceText string, doc *model.KnowledgeDocument, chunk *model.KnowledgeChunk, content string) (string, string, error) {
+	currentConfigHash := chunkConfigHash(doc)
+	if chunk.ChunkConfigHash == "" || chunk.ChunkConfigHash == currentConfigHash {
+		if current, ok := sourceTextByRange(sourceText, chunk.SourceStartOffset, chunk.SourceEndOffset); ok && stringSHA256Hex(current) == chunk.SourceHash {
+			return replaceSourceRange(sourceText, chunk.SourceStartOffset, chunk.SourceEndOffset, content), "source_offset", nil
+		}
+	}
+	start, ok := uniqueRuneIndex(sourceText, chunk.Content)
+	if !ok {
+		return "", "", fmt.Errorf("无法唯一定位 overlap 分块原文，已拒绝自动更新，请重新上传或重新分块后再试")
+	}
+	return replaceSourceRange(sourceText, start, start+len([]rune(chunk.Content)), content), "unique_content", nil
+}
+
+func uniqueRuneIndex(sourceText, needle string) (int, bool) {
+	sourceRunes := []rune(sourceText)
+	needleRunes := []rune(needle)
+	if len(needleRunes) == 0 {
+		return 0, false
+	}
+	found := -1
+	for start := 0; ; start++ {
+		idx := indexRunes(sourceRunes, needleRunes, start)
+		if idx < 0 {
+			break
+		}
+		if found >= 0 {
+			return 0, false
+		}
+		found = idx
+		start = idx
+	}
+	return found, found >= 0
+}
+
+func replaceSourceRange(sourceText string, start, end int, replacement string) string {
+	runes := []rune(sourceText)
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if end < start {
+		end = start
+	}
+	return string(runes[:start]) + replacement + string(runes[end:])
+}
+
+func (s *DocumentService) rebuildDocumentChunksFromText(ctx context.Context, doc *model.KnowledgeDocument, text string, preferredIndex int, userID string) (*model.KnowledgeChunk, error) {
+	chunks := s.chunkDocument(ctx, doc, nil, text)
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("重建后没有生成有效分块")
+	}
+	kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+	if err != nil {
+		return nil, fmt.Errorf("知识库不存在: %w", err)
+	}
+	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		chunk.UpdatedBy = userID
+		vec, err := s.emb.EmbedWithModel(ctx, chunk.Content, kb.EmbeddingModel)
+		if err != nil {
+			return nil, fmt.Errorf("embed rebuilt chunk %d: %w", chunk.ChunkIndex, err)
+		}
+		vecChunks = append(vecChunks, rag.VectorChunk{
+			DocID:             doc.ID,
+			Content:           chunk.Content,
+			Embedding:         vec,
+			EmbeddingText:     chunk.Content,
+			Index:             chunk.ChunkIndex,
+			BlockIndex:        chunk.BlockIndex,
+			BlockType:         chunk.BlockType,
+			SourceVersion:     chunk.SourceVersion,
+			SourceHash:        chunk.SourceHash,
+			ChunkConfigHash:   chunk.ChunkConfigHash,
+			SourceStartOffset: chunk.SourceStartOffset,
+			SourceEndOffset:   chunk.SourceEndOffset,
+			CoreStartOffset:   chunk.CoreStartOffset,
+			CoreEndOffset:     chunk.CoreEndOffset,
+		})
+	}
+	if _, err := s.persistChunksAndVectors(ctx, doc, vecChunks); err != nil {
+		return nil, err
+	}
+	var rebuilt model.KnowledgeChunk
+	if err := s.db.WithContext(ctx).Where("doc_id = ? AND chunk_index = ? AND deleted = 0", doc.ID, preferredIndex).First(&rebuilt).Error; err != nil {
+		if fallbackErr := s.db.WithContext(ctx).Where("doc_id = ? AND deleted = 0", doc.ID).Order("chunk_index ASC").First(&rebuilt).Error; fallbackErr != nil {
+			return nil, fmt.Errorf("load rebuilt chunk: %w", err)
+		}
+	}
+	return &rebuilt, nil
 }
 
 // DeleteChunk 软删除分块。

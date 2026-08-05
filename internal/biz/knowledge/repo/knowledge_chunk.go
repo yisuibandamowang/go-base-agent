@@ -89,7 +89,7 @@ func (r *KnowledgeChunkRepo) FindEditedDocIDs(ctx context.Context, docIDs []stri
 // Update 更新分块内容。
 func (r *KnowledgeChunkRepo) Update(ctx context.Context, chunk *model.KnowledgeChunk) error {
 	result := r.gdb.WithContext(ctx).Model(chunk).
-		Select("content", "content_hash", "char_count", "token_count", "updated_by", "update_time").
+		Select("content", "content_hash", "char_count", "token_count", "source_version", "source_hash", "chunk_config_hash", "block_index", "block_type", "source_start_offset", "source_end_offset", "core_start_offset", "core_end_offset", "updated_by", "update_time").
 		Updates(chunk)
 	if result.Error != nil {
 		return result.Error
@@ -154,6 +154,6 @@ func (r *KnowledgeChunkRepo) UpsertChunks(ctx context.Context, chunks []*model.K
 	}
 	return r.gdb.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "doc_id"}, {Name: "chunk_index"}, {Name: "deleted"}},
-		DoUpdates: clause.AssignmentColumns([]string{"content", "content_hash", "char_count", "token_count", "enabled", "updated_by", "update_time", "deleted"}),
+		DoUpdates: clause.AssignmentColumns([]string{"content", "content_hash", "char_count", "token_count", "source_version", "source_hash", "chunk_config_hash", "block_index", "block_type", "source_start_offset", "source_end_offset", "core_start_offset", "core_end_offset", "enabled", "updated_by", "update_time", "deleted"}),
 	}).Create(chunks).Error
 }

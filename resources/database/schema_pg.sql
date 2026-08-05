@@ -191,6 +191,15 @@ CREATE TABLE t_knowledge_chunk (
     content_hash VARCHAR(64),
     char_count   INTEGER,
     token_count  INTEGER,
+    source_version      VARCHAR(64),
+    source_hash         VARCHAR(64),
+    chunk_config_hash   VARCHAR(64),
+    block_index         INTEGER,
+    block_type          VARCHAR(64),
+    source_start_offset  INTEGER,
+    source_end_offset    INTEGER,
+    core_start_offset    INTEGER,
+    core_end_offset      INTEGER,
     enabled      SMALLINT    NOT NULL DEFAULT 1,
     created_by   VARCHAR(20) NOT NULL,
     updated_by   VARCHAR(20),
@@ -200,6 +209,17 @@ CREATE TABLE t_knowledge_chunk (
 );
 CREATE INDEX idx_doc_id ON t_knowledge_chunk (doc_id);
 COMMENT ON TABLE t_knowledge_chunk IS '知识库文档分块表';
+COMMENT ON COLUMN t_knowledge_chunk.source_version IS '原文版本哈希';
+COMMENT ON COLUMN t_knowledge_chunk.source_hash IS '原文片段哈希';
+COMMENT ON COLUMN t_knowledge_chunk.chunk_config_hash IS '分块配置哈希';
+COMMENT ON COLUMN t_knowledge_chunk.block_index IS '来源块序号';
+COMMENT ON COLUMN t_knowledge_chunk.block_type IS '来源块类型';
+COMMENT ON COLUMN t_knowledge_chunk.source_start_offset IS '原文起始偏移';
+COMMENT ON COLUMN t_knowledge_chunk.source_end_offset IS '原文结束偏移';
+COMMENT ON COLUMN t_knowledge_chunk.core_start_offset IS '去重核心起始偏移';
+COMMENT ON COLUMN t_knowledge_chunk.core_end_offset IS '去重核心结束偏移';
+CREATE INDEX idx_chunk_doc_source_range ON t_knowledge_chunk (doc_id, source_start_offset, source_end_offset) WHERE deleted = 0;
+COMMENT ON INDEX idx_chunk_doc_source_range IS '知识库分块原文范围索引';
 
 CREATE TABLE t_knowledge_document_chunk_log (
     id                 VARCHAR(20)      NOT NULL PRIMARY KEY,
