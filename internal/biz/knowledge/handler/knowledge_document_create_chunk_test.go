@@ -112,6 +112,139 @@ func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
 	}
 }
 
+func TestUploadURLDocumentAllowsRealContentMentioningLogin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	remoteBody := []byte("# 登录功能说明\n用户可以通过账号密码登录系统，登录成功后可以查看知识库、上传文档、执行分块并进行后续检索。本文档描述的是业务功能，不是登录拦截页。")
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		_, _ = w.Write(remoteBody)
+	}))
+	defer remote.Close()
+
+	svc := service.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("sourceType", "url"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("sourceLocation", remote.URL+"/login-guide.md"); err != nil {
+		t.Fatalf("write sourceLocation: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kb.ID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+
+	var resp struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if resp.Code != "0" {
+		t.Fatalf("expected real document mentioning login to succeed, got %s", w.Body.String())
+	}
+}
+
+func TestUploadURLDocumentRejectsHTMLShellWithoutDocumentContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>登录</title></head><body><div id="root"></div><script src="/app.js"></script></body></html>`))
+	}))
+	defer remote.Close()
+
+	svc := service.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		nil,
+		nil,
+		nil,
+	)
+	h := NewDocumentHandler(svc, NewFileStore())
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("sourceType", "url"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("sourceLocation", remote.URL+"/protected/doc"); err != nil {
+		t.Fatalf("write sourceLocation: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kb.ID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if resp.Code == "0" || !strings.Contains(resp.Message, "未读取到有效文档内容") {
+		t.Fatalf("expected html shell without document content to fail, got %s", w.Body.String())
+	}
+	var count int64
+	if err := gdb.Model(&model.KnowledgeDocument{}).Count(&count).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no document to be created, got %d", count)
+	}
+}
+
 func TestUploadDocumentHonorsEnabledFlagLikeJavaCreateRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

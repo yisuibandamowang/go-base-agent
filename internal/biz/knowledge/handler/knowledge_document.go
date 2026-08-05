@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
+	coreparser "go-base-agent/internal/biz/core/parser"
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/service"
+	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/ratelimit"
 
@@ -255,7 +257,106 @@ func fetchRemoteUploadFile(ctx context.Context, rawURL string) ([]byte, string, 
 	if fileType == "" {
 		fileType = "unknown"
 	}
+	if err := validateRemoteUploadContent(ctx, data, fileType, resp.Header.Get("Content-Type"), location); err != nil {
+		return nil, "", "", err
+	}
 	return data, name, fileType, nil
+}
+
+func validateRemoteUploadContent(ctx context.Context, data []byte, fileType, contentType, sourceURL string) error {
+	if strings.TrimSpace(string(data)) == "" {
+		return fmt.Errorf("读取远程文档内容失败: 未读取到有效文档内容")
+	}
+	mimeType := remoteUploadMIMEType(fileType, contentType)
+	registry := coreparser.DefaultRegistry()
+	if !registry.Supports(mimeType) {
+		return fmt.Errorf("读取远程文档内容失败: 暂不支持的远程文件类型 %s", strings.TrimSpace(fileType))
+	}
+	parsed, err := registry.Parse(ctx, data, mimeType, map[string]string{
+		"sourceURL": sourceURL,
+	})
+	if err != nil {
+		return fmt.Errorf("读取远程文档内容失败: %w", err)
+	}
+	text := strings.Join(strings.Fields(rag.RenderBlocks(parsed.Blocks)), " ")
+	if !hasMeaningfulRemoteDocumentText(text) {
+		return fmt.Errorf("读取远程文档内容失败: 未读取到有效文档内容")
+	}
+	if looksLikeRemoteAccessGate(text) {
+		return fmt.Errorf("读取远程文档内容失败: 未读取到有效文档内容，可能需要登录或没有访问权限")
+	}
+	return nil
+}
+
+func remoteUploadMIMEType(fileType, contentType string) string {
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil && strings.TrimSpace(mediaType) != "" {
+		return strings.ToLower(strings.TrimSpace(mediaType))
+	}
+	switch strings.ToLower(strings.TrimPrefix(strings.TrimSpace(fileType), ".")) {
+	case "md", "markdown":
+		return "text/markdown"
+	case "txt", "text":
+		return "text/plain"
+	case "csv":
+		return "text/csv"
+	case "html", "htm":
+		return "text/html"
+	case "pdf":
+		return "application/pdf"
+	case "docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case "pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case "xml":
+		return "application/xml"
+	case "json":
+		return "application/json"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func hasMeaningfulRemoteDocumentText(text string) bool {
+	compact := strings.Join(strings.Fields(text), "")
+	return len([]rune(compact)) >= 8
+}
+
+func looksLikeRemoteAccessGate(text string) bool {
+	compact := strings.Join(strings.Fields(text), "")
+	compactLen := len([]rune(compact))
+	lower := strings.ToLower(strings.Join(strings.Fields(text), " "))
+	strongPhrases := []string{
+		"请登录",
+		"未登录",
+		"无权限",
+		"没有权限",
+		"访问受限",
+		"禁止访问",
+		"登录后",
+		"access denied",
+		"forbidden",
+		"unauthorized",
+		"permission denied",
+		"please enable javascript",
+		"redirecting",
+	}
+	for _, phrase := range strongPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	if compactLen >= 30 {
+		return false
+	}
+	weakPhrases := []string{"登录", "sign in", "log in", "login"}
+	for _, phrase := range weakPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func remoteUploadFilename(disposition, urlPath string) string {
