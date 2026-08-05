@@ -119,6 +119,14 @@ type RAGDefaultConfig struct {
 	CollectionName string `mapstructure:"collection-name"`
 	Dimension      int    `mapstructure:"dimension"`
 	MetricType     string `mapstructure:"metric-type"`
+	SSETimeoutMs   int64  `mapstructure:"sse-timeout-ms"`
+}
+
+func (c RAGDefaultConfig) SSETimeoutDuration() time.Duration {
+	if c.SSETimeoutMs <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(c.SSETimeoutMs) * time.Millisecond
 }
 
 type RAGContextConfig struct {
@@ -248,8 +256,9 @@ type RAGMCPServerConfig struct {
 }
 
 type RAGSearchConfig struct {
-	Channels RAGSearchChannelsConfig `mapstructure:"channels"`
-	Fusion   RAGSearchFusionConfig   `mapstructure:"fusion"`
+	DefaultTopK int                     `mapstructure:"default-top-k"`
+	Channels    RAGSearchChannelsConfig `mapstructure:"channels"`
+	Fusion      RAGSearchFusionConfig   `mapstructure:"fusion"`
 }
 
 type RAGSearchChannelsConfig struct {
@@ -276,10 +285,17 @@ type RAGSearchFusionConfig struct {
 }
 
 type RAGGuidanceConfig struct {
-	Enabled             bool    `mapstructure:"enabled"`
+	Enabled             *bool   `mapstructure:"enabled"`
 	AmbiguityScoreRatio float64 `mapstructure:"ambiguity-score-ratio"`
 	AmbiguityMargin     float64 `mapstructure:"ambiguity-margin"`
 	MaxOptions          int     `mapstructure:"max-options"`
+}
+
+func (c RAGGuidanceConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 func (c RAGSearchChannelConfig) IsEnabledByDefault() bool {
@@ -305,8 +321,15 @@ type RAGWebSearchConfig struct {
 }
 
 type RAGTraceConfig struct {
-	Enabled        bool `mapstructure:"enabled"`
-	MaxErrorLength int  `mapstructure:"max-error-length"`
+	Enabled        *bool `mapstructure:"enabled"`
+	MaxErrorLength int   `mapstructure:"max-error-length"`
+}
+
+func (c RAGTraceConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type AIConfig struct {
@@ -500,6 +523,39 @@ func applyDefaults(cfg *Config) {
 	if cfg == nil {
 		return
 	}
+	ai := &cfg.AI
+	if ai.Selection.FailureThreshold <= 0 {
+		ai.Selection.FailureThreshold = 2
+	}
+	if ai.Selection.OpenDurationMs <= 0 {
+		ai.Selection.OpenDurationMs = 30000
+	}
+	if ai.Selection.FirstPacketTimeoutSeconds <= 0 {
+		ai.Selection.FirstPacketTimeoutSeconds = 60
+	}
+	if ai.Stream.MessageChunkSize <= 0 {
+		ai.Stream.MessageChunkSize = 5
+	}
+	for i := range ai.Chat.Candidates {
+		if ai.Chat.Candidates[i].Priority <= 0 {
+			ai.Chat.Candidates[i].Priority = 100
+		}
+	}
+	for i := range ai.Embedding.Candidates {
+		if ai.Embedding.Candidates[i].Priority <= 0 {
+			ai.Embedding.Candidates[i].Priority = 100
+		}
+	}
+	for i := range ai.Rerank.Candidates {
+		if ai.Rerank.Candidates[i].Priority <= 0 {
+			ai.Rerank.Candidates[i].Priority = 100
+		}
+	}
+	for i := range ai.VLM.Candidates {
+		if ai.VLM.Candidates[i].Priority <= 0 {
+			ai.VLM.Candidates[i].Priority = 100
+		}
+	}
 	mem := &cfg.RAG.Memory
 	if mem.HistoryKeepTurns <= 0 {
 		mem.HistoryKeepTurns = 8
@@ -512,6 +568,65 @@ func applyDefaults(cfg *Config) {
 	}
 	if mem.TitleMaxLength <= 0 {
 		mem.TitleMaxLength = 30
+	}
+	search := &cfg.RAG.Search
+	if search.DefaultTopK <= 0 {
+		search.DefaultTopK = 10
+	}
+	if search.Channels.VectorGlobal.ConfidenceThreshold <= 0 {
+		search.Channels.VectorGlobal.ConfidenceThreshold = 0.6
+	}
+	if search.Channels.VectorGlobal.SingleIntentSupplementThreshold <= 0 {
+		search.Channels.VectorGlobal.SingleIntentSupplementThreshold = 0.8
+	}
+	if search.Channels.VectorGlobal.TopKMultiplier <= 0 {
+		search.Channels.VectorGlobal.TopKMultiplier = 3
+	}
+	if search.Channels.VectorGlobal.CandidateBudget <= 0 {
+		search.Channels.VectorGlobal.CandidateBudget = 100
+	}
+	if search.Channels.IntentDirected.MinIntentScore <= 0 {
+		search.Channels.IntentDirected.MinIntentScore = 0.4
+	}
+	if search.Channels.IntentDirected.TopKMultiplier <= 0 {
+		search.Channels.IntentDirected.TopKMultiplier = 2
+	}
+	if search.Channels.Keyword.Mode == "" {
+		search.Channels.Keyword.Mode = "both"
+	}
+	if search.Channels.Keyword.TopKMultiplier <= 0 {
+		search.Channels.Keyword.TopKMultiplier = 2
+	}
+	if search.Channels.WebSearch.Count <= 0 {
+		search.Channels.WebSearch.Count = 5
+	}
+	if search.Channels.WebSearch.TimeoutSeconds <= 0 {
+		search.Channels.WebSearch.TimeoutSeconds = 10
+	}
+	if search.Channels.WebSearch.APIURL == "" {
+		search.Channels.WebSearch.APIURL = "https://ydc-index.io/v1/search"
+	}
+	if search.Fusion.Strategy == "" {
+		search.Fusion.Strategy = "rrf"
+	}
+	if search.Fusion.RRFK <= 0 {
+		search.Fusion.RRFK = 60
+	}
+	if search.Fusion.RerankCandidateLimit <= 0 {
+		search.Fusion.RerankCandidateLimit = 50
+	}
+	limit := &cfg.RAG.RateLimit.Global
+	if limit.MaxConcurrent <= 0 {
+		limit.MaxConcurrent = 50
+	}
+	if limit.MaxWaitSeconds <= 0 {
+		limit.MaxWaitSeconds = 20
+	}
+	if limit.LeaseSeconds <= 0 {
+		limit.LeaseSeconds = 600
+	}
+	if limit.PollIntervalMs <= 0 {
+		limit.PollIntervalMs = 200
 	}
 }
 

@@ -104,7 +104,7 @@ func TestRagEvalHandler(t *testing.T) {
 
 	r := gin.New()
 	api := r.Group("/api/ragent")
-	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, false)
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, false, 10)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
@@ -113,7 +113,7 @@ func TestRagEvalHandler(t *testing.T) {
 		t.Fatalf("expected eval route to be disabled by config, got %d %s", w.Code, w.Body.String())
 	}
 
-	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, true)
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, true, 10)
 
 	t.Run("missing question returns client error", func(t *testing.T) {
 		w := httptest.NewRecorder()
@@ -155,7 +155,7 @@ func TestRagEvalHandlerReturnsResolvedIntentLeafIDs(t *testing.T) {
 
 	r := gin.New()
 	api := r.Group("/api/ragent")
-	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, true, fakeEvalIntentResolver{})
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, &fakeEvalRetriever{}, true, 10, fakeEvalIntentResolver{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
@@ -175,7 +175,7 @@ func TestRagEvalHandlerPassesIntentContextToRetriever(t *testing.T) {
 	r := gin.New()
 	api := r.Group("/api/ragent")
 	retriever := &fakeEvalContextRetriever{}
-	registerRagEvalRoute(api, &fakeEvalRewriter{}, retriever, true, fakeEvalIntentResolver{})
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, retriever, true, 12, fakeEvalIntentResolver{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
@@ -187,7 +187,7 @@ func TestRagEvalHandlerPassesIntentContextToRetriever(t *testing.T) {
 		t.Fatalf("expected context retrieval only, simple=%d context=%d", retriever.simpleCalls, retriever.contextCalls)
 	}
 	sc := retriever.lastContext
-	if sc.OriginalQuestion != "hello" || sc.RewrittenQuestion != "hello 改写" || sc.TopK != 10 {
+	if sc.OriginalQuestion != "hello" || sc.RewrittenQuestion != "hello 改写" || sc.TopK != 12 {
 		t.Fatalf("unexpected search context basics: %+v", sc)
 	}
 	if len(sc.SubQuestions) != 2 || sc.SubQuestions[1] != "hello follow-up" {
@@ -204,7 +204,7 @@ func TestRagEvalHandlerIncludesMcpContextWhenRetrieverProvidesIt(t *testing.T) {
 	r := gin.New()
 	api := r.Group("/api/ragent")
 	retriever := &fakeEvalMcpContextRetriever{}
-	registerRagEvalRoute(api, &fakeEvalRewriter{}, retriever, true, fakeEvalIntentResolver{})
+	registerRagEvalRoute(api, &fakeEvalRewriter{}, retriever, true, 10, fakeEvalIntentResolver{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/ragent/rag/eval?question=hello", nil)
@@ -360,15 +360,49 @@ func (f *fakeIntentTreeFactoryInitializer) InitFromFactory(context.Context) (int
 	return f.created, nil
 }
 
-func TestBuildPreferredLLMService_UsesFallbackService(t *testing.T) {
+func TestBuildLocalPreferredChatConfig_SynthesizesOllamaCandidate(t *testing.T) {
 	aiCfg := config.AIConfig{
 		Providers: config.AIProvidersConfig{
 			"ollama": {
-				URL:      "http://localhost:11434",
-				Protocol: "openai-compatible",
-				Endpoints: map[string]string{
-					"chat": "/v1/chat/completions",
-				},
+				Protocol: "ollama",
+			},
+		},
+	}
+
+	got, ok := buildLocalPreferredChatConfig(aiCfg)
+	if !ok {
+		t.Fatal("expected ollama provider to enable local preferred chat config")
+	}
+	if got.Chat.DefaultModel != preferredLocalChatID {
+		t.Fatalf("expected default model %q, got %q", preferredLocalChatID, got.Chat.DefaultModel)
+	}
+	if len(got.Chat.Candidates) != 1 {
+		t.Fatalf("expected 1 preferred candidate, got %d", len(got.Chat.Candidates))
+	}
+	candidate := got.Chat.Candidates[0]
+	if candidate.ID != preferredLocalChatID || candidate.Provider != preferredLocalChatProvider || candidate.Model != preferredLocalChatModel {
+		t.Fatalf("unexpected preferred candidate: %+v", candidate)
+	}
+	provider, ok := got.Providers[preferredLocalChatProvider]
+	if !ok {
+		t.Fatal("expected ollama provider to remain present")
+	}
+	if provider.Protocol != "openai-compatible" {
+		t.Fatalf("expected ollama protocol to be normalized, got %q", provider.Protocol)
+	}
+	if provider.URL != defaultOllamaURL {
+		t.Fatalf("expected ollama URL to default to %q, got %q", defaultOllamaURL, provider.URL)
+	}
+	if provider.Endpoints["chat"] != "/v1/chat/completions" {
+		t.Fatalf("expected ollama chat endpoint to default correctly, got %q", provider.Endpoints["chat"])
+	}
+}
+
+func TestBuildPreferredLLMService_UsesLocalFallbackWrapper(t *testing.T) {
+	aiCfg := config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"ollama": {
+				Protocol: "ollama",
 			},
 			"bailian": {
 				URL:      "https://dashscope.aliyuncs.com",
@@ -378,19 +412,12 @@ func TestBuildPreferredLLMService_UsesFallbackService(t *testing.T) {
 				},
 			},
 		},
-		Chat: config.AIChatConfig{
-			DefaultModel: "qwen3.7-plus",
-			Candidates: []config.AICandidateConfig{
-				{ID: "qwen3.7-plus", Provider: "bailian", Model: "qwen-plus-latest", Priority: 1},
-				{ID: "qwen3-local", Provider: "ollama", Model: "qwen3.6:latest", Priority: 2},
-			},
-		},
 	}
 	fallback := &fakePreferredLLMService{}
 
 	got := buildPreferredLLMService(aiCfg, nil, nil, nil, fallback)
-	if got != fallback {
-		t.Fatal("expected preferred LLM service to use configured fallback instead of local ollama")
+	if _, ok := got.(*chat.FallbackLLMService); !ok {
+		t.Fatalf("expected preferred LLM service to wrap local route with fallback, got %T", got)
 	}
 }
 

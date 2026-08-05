@@ -219,6 +219,30 @@ func TestIntentGuidanceServiceUsesCheckerForBorderlineRatio(t *testing.T) {
 	}
 }
 
+func TestIntentGuidanceServiceDefaultsMaxOptionsLikeJava(t *testing.T) {
+	guide := NewIntentGuidanceService(GuidanceOptions{Enabled: true})
+
+	decision := guide.DetectAmbiguity(context.Background(), "会员怎么查", []SubQuestionIntent{{
+		SubQuestion: "会员怎么查",
+		NodeScores: []NodeScore{
+			{Node: IntentNode{ID: "a", Name: "候选1", Kind: IntentKindKB}, Score: 0.97},
+			{Node: IntentNode{ID: "b", Name: "候选2", Kind: IntentKindKB}, Score: 0.96},
+			{Node: IntentNode{ID: "c", Name: "候选3", Kind: IntentKindKB}, Score: 0.95},
+			{Node: IntentNode{ID: "d", Name: "候选4", Kind: IntentKindKB}, Score: 0.94},
+			{Node: IntentNode{ID: "e", Name: "候选5", Kind: IntentKindKB}, Score: 0.93},
+			{Node: IntentNode{ID: "f", Name: "候选6", Kind: IntentKindKB}, Score: 0.92},
+			{Node: IntentNode{ID: "g", Name: "候选7", Kind: IntentKindKB}, Score: 0.91},
+		},
+	}})
+
+	if decision.Action != GuidanceActionPrompt {
+		t.Fatalf("expected prompt decision, got %+v", decision)
+	}
+	if !strings.Contains(decision.Prompt, "候选6") || strings.Contains(decision.Prompt, "候选7") {
+		t.Fatalf("expected Java default max options 6, got %q", decision.Prompt)
+	}
+}
+
 func TestLLMAmbiguityCheckerParsesAmbiguousFlag(t *testing.T) {
 	checker := NewLLMAmbiguityChecker(&fakeLLMService{
 		chatFn: func(ctx context.Context, req chat.Request) (string, error) {

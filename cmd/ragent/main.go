@@ -79,14 +79,19 @@ func main() {
 	}
 	idempotentGuard := idempotent.New(rdb)
 
+	globalRateLimitCfg := cfg.RAG.RateLimit.Global
+	chatMaxConcurrent := globalRateLimitCfg.MaxConcurrent
+	if !globalRateLimitCfg.IsEnabledByDefault() {
+		chatMaxConcurrent = 0
+	}
 	queueLimiter := ratelimit.NewFairQueueLimiter(
 		"rag:chat",
 		rdb,
 		ratelimit.LimiterConfig{
-			MaxConcurrent:  cfg.RAG.RateLimit.Global.MaxConcurrent,
-			MaxWaitSeconds: cfg.RAG.RateLimit.Global.MaxWaitSeconds,
-			LeaseSeconds:   cfg.RAG.RateLimit.Global.LeaseSeconds,
-			PollIntervalMs: cfg.RAG.RateLimit.Global.PollIntervalMs,
+			MaxConcurrent:  chatMaxConcurrent,
+			MaxWaitSeconds: globalRateLimitCfg.MaxWaitSeconds,
+			LeaseSeconds:   globalRateLimitCfg.LeaseSeconds,
+			PollIntervalMs: globalRateLimitCfg.PollIntervalMs,
 		},
 	)
 	defer queueLimiter.Shutdown()
@@ -103,7 +108,7 @@ func main() {
 			MaxConcurrent:  uploadSemaphoreCfg.MaxConcurrent,
 			MaxWaitSeconds: uploadSemaphoreCfg.MaxWaitSeconds,
 			LeaseSeconds:   uploadSemaphoreCfg.LeaseSeconds,
-			PollIntervalMs: cfg.RAG.RateLimit.Global.PollIntervalMs,
+			PollIntervalMs: globalRateLimitCfg.PollIntervalMs,
 		},
 	)
 	defer documentUploadLimiter.Shutdown()
@@ -273,7 +278,7 @@ func main() {
 	})
 	intentResolverSvc.SetLLMService(preferredLLMService)
 	intentGuidanceSvc := rag.NewIntentGuidanceService(rag.GuidanceOptions{
-		Enabled:             cfg.RAG.Guidance.Enabled,
+		Enabled:             cfg.RAG.Guidance.IsEnabledByDefault(),
 		AmbiguityScoreRatio: cfg.RAG.Guidance.AmbiguityScoreRatio,
 		AmbiguityMargin:     cfg.RAG.Guidance.AmbiguityMargin,
 		MaxOptions:          cfg.RAG.Guidance.MaxOptions,
@@ -299,7 +304,7 @@ func main() {
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
 	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
 
-	vectorRetriever := rag.NewVectorRetriever(vecStore, embService, kbRepo, 10)
+	vectorRetriever := rag.NewVectorRetriever(vecStore, embService, kbRepo, cfg.RAG.Search.DefaultTopK)
 	searchBackend := rag.NewKnowledgeSearchBackend(gormDB, kbRepo)
 	searchChannels := make([]rag.SearchChannel, 0, 4)
 	if cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault() {
@@ -380,18 +385,20 @@ func main() {
 		memSvc,
 	)
 	ragPipeline.SetMessageChunkSize(cfg.AI.Stream.MessageChunkSize)
+	ragPipeline.SetStreamTimeout(cfg.RAG.Default.SSETimeoutDuration())
+	ragPipeline.SetDefaultTopK(cfg.RAG.Search.DefaultTopK)
 	ragPipeline.SetPreferredLLMService(preferredLLMService)
 	ragPipeline.SetMcpContextProvider(mcpContextProvider)
 	ragPipeline.SetIntentResolver(intentResolverSvc)
 	ragPipeline.SetIntentGuidanceService(intentGuidanceSvc)
-	if cfg.RAG.Trace.Enabled {
+	if cfg.RAG.Trace.IsEnabledByDefault() {
 		ragPipeline.SetTraceRecorder(rag.NewDBTraceRecorder(gormDB, cfg.RAG.Trace.MaxErrorLength))
 	}
 	ragChatService := rag.NewQueuedChatService(
 		ragPipeline,
 		queueLimiter,
 		memSvc,
-		time.Duration(cfg.RAG.RateLimit.Global.MaxWaitSeconds)*time.Second,
+		time.Duration(globalRateLimitCfg.MaxWaitSeconds)*time.Second,
 	)
 	ragCtl := rag.NewController(ragChatService)
 	ragCtl.SetIdempotentGuard(idempotentGuard)
@@ -414,7 +421,7 @@ func main() {
 	{
 		api.GET("/limiter-test", func(c *gin.Context) {
 			err := queueLimiter.Acquire(c.Request.Context(), ratelimit.AcquireRequest{
-				MaxWait: time.Duration(cfg.RAG.RateLimit.Global.MaxWaitSeconds) * time.Second,
+				MaxWait: time.Duration(globalRateLimitCfg.MaxWaitSeconds) * time.Second,
 				OnAcquire: func() {
 					c.JSON(http.StatusOK, convention.Success("acquired"))
 				},
@@ -494,7 +501,7 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
-		registerRagEvalRoute(api, llmRewriter, &ragEvalRetriever{Retriever: enrichedRetriever, mcp: mcpContextProvider}, cfg.App.Eval.Enabled, intentResolverSvc)
+		registerRagEvalRoute(api, llmRewriter, &ragEvalRetriever{Retriever: enrichedRetriever, mcp: mcpContextProvider}, cfg.App.Eval.Enabled, cfg.RAG.Search.DefaultTopK, intentResolverSvc)
 		demoH := newDemoHandler()
 		if hasVLM {
 			demoH = newDemoHandlerWithVLM(vlmService)
@@ -744,7 +751,7 @@ func registerStatusRoutes(r *gin.Engine) {
 	})
 }
 
-func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retriever rag.Retriever, enabled bool, resolvers ...rag.IntentResolutionService) {
+func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retriever rag.Retriever, enabled bool, topK int, resolvers ...rag.IntentResolutionService) {
 	if !enabled {
 		return
 	}
@@ -752,7 +759,7 @@ func registerRagEvalRoute(api *gin.RouterGroup, rewriter rag.QueryRewriter, retr
 	if len(resolvers) > 0 {
 		resolver = resolvers[0]
 	}
-	api.GET("/rag/eval", ragEval(rewriter, retriever, resolver))
+	api.GET("/rag/eval", ragEval(rewriter, retriever, resolver, topK))
 }
 
 func setupAI(cfg *config.Config, logger *slog.Logger) (chat.LLMService, chat.LLMService, embedding.Service, rerank.Service, vlm.Service, bool) {
@@ -800,7 +807,26 @@ const preferredLocalChatModel = "qwen3.6:latest"
 const defaultOllamaURL = "http://localhost:11434"
 
 func buildPreferredLLMService(aiCfg config.AIConfig, health *model.HealthStore, executor *model.RoutingExecutor, chatClients []chat.ChatClient, fallback chat.LLMService) chat.LLMService {
-	return fallback
+	localCfg, ok := buildLocalPreferredChatConfig(aiCfg)
+	if !ok {
+		return fallback
+	}
+
+	localClients := buildChatClients(localCfg)
+	if len(localClients) == 0 {
+		return fallback
+	}
+
+	localSelector := model.NewSelector(localCfg, health)
+	localService := chat.NewRoutingLLMService(
+		localSelector,
+		health,
+		executor,
+		localClients,
+		chat.NewFirstPacketProbe(),
+		time.Duration(aiCfg.Selection.FirstPacketTimeoutSeconds)*time.Second,
+	)
+	return chat.NewFallbackLLMService(localService, fallback)
 }
 
 func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool) {
@@ -837,7 +863,8 @@ func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool
 }
 
 func normalizeOllamaProvider(provider config.AIProviderConfig) config.AIProviderConfig {
-	if strings.TrimSpace(provider.Protocol) == "" {
+	switch strings.ToLower(strings.TrimSpace(provider.Protocol)) {
+	case "", "ollama":
 		provider.Protocol = "openai-compatible"
 	}
 	if strings.TrimSpace(provider.URL) == "" {
@@ -986,7 +1013,7 @@ func ragSettings(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.IntentResolutionService) gin.HandlerFunc {
+func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.IntentResolutionService, topK int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		question := c.Query("question")
 		if question == "" {
@@ -1019,7 +1046,7 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			RewrittenQuestion: rewrittenQuestion,
 			SubQuestions:      subQuestions,
 			Intents:           subIntents,
-			TopK:              10,
+			TopK:              resolveEvalTopK(topK),
 		}
 		mcpContext := ""
 		hasMcp := false
@@ -1069,6 +1096,13 @@ func ragEval(rewriter rag.QueryRewriter, retriever rag.Retriever, resolver rag.I
 			"latencyMs":              time.Since(start).Milliseconds(),
 		}))
 	}
+}
+
+func resolveEvalTopK(topK int) int {
+	if topK > 0 {
+		return topK
+	}
+	return 10
 }
 
 type ragEvalRetriever struct {

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAIProvidersMapParsing(t *testing.T) {
@@ -187,10 +188,88 @@ ai:
 	}
 }
 
+func TestLoadAppliesAIJavaDefaults(t *testing.T) {
+	yaml := `
+ai:
+  providers:
+    openai:
+      url: https://api.openai.com
+      api-key: test
+      protocol: openai-compatible
+      endpoints:
+        chat: /v1/chat/completions
+        embedding: /v1/embeddings
+        rerank: /v1/rerank
+        vlm: /v1/chat/completions
+  chat:
+    candidates:
+      - id: chat-default
+        provider: openai
+        model: chat-default
+  embedding:
+    candidates:
+      - id: emb-default
+        provider: openai
+        model: emb-default
+  rerank:
+    candidates:
+      - id: rerank-default
+        provider: openai
+        model: rerank-default
+  vlm:
+    candidates:
+      - id: vlm-default
+        provider: openai
+        model: vlm-default
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.AI.Selection.FailureThreshold != 2 {
+		t.Fatalf("unexpected default failure threshold: %d", cfg.AI.Selection.FailureThreshold)
+	}
+	if cfg.AI.Selection.OpenDurationMs != 30000 {
+		t.Fatalf("unexpected default open duration: %d", cfg.AI.Selection.OpenDurationMs)
+	}
+	if cfg.AI.Selection.FirstPacketTimeoutSeconds != 60 {
+		t.Fatalf("unexpected default first packet timeout: %d", cfg.AI.Selection.FirstPacketTimeoutSeconds)
+	}
+	if cfg.AI.Stream.MessageChunkSize != 5 {
+		t.Fatalf("unexpected default stream chunk size: %d", cfg.AI.Stream.MessageChunkSize)
+	}
+	if cfg.AI.Chat.Candidates[0].Priority != 100 ||
+		cfg.AI.Embedding.Candidates[0].Priority != 100 ||
+		cfg.AI.Rerank.Candidates[0].Priority != 100 ||
+		cfg.AI.VLM.Candidates[0].Priority != 100 {
+		t.Fatalf("expected Java default candidate priorities 100, got chat=%d embedding=%d rerank=%d vlm=%d",
+			cfg.AI.Chat.Candidates[0].Priority,
+			cfg.AI.Embedding.Candidates[0].Priority,
+			cfg.AI.Rerank.Candidates[0].Priority,
+			cfg.AI.VLM.Candidates[0].Priority,
+		)
+	}
+	if cfg.RAG.RateLimit.Global.MaxConcurrent != 50 ||
+		cfg.RAG.RateLimit.Global.MaxWaitSeconds != 20 ||
+		cfg.RAG.RateLimit.Global.LeaseSeconds != 600 ||
+		cfg.RAG.RateLimit.Global.PollIntervalMs != 200 {
+		t.Fatalf("expected Java rate-limit defaults, got %+v", cfg.RAG.RateLimit.Global)
+	}
+}
+
 func TestLoadParsesRAGSearchConfig(t *testing.T) {
 	yaml := `
 rag:
   search:
+    default-top-k: 12
     channels:
       vector-global:
         candidate-budget: 80
@@ -220,8 +299,60 @@ rag:
 	if cfg.RAG.Search.Fusion.RerankCandidateLimit != 25 {
 		t.Fatalf("unexpected rerank candidate limit: %d", cfg.RAG.Search.Fusion.RerankCandidateLimit)
 	}
+	if cfg.RAG.Search.DefaultTopK != 12 {
+		t.Fatalf("unexpected default topK: %d", cfg.RAG.Search.DefaultTopK)
+	}
 	if cfg.RAG.Search.Channels.VectorGlobal.CandidateBudget != 80 {
 		t.Fatalf("unexpected candidate budget: %d", cfg.RAG.Search.Channels.VectorGlobal.CandidateBudget)
+	}
+	if !cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
+		t.Fatal("expected vector global channel to default enabled like Java")
+	}
+	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefaultWith(false) {
+		t.Fatal("expected keyword channel to default disabled like Java")
+	}
+}
+
+func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
+	yaml := `rag: {}`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	search := cfg.RAG.Search
+	if search.DefaultTopK != 10 {
+		t.Fatalf("unexpected default topK: %d", search.DefaultTopK)
+	}
+	if search.Channels.VectorGlobal.TopKMultiplier != 3 ||
+		search.Channels.VectorGlobal.CandidateBudget != 100 ||
+		search.Channels.VectorGlobal.ConfidenceThreshold != 0.6 ||
+		search.Channels.VectorGlobal.SingleIntentSupplementThreshold != 0.8 {
+		t.Fatalf("unexpected vector-global defaults: %+v", search.Channels.VectorGlobal)
+	}
+	if search.Channels.IntentDirected.MinIntentScore != 0.4 ||
+		search.Channels.IntentDirected.TopKMultiplier != 2 {
+		t.Fatalf("unexpected intent-directed defaults: %+v", search.Channels.IntentDirected)
+	}
+	if search.Channels.Keyword.Mode != "both" || search.Channels.Keyword.TopKMultiplier != 2 {
+		t.Fatalf("unexpected keyword defaults: %+v", search.Channels.Keyword)
+	}
+	if search.Channels.WebSearch.Count != 5 ||
+		search.Channels.WebSearch.TimeoutSeconds != 10 ||
+		search.Channels.WebSearch.APIURL != "https://ydc-index.io/v1/search" {
+		t.Fatalf("unexpected web-search defaults: %+v", search.Channels.WebSearch)
+	}
+	if search.Fusion.Strategy != "rrf" ||
+		search.Fusion.RRFK != 60 ||
+		search.Fusion.RerankCandidateLimit != 50 {
+		t.Fatalf("unexpected fusion defaults: %+v", search.Fusion)
 	}
 }
 
@@ -340,6 +471,93 @@ func TestRAGRateLimitGlobalDefaultEnabled(t *testing.T) {
 	var cfg RAGRateLimitGlobalConfig
 	if !cfg.IsEnabledByDefault() {
 		t.Fatal("expected omitted rate limit enabled to default true like Java")
+	}
+}
+
+func TestLoadParsesRAGDefaultSSETimeout(t *testing.T) {
+	yaml := `
+rag:
+  default:
+    sse-timeout-ms: 60000
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := cfg.RAG.Default.SSETimeoutDuration(); got != 60*time.Second {
+		t.Fatalf("unexpected sse timeout: %s", got)
+	}
+}
+
+func TestRAGDefaultSSETimeoutDefault(t *testing.T) {
+	var cfg RAGDefaultConfig
+	if got := cfg.SSETimeoutDuration(); got != 5*time.Minute {
+		t.Fatalf("expected default sse timeout 5m, got %s", got)
+	}
+}
+
+func TestLoadParsesRAGGuidanceEnabledConfig(t *testing.T) {
+	yaml := `
+rag:
+  guidance:
+    enabled: false
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Guidance.IsEnabledByDefault() {
+		t.Fatal("expected explicit guidance false to disable guidance")
+	}
+}
+
+func TestRAGGuidanceDefaultEnabled(t *testing.T) {
+	var cfg RAGGuidanceConfig
+	if !cfg.IsEnabledByDefault() {
+		t.Fatal("expected omitted guidance enabled to default true like Java")
+	}
+}
+
+func TestLoadParsesRAGTraceEnabledConfig(t *testing.T) {
+	yaml := `
+rag:
+  trace:
+    enabled: false
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Trace.IsEnabledByDefault() {
+		t.Fatal("expected explicit trace false to disable trace recorder")
+	}
+}
+
+func TestRAGTraceDefaultEnabled(t *testing.T) {
+	var cfg RAGTraceConfig
+	if !cfg.IsEnabledByDefault() {
+		t.Fatal("expected omitted trace enabled to default true like Java")
 	}
 }
 

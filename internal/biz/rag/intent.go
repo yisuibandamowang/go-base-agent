@@ -668,7 +668,7 @@ func NewIntentGuidanceService(opts GuidanceOptions) *IntentGuidanceService {
 		opts.AmbiguityMargin = 0.15
 	}
 	if opts.MaxOptions <= 0 {
-		opts.MaxOptions = 3
+		opts.MaxOptions = 6
 	}
 	return &IntentGuidanceService{opts: opts}
 }

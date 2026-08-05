@@ -84,6 +84,28 @@ func (m *recordingMemoryService) LoadConversation(ctx context.Context, conversat
 	return m.conversation, nil
 }
 
+type timeoutMemoryService struct {
+	started chan struct{}
+	err     error
+}
+
+func (m *timeoutMemoryService) LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error) {
+	if m.started != nil {
+		close(m.started)
+	}
+	<-ctx.Done()
+	m.err = ctx.Err()
+	return nil, ctx.Err()
+}
+
+func (m *timeoutMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
+	return nil
+}
+
+func (m *timeoutMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	return nil, nil
+}
+
 type titleAwareMemoryService struct {
 	recordingMemoryService
 	conversation      *Conversation
@@ -109,12 +131,14 @@ func (r staticRetriever) Retrieve(ctx context.Context, question string, topK int
 type recordingRetriever struct {
 	question string
 	queries  []string
+	topKs    []int
 	chunks   []RetrievedChunk
 }
 
 func (r *recordingRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
 	r.question = question
 	r.queries = append(r.queries, question)
+	r.topKs = append(r.topKs, topK)
 	return r.chunks, nil
 }
 
@@ -217,6 +241,66 @@ func TestPipeline_StreamChat_Basic(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: done") {
 		t.Fatal("missing done event")
+	}
+}
+
+func TestPipeline_StreamChat_UsesConfiguredDefaultTopK(t *testing.T) {
+	done := make(chan struct{})
+	retriever := &recordingRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			go func() {
+				cb.OnContent("hello")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.SetDefaultTopK(15)
+	p.StreamChat(context.Background(), "test", "conv-1", "task-1", false, s)
+
+	<-done
+	if len(retriever.topKs) == 0 || retriever.topKs[0] != 15 {
+		t.Fatalf("expected default topK 15, got %+v", retriever.topKs)
+	}
+}
+
+func TestPipeline_StreamChat_UsesConfiguredTimeout(t *testing.T) {
+	mem := &timeoutMemoryService{started: make(chan struct{})}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, testRetriever(), mem)
+	p.SetStreamTimeout(20 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		p.StreamChat(ctx, "test", "conv-1", "task-1", false, s)
+		close(done)
+	}()
+
+	select {
+	case <-mem.started:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not enter memory load")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not finish after configured timeout")
+	}
+	if mem.err != context.DeadlineExceeded {
+		t.Fatalf("expected deadline exceeded, got %v", mem.err)
 	}
 }
 

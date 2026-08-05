@@ -27,6 +27,8 @@ type Pipeline struct {
 	trace            TraceRecorder
 	tasks            *streamTaskManager
 	messageChunkSize int
+	streamTimeout    time.Duration
+	defaultTopK      int
 }
 
 // NewPipeline creates a new RAG pipeline.
@@ -59,6 +61,16 @@ func (p *Pipeline) SetMessageChunkSize(size int) {
 	p.messageChunkSize = size
 }
 
+// SetStreamTimeout sets the SSE pipeline timeout.
+func (p *Pipeline) SetStreamTimeout(timeout time.Duration) {
+	p.streamTimeout = timeout
+}
+
+// SetDefaultTopK sets the default retrieval TopK for the pipeline.
+func (p *Pipeline) SetDefaultTopK(topK int) {
+	p.defaultTopK = topK
+}
+
 // SetPreferredLLMService sets the lightweight LLM used for non-RAG responses.
 func (p *Pipeline) SetPreferredLLMService(llm chat.LLMService) {
 	p.preferredLLM = llm
@@ -66,8 +78,12 @@ func (p *Pipeline) SetPreferredLLMService(llm chat.LLMService) {
 
 // StreamChat implements Service.StreamChat.
 func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
-	// Timeout context: the entire pipeline should complete within 120s
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	// Timeout context: the entire pipeline should complete within the configured window.
+	timeout := p.streamTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	task := p.tasks.register(taskID, sender, cancel)
 	defer p.tasks.unregister(taskID)
@@ -168,7 +184,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 
 	mcpCtx := p.buildMcpContext(ctx, q, resolvedSubIntents)
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
-	chunks, err := p.retrieveChunks(ctx, q, subQuestions, resolvedSubIntents, 10)
+	chunks, err := p.retrieveChunks(ctx, q, subQuestions, resolvedSubIntents, p.resolveDefaultTopK())
 	var kbCtx string
 	if err != nil {
 		retrieveSpan.finish(traceStatusError, err)
@@ -269,6 +285,13 @@ func (p *Pipeline) lightweightLLM() chat.LLMService {
 		return p.llm
 	}
 	return nil
+}
+
+func (p *Pipeline) resolveDefaultTopK() int {
+	if p != nil && p.defaultTopK > 0 {
+		return p.defaultTopK
+	}
+	return 10
 }
 
 func (p *Pipeline) startTraceRun(ctx context.Context, conversationID, taskID string) *TraceRunRecord {
