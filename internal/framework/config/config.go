@@ -220,6 +220,7 @@ type RAGKnowledgeConfig struct {
 	Schedule   RAGKnowledgeScheduleConfig   `mapstructure:"schedule"`
 	Feishu     RAGKnowledgeFeishuConfig     `mapstructure:"feishu"`
 	Confluence RAGKnowledgeConfluenceConfig `mapstructure:"confluence"`
+	Geelib     RAGKnowledgeGeelibConfig     `mapstructure:"geelib"`
 }
 
 type RAGKnowledgeScheduleConfig struct {
@@ -243,6 +244,28 @@ type RAGKnowledgeConfluenceConfig struct {
 	Username    string `mapstructure:"username"`
 	APIKey      string `mapstructure:"api-key"`
 	AccessToken string `mapstructure:"access-token"`
+}
+
+type RAGKnowledgeGeelibConfig struct {
+	Enabled        *bool    `mapstructure:"enabled"`
+	APIBaseURL     string   `mapstructure:"api-base-url"`
+	AppToken       string   `mapstructure:"app-token"`
+	UserMail       string   `mapstructure:"user-mail"`
+	UserToken      string   `mapstructure:"user-token"`
+	SessionCookie  string   `mapstructure:"session-cookie"`
+	WorkDir        string   `mapstructure:"work-dir"`
+	Command        string   `mapstructure:"command"`
+	Tool           string   `mapstructure:"tool"`
+	TimeoutSeconds int      `mapstructure:"timeout-seconds"`
+	MaxBytes       int64    `mapstructure:"max-bytes"`
+	Domains        []string `mapstructure:"domains"`
+}
+
+func (c RAGKnowledgeGeelibConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type RAGMCPConfig struct {
@@ -671,9 +694,9 @@ func expandEnv(s string) string {
 		if val, ok := os.LookupEnv(name); ok {
 			return val
 		}
-		if len(parts) >= 3 && parts[2] != "" {
+		if len(parts) >= 3 {
 			return parts[2]
 		}
-		return match
+		return ""
 	})
 }

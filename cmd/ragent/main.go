@@ -161,6 +161,15 @@ func main() {
 	}
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
+	if geelibCfg := cfg.RAG.Knowledge.Geelib; geelibCfg.IsEnabledByDefault() {
+		docHandler.SetInternalURLFetcher(crawler.NewGeelibSource(crawler.GeelibSourceConfig{
+			Command:  geelibCfg.Command,
+			WorkDir:  geelibCfg.WorkDir,
+			Timeout:  time.Duration(geelibCfg.TimeoutSeconds) * time.Second,
+			MaxBytes: geelibCfg.MaxBytes,
+			Domains:  geelibCfg.Domains,
+		}))
+	}
 
 	documentScheduleSvc := knowledgeService.NewDocumentScheduleService(
 		gormDB,

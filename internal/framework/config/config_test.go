@@ -356,6 +356,31 @@ func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadExpandsEmptyDefaultEnvPlaceholder(t *testing.T) {
+	yaml := `
+rag:
+  knowledge:
+    geelib:
+      work-dir: ${GEELIB_CLI_WORK_DIR:}
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_ = os.Unsetenv("GEELIB_CLI_WORK_DIR")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Knowledge.Geelib.WorkDir != "" {
+		t.Fatalf("expected empty work-dir, got %q", cfg.RAG.Knowledge.Geelib.WorkDir)
+	}
+}
+
 func TestLoadParsesRAGContextEnrichConfig(t *testing.T) {
 	yaml := `
 rag:

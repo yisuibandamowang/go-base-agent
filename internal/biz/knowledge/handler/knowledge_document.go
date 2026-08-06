@@ -15,6 +15,7 @@ import (
 	"time"
 
 	coreparser "go-base-agent/internal/biz/core/parser"
+	"go-base-agent/internal/biz/crawler"
 	"go-base-agent/internal/biz/knowledge/dto"
 	"go-base-agent/internal/biz/knowledge/service"
 	"go-base-agent/internal/biz/rag"
@@ -26,14 +27,19 @@ import (
 
 // DocumentHandler 文档管理 HTTP 处理层。
 type DocumentHandler struct {
-	svc           *service.DocumentService
-	fileStore     *FileStore
-	uploadLimiter uploadLimiter
-	uploadMaxWait time.Duration
+	svc                *service.DocumentService
+	fileStore          *FileStore
+	internalURLFetcher internalURLFetcher
+	uploadLimiter      uploadLimiter
+	uploadMaxWait      time.Duration
 }
 
 type uploadLimiter interface {
 	Acquire(ctx context.Context, req ratelimit.AcquireRequest) error
+}
+
+type internalURLFetcher interface {
+	FetchDocuments(ctx context.Context, rawURL string) ([]crawler.Document, error)
 }
 
 // NewDocumentHandler 创建 DocumentHandler。
@@ -45,6 +51,11 @@ func NewDocumentHandler(svc *service.DocumentService, fs *FileStore) *DocumentHa
 func (h *DocumentHandler) SetUploadLimiter(limiter uploadLimiter, maxWait time.Duration) {
 	h.uploadLimiter = limiter
 	h.uploadMaxWait = maxWait
+}
+
+// SetInternalURLFetcher 设置内部 URL 拉取器。
+func (h *DocumentHandler) SetInternalURLFetcher(fetcher internalURLFetcher) {
+	h.internalURLFetcher = fetcher
 }
 
 // Upload POST /knowledge-base/:id/docs/upload
@@ -173,6 +184,11 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 		req.PipelineID = vals[0]
 	}
 
+	if strings.EqualFold(strings.TrimSpace(req.SourceType), "internal_url") {
+		h.uploadInternalURLDocuments(c, kbID, req, userID(c))
+		return
+	}
+
 	if req.DocName == "" {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "缺少文件名"))
 		return
@@ -214,6 +230,94 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+type internalURLUploadResp struct {
+	Total     int                 `json:"total"`
+	Success   int                 `json:"success"`
+	Failed    int                 `json:"failed"`
+	Documents []*dto.DocumentResp `json:"documents"`
+	Errors    []string            `json:"errors,omitempty"`
+}
+
+func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string, req dto.CreateDocumentReq, operator string) {
+	if h.internalURLFetcher == nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "内部URL拉取器未配置"))
+		return
+	}
+	kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), kbID)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "查询知识库失败: "+err.Error()))
+		return
+	}
+	docs, err := h.internalURLFetcher.FetchDocuments(c.Request.Context(), req.SourceLocation)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	if len(docs) == 0 {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "未读取到内部文档内容"))
+		return
+	}
+	if h.fileStore == nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "文件存储未配置"))
+		return
+	}
+	resp := internalURLUploadResp{Total: len(docs)}
+	for _, doc := range docs {
+		docReq := req
+		docReq.SourceType = "internal_url"
+		docReq.SourceLocation = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
+		docReq.DocName = firstNonEmpty(doc.Meta.Title, doc.Meta.ID)
+		docReq.FileURL = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
+		docReq.FileType = internalURLFileType(doc.Meta.MimeType, docReq.DocName)
+		docReq.FileSize = int64(len(doc.Content))
+		created, err := h.svc.CreateDocument(c.Request.Context(), kbID, docReq, operator)
+		if err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
+			continue
+		}
+		if err := h.svc.RunChunkNow(c.Request.Context(), created.ID, operator); err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		updated, err := h.svc.GetDocument(c.Request.Context(), created.ID)
+		if err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		resp.Success++
+		resp.Documents = append(resp.Documents, updated)
+	}
+	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+func internalURLFileType(mimeType, docName string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "text/markdown":
+		return "md"
+	case "text/plain":
+		if strings.HasSuffix(strings.ToLower(docName), ".md") {
+			return "md"
+		}
+		return "txt"
+	case "text/html":
+		return "html"
+	case "application/pdf":
+		return "pdf"
+	}
+	if ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(docName)), "."); ext != "" {
+		return ext
+	}
+	return "md"
 }
 
 func fetchRemoteUploadFile(ctx context.Context, rawURL string) ([]byte, string, string, error) {
@@ -414,6 +518,15 @@ func parseInt16(value string) int16 {
 	default:
 		return 0
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // ListDocs GET /knowledge-base/:id/docs

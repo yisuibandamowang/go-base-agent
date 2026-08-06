@@ -89,6 +89,20 @@ rag:
       username: ${CONFLUENCE_USERNAME}
       api-key: ${CONFLUENCE_API_KEY}
       access-token: ${CONFLUENCE_ACCESS_TOKEN}
+    geelib:
+      enabled: ${GEELIB_ENABLED:true}
+      api-base-url: ${GEELIB_API_BASE_URL:}
+      app-token: ${GEELIB_APP_TOKEN:}
+      user-mail: ${GEELIB_USER_MAIL:}
+      user-token: ${GEELIB_USER_TOKEN:}
+      session-cookie: ${GEELIB_SESSION_COOKIE:}
+      work-dir: ${GEELIB_CLI_WORK_DIR:}
+      command: ${GEELIB_CLI_COMMAND:editor-cli}
+      tool: ${GEELIB_CLI_TOOL:}
+      timeout-seconds: ${GEELIB_CLI_TIMEOUT_SECONDS:30}
+      max-bytes: ${GEELIB_CLI_MAX_BYTES:52428800}
+      domains:
+        - geelib.qihoo.net
 
   mcp:
     servers:
