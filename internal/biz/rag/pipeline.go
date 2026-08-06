@@ -85,6 +85,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	persistenceCtx := context.WithoutCancel(ctx)
 	task := p.tasks.register(taskID, sender, cancel)
 	defer p.tasks.unregister(taskID)
 
@@ -93,7 +94,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		if traceRun == nil || p.trace == nil {
 			return
 		}
-		if finishErr := p.trace.FinishRun(ctx, traceRun.TraceID, status, err); finishErr != nil {
+		if finishErr := p.trace.FinishRun(persistenceCtx, traceRun.TraceID, status, err); finishErr != nil {
 			slog.Warn("rag trace: finish run failed", "traceId", traceRun.TraceID, "err", finishErr)
 		}
 	}
@@ -166,10 +167,10 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	if p.guidance != nil {
 		decision := p.guidance.DetectAmbiguity(ctx, q, resolvedSubIntents)
 		if decision.Action == GuidanceActionPrompt && strings.TrimSpace(decision.Prompt) != "" {
-			sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
-			_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
+			sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
+			_ = p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question))
 			sender.SendMessage(MsgTypeResponse, decision.Prompt)
-			sender.SendFinish("", resolveConversationTitle(ctx, p.memory, conversationID, sendTitleOnComplete))
+			sender.SendFinish("", resolveConversationTitle(persistenceCtx, p.memory, conversationID, sendTitleOnComplete))
 			sender.SendDone()
 			sender.Close()
 			finishTraceRun(traceStatusSuccess, nil)
@@ -178,7 +179,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	if systemPrompt, ok := p.systemOnlyPrompt(resolvedSubIntents); ok {
-		p.streamSystemOnlyResponse(ctx, q, conversationID, history, task, sender, traceRun, p.lightweightLLM(), systemPrompt)
+		p.streamSystemOnlyResponse(ctx, persistenceCtx, q, conversationID, history, task, sender, traceRun, p.lightweightLLM(), systemPrompt)
 		return
 	}
 
@@ -189,7 +190,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	if err != nil {
 		retrieveSpan.finish(traceStatusError, err)
 		slog.Warn("rag: retrieve failed", "err", err)
-		p.streamRetrievalFallback(ctx, conversationID, question, sender, task, p.lightweightLLM(), "检索失败原因：知识库检索执行失败："+err.Error())
+		p.streamRetrievalFallback(ctx, persistenceCtx, conversationID, question, sender, task, p.lightweightLLM(), "检索失败原因：知识库检索执行失败："+err.Error())
 		finishTraceRun(traceStatusSuccess, nil)
 		return
 	} else if len(chunks) > 0 {
@@ -202,13 +203,13 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		retrieveSpan.finish(traceStatusSuccess, nil)
 		if strings.TrimSpace(mcpCtx) == "" {
 			slog.Warn("rag: no chunks found for question", "question", runeLimit(q, 50))
-			p.streamRetrievalFallback(ctx, conversationID, question, sender, task, p.lightweightLLM(), "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
+			p.streamRetrievalFallback(ctx, persistenceCtx, conversationID, question, sender, task, p.lightweightLLM(), "检索失败原因：知识库中未检索到相关内容，已完成向量检索但没有召回与问题相关的文档片段。")
 			finishTraceRun(traceStatusSuccess, nil)
 			return
 		}
 	}
 
-	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
+	sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
 
 	req := p.prompt.Build(PromptContext{
 		Question:     q,
@@ -224,12 +225,12 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		answerLLM = p.lightweightLLM()
 	}
 
-	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+	if err := p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question)); err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
 	}
 
 	cb := &pipelineCallback{
-		ctx:                 ctx,
+		ctx:                 persistenceCtx,
 		conversationID:      conversationID,
 		memory:              p.memory,
 		sender:              sender,
@@ -313,12 +314,13 @@ func (p *Pipeline) startTraceNode(ctx context.Context, run *TraceRunRecord, pare
 	if p.trace == nil || run == nil || run.TraceID == "" {
 		return nil
 	}
+	finishCtx := context.WithoutCancel(ctx)
 	node, err := p.trace.StartNode(ctx, run.TraceID, parentNodeID, nodeName, nodeType, depth)
 	if err != nil {
 		slog.Warn("rag trace: start node failed", "traceId", run.TraceID, "node", nodeName, "err", err)
 		return nil
 	}
-	return &traceSpan{ctx: ctx, recorder: p.trace, traceID: run.TraceID, nodeID: node.NodeID}
+	return &traceSpan{ctx: finishCtx, recorder: p.trace, traceID: run.TraceID, nodeID: node.NodeID}
 }
 
 func (p *Pipeline) buildMcpContext(ctx context.Context, question string, subIntents []SubQuestionIntent) string {
@@ -425,9 +427,9 @@ func deduplicateChunks(chunks []RetrievedChunk) []RetrievedChunk {
 	return deduped
 }
 
-func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, question string, sender *SSESender, task *streamTask, llm chat.LLMService, reason string) {
-	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
-	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+func (p *Pipeline) streamRetrievalFallback(ctx, persistenceCtx context.Context, conversationID, question string, sender *SSESender, task *streamTask, llm chat.LLMService, reason string) {
+	sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
+	if err := p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question)); err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
 	}
 	if task != nil && task.isCancelled() {
@@ -443,7 +445,7 @@ func (p *Pipeline) streamRetrievalFallback(ctx context.Context, conversationID, 
 		},
 	}
 	cb := &pipelineCallback{
-		ctx:                 ctx,
+		ctx:                 persistenceCtx,
 		conversationID:      conversationID,
 		memory:              p.memory,
 		sender:              sender,
@@ -737,11 +739,11 @@ func firstSystemPromptTemplate(subIntents []SubQuestionIntent) string {
 	return ""
 }
 
-func (p *Pipeline) streamSystemOnlyResponse(ctx context.Context, question, conversationID string, history []chat.Message, task *streamTask, sender *SSESender, traceRun *TraceRunRecord, llm chat.LLMService, customPrompt string) {
-	_ = p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question))
+func (p *Pipeline) streamSystemOnlyResponse(ctx, persistenceCtx context.Context, question, conversationID string, history []chat.Message, task *streamTask, sender *SSESender, traceRun *TraceRunRecord, llm chat.LLMService, customPrompt string) {
+	_ = p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question))
 	req := p.buildSystemOnlyRequest(question, history, customPrompt)
 	cb := &pipelineCallback{
-		ctx:              ctx,
+		ctx:              persistenceCtx,
 		conversationID:   conversationID,
 		memory:           p.memory,
 		sender:           sender,

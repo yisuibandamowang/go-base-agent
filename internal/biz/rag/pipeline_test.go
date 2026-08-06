@@ -84,6 +84,31 @@ func (m *recordingMemoryService) LoadConversation(ctx context.Context, conversat
 	return m.conversation, nil
 }
 
+type contextSensitiveMemoryService struct {
+	recordingMemoryService
+}
+
+func (m *contextSensitiveMemoryService) SaveMessage(ctx context.Context, conversationID string, msg chat.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return m.recordingMemoryService.SaveMessage(ctx, conversationID, msg)
+}
+
+func (m *contextSensitiveMemoryService) AppendMessage(ctx context.Context, conversationID string, msg chat.Message) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return m.recordingMemoryService.AppendMessage(ctx, conversationID, msg)
+}
+
+func (m *contextSensitiveMemoryService) LoadConversation(ctx context.Context, conversationID string) (*Conversation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return m.recordingMemoryService.LoadConversation(ctx, conversationID)
+}
+
 type timeoutMemoryService struct {
 	started chan struct{}
 	err     error
@@ -126,6 +151,17 @@ type staticRetriever struct {
 
 func (r staticRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
 	return r.chunks, r.err
+}
+
+type cancelingRetriever struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelingRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	if r.cancel != nil {
+		r.cancel()
+	}
+	return nil, nil
 }
 
 type recordingRetriever struct {
@@ -204,6 +240,37 @@ type staticMcpContextProvider struct {
 
 func (p staticMcpContextProvider) BuildContext(ctx context.Context, question string) (string, error) {
 	return p.context, p.err
+}
+
+type contextSensitiveTraceRecorder struct {
+	finishRunErr  error
+	finishNodeErr []error
+	finishStatus  string
+}
+
+func (r *contextSensitiveTraceRecorder) StartRun(ctx context.Context, conversationID, taskID string) (*TraceRunRecord, error) {
+	return &TraceRunRecord{TraceID: "trace-1"}, nil
+}
+
+func (r *contextSensitiveTraceRecorder) FinishRun(ctx context.Context, traceID, status string, err error) error {
+	r.finishStatus = status
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		r.finishRunErr = ctxErr
+		return ctxErr
+	}
+	return nil
+}
+
+func (r *contextSensitiveTraceRecorder) StartNode(ctx context.Context, traceID, parentNodeID, nodeName, nodeType string, depth int) (*TraceNodeRecord, error) {
+	return &TraceNodeRecord{NodeID: nodeName + "-node"}, nil
+}
+
+func (r *contextSensitiveTraceRecorder) FinishNode(ctx context.Context, traceID, nodeID, status string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		r.finishNodeErr = append(r.finishNodeErr, ctxErr)
+		return ctxErr
+	}
+	return nil
 }
 
 func TestPipeline_StreamChat_Basic(t *testing.T) {
@@ -663,6 +730,38 @@ func TestPipeline_StreamChat_RetrieveErrorPrefixesSpecificReasonThenGuidesWithLL
 	}
 	if strings.Index(body, reason) > strings.Index(body, guidance) {
 		t.Fatalf("expected retrieval reason before model guidance, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_PersistsFallbackAndTraceAfterContextCancelled(t *testing.T) {
+	parentCtx, cancel := context.WithCancel(context.Background())
+	mem := &contextSensitiveMemoryService{}
+	trace := &contextSensitiveTraceRecorder{}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, cancelingRetriever{cancel: cancel}, mem)
+	p.SetTraceRecorder(trace)
+	p.StreamChat(parentCtx, "扶摇 tag 去重的线上问题是怎么导致的？", "conv-1", "task-1", false, s)
+
+	if len(mem.saved) != 1 {
+		t.Fatalf("expected fallback user message to be saved after cancellation, got %d", len(mem.saved))
+	}
+	if mem.saved[0].Role != chat.RoleUser {
+		t.Fatalf("expected saved user message, got %+v", mem.saved[0])
+	}
+	if trace.finishRunErr != nil {
+		t.Fatalf("expected trace run finish to ignore request cancellation, got %v", trace.finishRunErr)
+	}
+	if len(trace.finishNodeErr) != 0 {
+		t.Fatalf("expected trace node finish to ignore request cancellation, got %v", trace.finishNodeErr)
+	}
+	if trace.finishStatus != traceStatusSuccess {
+		t.Fatalf("expected trace run SUCCESS, got %q", trace.finishStatus)
 	}
 }
 
