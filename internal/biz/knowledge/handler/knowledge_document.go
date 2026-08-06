@@ -283,19 +283,8 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 			resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
 			continue
 		}
-		if err := h.svc.RunChunkNow(c.Request.Context(), created.ID, operator); err != nil {
-			resp.Failed++
-			resp.Errors = append(resp.Errors, err.Error())
-			continue
-		}
-		updated, err := h.svc.GetDocument(c.Request.Context(), created.ID)
-		if err != nil {
-			resp.Failed++
-			resp.Errors = append(resp.Errors, err.Error())
-			continue
-		}
 		resp.Success++
-		resp.Documents = append(resp.Documents, updated)
+		resp.Documents = append(resp.Documents, created)
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
 }
