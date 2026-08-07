@@ -342,6 +342,45 @@ func (s *DocumentService) findInternalURLDocumentByCanonicalKey(ctx context.Cont
 	return &doc, nil
 }
 
+// ListInternalURLDocumentsBySourceKeys 查询同一知识库内已存在的内部 URL 文档。
+func (s *DocumentService) ListInternalURLDocumentsBySourceKeys(ctx context.Context, kbID string, canonicalKeys, fileURLs []string) ([]dto.DocumentResp, error) {
+	normalizedKeys := make([]string, 0, len(canonicalKeys))
+	for _, key := range canonicalKeys {
+		if key = strings.TrimSpace(key); key != "" {
+			normalizedKeys = append(normalizedKeys, key)
+		}
+	}
+	normalizedURLs := make([]string, 0, len(fileURLs))
+	for _, fileURL := range fileURLs {
+		if fileURL = strings.TrimSpace(fileURL); fileURL != "" {
+			normalizedURLs = append(normalizedURLs, fileURL)
+		}
+	}
+	if len(normalizedKeys) == 0 && len(normalizedURLs) == 0 {
+		return nil, nil
+	}
+
+	var docs []model.KnowledgeDocument
+	query := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("kb_id = ? AND source_type = ?", kbID, "internal_url")
+	switch {
+	case len(normalizedKeys) > 0 && len(normalizedURLs) > 0:
+		query = query.Where("canonical_source_key IN ? OR file_url IN ?", normalizedKeys, normalizedURLs)
+	case len(normalizedKeys) > 0:
+		query = query.Where("canonical_source_key IN ?", normalizedKeys)
+	default:
+		query = query.Where("file_url IN ?", normalizedURLs)
+	}
+	if err := query.Find(&docs).Error; err != nil {
+		return nil, fmt.Errorf("list internal url documents by source keys: %w", err)
+	}
+	resp := make([]dto.DocumentResp, 0, len(docs))
+	for i := range docs {
+		resp = append(resp, *s.docToResp(&docs[i]))
+	}
+	return resp, nil
+}
+
 func (s *DocumentService) upsertInternalURLDocumentTx(ctx context.Context, doc *model.KnowledgeDocument) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		updates := map[string]any{

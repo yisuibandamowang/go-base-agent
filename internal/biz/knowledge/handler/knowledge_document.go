@@ -234,11 +234,25 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 }
 
 type internalURLUploadResp struct {
-	Total     int                 `json:"total"`
-	Success   int                 `json:"success"`
-	Failed    int                 `json:"failed"`
-	Documents []*dto.DocumentResp `json:"documents"`
-	Errors    []string            `json:"errors,omitempty"`
+	Total                 int                 `json:"total"`
+	Success               int                 `json:"success"`
+	Failed                int                 `json:"failed"`
+	ExistingUnchanged     int                 `json:"existingUnchanged"`
+	ExistingChunked       int                 `json:"existingChunked"`
+	ExistingEnabled       int                 `json:"existingEnabled"`
+	NewDocuments          int                 `json:"newDocuments"`
+	ChangedDocuments      int                 `json:"changedDocuments"`
+	Chunkable             int                 `json:"chunkable"`
+	SkippedChunked        int                 `json:"skippedChunked"`
+	Documents             []*dto.DocumentResp `json:"documents"`
+	ChunkableDocuments    []*dto.DocumentResp `json:"chunkableDocuments"`
+	SkippedChunkDocuments []*dto.DocumentResp `json:"skippedChunkDocuments"`
+	Errors                []string            `json:"errors,omitempty"`
+}
+
+type internalURLUploadItem struct {
+	doc crawler.Document
+	req dto.CreateDocumentReq
 }
 
 func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string, req dto.CreateDocumentReq, operator string) {
@@ -267,6 +281,9 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 	resp := internalURLUploadResp{Total: len(docs)}
 	parentURL := strings.TrimSpace(req.SourceLocation)
 	rootKey := service.InternalURLCanonicalSourceKey(parentURL)
+	items := make([]internalURLUploadItem, 0, len(docs))
+	canonicalKeys := make([]string, 0, len(docs))
+	fileURLs := make([]string, 0, len(docs))
 	for idx, doc := range docs {
 		docReq := req
 		docReq.SourceType = "internal_url"
@@ -287,6 +304,49 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 			docReq.ScheduleEnabled = 0
 			docReq.ScheduleCron = ""
 		}
+		items = append(items, internalURLUploadItem{doc: doc, req: docReq})
+		canonicalKeys = append(canonicalKeys, docReq.CanonicalSourceKey)
+		fileURLs = append(fileURLs, docReq.FileURL)
+	}
+	existingDocs, err := h.svc.ListInternalURLDocumentsBySourceKeys(c.Request.Context(), kbID, canonicalKeys, fileURLs)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	existingByCanonical := make(map[string]*dto.DocumentResp, len(existingDocs))
+	existingByURL := make(map[string]*dto.DocumentResp, len(existingDocs))
+	for i := range existingDocs {
+		doc := &existingDocs[i]
+		if key := strings.TrimSpace(doc.CanonicalSourceKey); key != "" {
+			existingByCanonical[key] = doc
+		}
+		if fileURL := strings.TrimSpace(doc.FileURL); fileURL != "" {
+			existingByURL[fileURL] = doc
+		}
+	}
+	for _, item := range items {
+		docReq := item.req
+		doc := item.doc
+		existing := existingByCanonical[strings.TrimSpace(docReq.CanonicalSourceKey)]
+		if existing == nil {
+			existing = existingByURL[strings.TrimSpace(docReq.FileURL)]
+		}
+		existingUnchanged := existing != nil &&
+			strings.TrimSpace(existing.SourceContentHash) != "" &&
+			existing.SourceContentHash == docReq.SourceContentHash
+		if existingUnchanged {
+			resp.ExistingUnchanged++
+			if existing.ChunkCount > 0 {
+				resp.ExistingChunked++
+			}
+			if existing.Enabled {
+				resp.ExistingEnabled++
+			}
+		} else if existing == nil {
+			resp.NewDocuments++
+		} else {
+			resp.ChangedDocuments++
+		}
 		created, err := h.svc.UpsertInternalURLDocument(c.Request.Context(), kbID, docReq, operator)
 		if err != nil {
 			resp.Failed++
@@ -302,6 +362,16 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		}
 		resp.Success++
 		resp.Documents = append(resp.Documents, created)
+		if docReq.SourceNodeType == "folder" {
+			continue
+		}
+		if existingUnchanged && existing != nil && existing.ChunkCount > 0 {
+			resp.SkippedChunked++
+			resp.SkippedChunkDocuments = append(resp.SkippedChunkDocuments, created)
+			continue
+		}
+		resp.Chunkable++
+		resp.ChunkableDocuments = append(resp.ChunkableDocuments, created)
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
 }

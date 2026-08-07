@@ -263,6 +263,134 @@ func TestUploadInternalURLSingleDocumentRemainsPending(t *testing.T) {
 	}
 }
 
+func TestUploadInternalURLDuplicateUnchangedDocsReportsChunkableSubset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	const (
+		rootURL      = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"
+		chunkedURL   = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=chunked"
+		unchunkedURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=unchunked"
+		newURL       = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=new"
+	)
+	chunkedContent := []byte("# 已分块文档")
+	unchunkedContent := []byte("# 未分块文档")
+	existingChunked := &model.KnowledgeDocument{
+		KbID:               kb.ID,
+		DocName:            "已分块文档.md",
+		Enabled:            1,
+		ChunkCount:         2,
+		FileURL:            chunkedURL,
+		FileType:           "md",
+		FileSize:           int64(len(chunkedContent)),
+		Status:             "success",
+		SourceType:         "internal_url",
+		SourceLocation:     chunkedURL,
+		CanonicalSourceKey: knowledgeService.InternalURLCanonicalSourceKey(chunkedURL),
+		SourceContentHash:  internalURLContentHash(chunkedContent),
+		CreatedBy:          "tester",
+	}
+	existingUnchunked := &model.KnowledgeDocument{
+		KbID:               kb.ID,
+		DocName:            "未分块文档.md",
+		Enabled:            0,
+		ChunkCount:         0,
+		FileURL:            unchunkedURL,
+		FileType:           "md",
+		FileSize:           int64(len(unchunkedContent)),
+		Status:             "pending",
+		SourceType:         "internal_url",
+		SourceLocation:     unchunkedURL,
+		CanonicalSourceKey: knowledgeService.InternalURLCanonicalSourceKey(unchunkedURL),
+		SourceContentHash:  internalURLContentHash(unchunkedContent),
+		CreatedBy:          "tester",
+	}
+	if err := gdb.Create([]*model.KnowledgeDocument{existingChunked, existingUnchunked}).Error; err != nil {
+		t.Fatalf("seed existing docs: %v", err)
+	}
+	if err := gdb.Model(existingUnchunked).Update("enabled", int16(0)).Error; err != nil {
+		t.Fatalf("disable existing unchunked doc: %v", err)
+	}
+
+	fileStore := NewFileStore()
+	svc := knowledgeService.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		knowledgeServiceTestEmbeddingService{},
+		&knowledgeServiceTestVectorStore{},
+		fileStore,
+	)
+	h := NewDocumentHandler(svc, fileStore)
+	h.SetInternalURLFetcher(fakeInternalURLFetcher{
+		docs: []crawler.Document{
+			{Meta: crawler.DocumentMeta{ID: "chunked", Title: "已分块文档.md", URL: chunkedURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: chunkedContent},
+			{Meta: crawler.DocumentMeta{ID: "unchunked", Title: "未分块文档.md", URL: unchunkedURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: unchunkedContent},
+			{Meta: crawler.DocumentMeta{ID: "new", Title: "新增文档.md", URL: newURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# 新增文档")},
+		},
+	})
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	w := postInternalURLUpload(t, r, kb.ID, rootURL, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Code string `json:"code"`
+		Data struct {
+			Total              int `json:"total"`
+			Success            int `json:"success"`
+			ExistingUnchanged  int `json:"existingUnchanged"`
+			ExistingChunked    int `json:"existingChunked"`
+			ExistingEnabled    int `json:"existingEnabled"`
+			NewDocuments       int `json:"newDocuments"`
+			ChunkableDocuments []struct {
+				ID      string `json:"id"`
+				DocName string `json:"docName"`
+			} `json:"chunkableDocuments"`
+			SkippedChunkDocuments []struct {
+				ID      string `json:"id"`
+				DocName string `json:"docName"`
+			} `json:"skippedChunkDocuments"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != "0" {
+		t.Fatalf("expected success, got %s", w.Body.String())
+	}
+	if resp.Data.Total != 3 || resp.Data.Success != 3 {
+		t.Fatalf("unexpected summary: %s", w.Body.String())
+	}
+	if resp.Data.ExistingUnchanged != 2 || resp.Data.ExistingChunked != 1 || resp.Data.ExistingEnabled != 1 || resp.Data.NewDocuments != 1 {
+		t.Fatalf("unexpected duplicate summary: %s", w.Body.String())
+	}
+	if len(resp.Data.ChunkableDocuments) != 2 {
+		t.Fatalf("expected only new and unchunked docs to be chunkable, got %s", w.Body.String())
+	}
+	if len(resp.Data.SkippedChunkDocuments) != 1 || resp.Data.SkippedChunkDocuments[0].ID != existingChunked.ID {
+		t.Fatalf("expected unchanged chunked doc to be skipped, got %s", w.Body.String())
+	}
+	for _, doc := range resp.Data.ChunkableDocuments {
+		if doc.ID == existingChunked.ID {
+			t.Fatalf("unchanged chunked doc should not be chunkable: %s", w.Body.String())
+		}
+	}
+}
+
 func TestUploadInternalURLKeepsEmptyFolderNodeWithoutSourceFile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
