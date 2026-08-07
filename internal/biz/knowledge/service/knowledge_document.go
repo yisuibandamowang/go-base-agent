@@ -314,10 +314,18 @@ func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID st
 		if err := s.applyCreateDocumentProcessingConfig(ctx, doc, req); err != nil {
 			return nil, err
 		}
-		processingChanged = oldProcessMode != doc.ProcessMode ||
-			oldChunkStrategy != doc.ChunkStrategy ||
-			oldChunkConfig != doc.ChunkConfig ||
-			oldPipelineID != doc.PipelineID
+		processingChanged = DocumentProcessingConfigChanged(
+			oldProcessMode,
+			oldChunkStrategy,
+			oldChunkConfig,
+			oldPipelineID,
+			dto.CreateDocumentReq{
+				ProcessMode:   doc.ProcessMode,
+				ChunkStrategy: doc.ChunkStrategy,
+				ChunkConfig:   doc.ChunkConfig,
+				PipelineID:    doc.PipelineID,
+			},
+		)
 	}
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
 	doc.UpdatedBy = userID
@@ -395,6 +403,50 @@ func hasCreateDocumentProcessingConfig(req dto.CreateDocumentReq) bool {
 		strings.TrimSpace(req.ChunkStrategy) != "" ||
 		strings.TrimSpace(req.ChunkConfig) != "" ||
 		strings.TrimSpace(req.PipelineID) != ""
+}
+
+// DocumentProcessingConfigChanged reports whether the requested processing config differs from the existing one.
+func DocumentProcessingConfigChanged(processMode, chunkStrategy, chunkConfig, pipelineID string, req dto.CreateDocumentReq) bool {
+	return strings.TrimSpace(strings.ToLower(processMode)) != strings.TrimSpace(strings.ToLower(req.ProcessMode)) ||
+		normalizeProcessingChunkStrategyForCompare(chunkStrategy) != normalizeProcessingChunkStrategyForCompare(req.ChunkStrategy) ||
+		!documentChunkConfigEqual(chunkConfig, req.ChunkConfig) ||
+		strings.TrimSpace(pipelineID) != strings.TrimSpace(req.PipelineID)
+}
+
+func normalizeProcessingChunkStrategyForCompare(raw string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(raw)), "-", "_")
+}
+
+func documentChunkConfigEqual(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == right {
+		return true
+	}
+	if left == "" || right == "" {
+		return false
+	}
+	leftJSON, ok := normalizedJSONForCompare(left)
+	if !ok {
+		return false
+	}
+	rightJSON, ok := normalizedJSONForCompare(right)
+	if !ok {
+		return false
+	}
+	return leftJSON == rightJSON
+}
+
+func normalizedJSONForCompare(raw string) (string, bool) {
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return "", false
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 func (s *DocumentService) findInternalURLDocumentByCanonicalKey(ctx context.Context, kbID, canonicalKey, fileURL string) (*model.KnowledgeDocument, error) {

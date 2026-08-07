@@ -360,13 +360,36 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		if strategyChanged {
 			resp.StrategyChanged++
 		}
-		created, err := h.svc.UpsertInternalURLDocument(c.Request.Context(), kbID, docReq, operator)
-		if err != nil {
-			resp.Failed++
-			resp.Errors = append(resp.Errors, err.Error())
-			continue
+		var created *dto.DocumentResp
+		if existingUnchanged && strategyChanged {
+			pending := *existing
+			pending.DocName = docReq.DocName
+			pending.FileURL = docReq.FileURL
+			pending.FileType = docReq.FileType
+			pending.FileSize = docReq.FileSize
+			pending.SourceType = "internal_url"
+			pending.SourceLocation = docReq.SourceLocation
+			pending.CanonicalSourceKey = docReq.CanonicalSourceKey
+			pending.SourceRootKey = docReq.SourceRootKey
+			pending.SourceParentKey = docReq.SourceParentKey
+			pending.SourceContentHash = docReq.SourceContentHash
+			pending.SourceNodeType = docReq.SourceNodeType
+			pending.ProcessMode = docReq.ProcessMode
+			pending.ChunkStrategy = docReq.ChunkStrategy
+			pending.ChunkConfig = docReq.ChunkConfig
+			pending.PipelineID = docReq.PipelineID
+			created = &pending
+		} else {
+			var err error
+			created, err = h.svc.UpsertInternalURLDocument(c.Request.Context(), kbID, docReq, operator)
+			if err != nil {
+				resp.Failed++
+				resp.Errors = append(resp.Errors, err.Error())
+				continue
+			}
 		}
-		if docReq.SourceNodeType != "folder" {
+		skipSourceUpload := existingUnchanged && existing != nil
+		if docReq.SourceNodeType != "folder" && !skipSourceUpload {
 			if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
 				resp.Failed++
 				resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
@@ -393,10 +416,13 @@ func internalURLProcessingChanged(existing *dto.DocumentResp, req dto.CreateDocu
 	if existing == nil {
 		return false
 	}
-	return strings.TrimSpace(existing.ProcessMode) != strings.TrimSpace(req.ProcessMode) ||
-		strings.TrimSpace(existing.ChunkStrategy) != strings.TrimSpace(req.ChunkStrategy) ||
-		strings.TrimSpace(existing.ChunkConfig) != strings.TrimSpace(req.ChunkConfig) ||
-		strings.TrimSpace(existing.PipelineID) != strings.TrimSpace(req.PipelineID)
+	return service.DocumentProcessingConfigChanged(
+		existing.ProcessMode,
+		existing.ChunkStrategy,
+		existing.ChunkConfig,
+		existing.PipelineID,
+		req,
+	)
 }
 
 func internalURLHasProcessingConfig(req dto.CreateDocumentReq) bool {
