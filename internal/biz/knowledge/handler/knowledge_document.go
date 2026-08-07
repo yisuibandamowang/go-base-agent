@@ -264,14 +264,22 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		return
 	}
 	resp := internalURLUploadResp{Total: len(docs)}
-	for _, doc := range docs {
+	parentURL := strings.TrimSpace(req.SourceLocation)
+	for idx, doc := range docs {
 		docReq := req
 		docReq.SourceType = "internal_url"
 		docReq.SourceLocation = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
+		if req.ScheduleEnabled == 1 {
+			docReq.SourceLocation = firstNonEmpty(parentURL, doc.Meta.URL)
+		}
 		docReq.DocName = firstNonEmpty(doc.Meta.Title, doc.Meta.ID)
 		docReq.FileURL = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
 		docReq.FileType = internalURLFileType(doc.Meta.MimeType, docReq.DocName)
 		docReq.FileSize = int64(len(doc.Content))
+		if req.ScheduleEnabled == 1 && idx > 0 {
+			docReq.ScheduleEnabled = 0
+			docReq.ScheduleCron = ""
+		}
 		created, err := h.svc.CreateDocument(c.Request.Context(), kbID, docReq, operator)
 		if err != nil {
 			resp.Failed++

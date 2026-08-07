@@ -1353,6 +1353,11 @@ func lineRangesForChunks(text string, chunks []*model.KnowledgeChunk) []lineRang
 }
 
 func documentSourceURL(doc *model.KnowledgeDocument) string {
+	if strings.EqualFold(normalizeKnowledgeSourceType(doc.SourceType), "internal_url") {
+		if strings.HasPrefix(doc.FileURL, "http://") || strings.HasPrefix(doc.FileURL, "https://") {
+			return doc.FileURL
+		}
+	}
 	if strings.HasPrefix(doc.SourceLocation, "http://") || strings.HasPrefix(doc.SourceLocation, "https://") {
 		return doc.SourceLocation
 	}

@@ -94,9 +94,11 @@ func TestUploadInternalURLDocumentCreatesPendingDocsWithoutAutoChunk(t *testing.
 			Success   int `json:"success"`
 			Failed    int `json:"failed"`
 			Documents []struct {
-				DocName    string `json:"docName"`
-				Status     string `json:"status"`
-				ChunkCount int    `json:"chunkCount"`
+				ID             string `json:"id"`
+				DocName        string `json:"docName"`
+				SourceLocation string `json:"sourceLocation"`
+				Status         string `json:"status"`
+				ChunkCount     int    `json:"chunkCount"`
 			} `json:"documents"`
 		} `json:"data"`
 	}
@@ -114,6 +116,12 @@ func TestUploadInternalURLDocumentCreatesPendingDocsWithoutAutoChunk(t *testing.
 	}
 	if resp.Data.Documents[0].Status != "pending" || resp.Data.Documents[0].ChunkCount != 0 {
 		t.Fatalf("expected pending document, got %s", w.Body.String())
+	}
+	if resp.Data.Documents[0].SourceLocation != "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=425274" {
+		t.Fatalf("expected root document source location to stay on root url, got %q", resp.Data.Documents[0].SourceLocation)
+	}
+	if resp.Data.Documents[1].SourceLocation != "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=111" {
+		t.Fatalf("expected child document source location to stay on child url, got %q", resp.Data.Documents[1].SourceLocation)
 	}
 	var count int64
 	if err := gdb.Model(&model.KnowledgeDocument{}).Count(&count).Error; err != nil {

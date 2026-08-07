@@ -161,14 +161,16 @@ func main() {
 	}
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
+	var geelibSource *crawler.GeelibSource
 	if geelibCfg := cfg.RAG.Knowledge.Geelib; geelibCfg.IsEnabledByDefault() {
-		docHandler.SetInternalURLFetcher(crawler.NewGeelibSource(crawler.GeelibSourceConfig{
+		geelibSource = crawler.NewGeelibSource(crawler.GeelibSourceConfig{
 			Command:  geelibCfg.Command,
 			WorkDir:  geelibCfg.WorkDir,
 			Timeout:  time.Duration(geelibCfg.TimeoutSeconds) * time.Second,
 			MaxBytes: geelibCfg.MaxBytes,
 			Domains:  geelibCfg.Domains,
-		}))
+		})
+		docHandler.SetInternalURLFetcher(geelibSource)
 	}
 
 	documentScheduleSvc := knowledgeService.NewDocumentScheduleService(
@@ -182,6 +184,9 @@ func main() {
 	)
 	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "url", MaxBytes: 50 << 20}))
 	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "http", MaxBytes: 50 << 20}))
+	if geelibSource != nil {
+		documentScheduleSvc.RegisterSource(geelibSource)
+	}
 	documentScheduleSvc.RegisterSource(crawler.NewFeishuSource(crawler.FeishuSourceConfig{
 		Name:        "feishu",
 		AppID:       cfg.RAG.Knowledge.Feishu.AppID,

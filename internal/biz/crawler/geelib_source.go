@@ -46,6 +46,34 @@ func NewGeelibSource(cfg GeelibSourceConfig) *GeelibSource {
 	return &GeelibSource{cfg: cfg, runner: runner}
 }
 
+// Name 返回定时调度注册用来源名称。
+func (s *GeelibSource) Name() string {
+	return "internal_url"
+}
+
+// ListDocuments 返回单个配置 URL 下的文档元信息。
+func (s *GeelibSource) ListDocuments(ctx context.Context) ([]DocumentMeta, error) {
+	return nil, nil
+}
+
+// FetchDocument 根据内部文档 URL 拉取单篇文档。
+func (s *GeelibSource) FetchDocument(ctx context.Context, rawURL string) (*Document, error) {
+	ref, err := parseGeelibURL(rawURL, s.cfg.Domains)
+	if err != nil {
+		return nil, err
+	}
+	return s.fetchDocument(ctx, ref, geelibTreeNode{DocID: ref.docID, Title: ref.docID})
+}
+
+// WatchChanges 当前 geelib 来源不使用推送变更。
+func (s *GeelibSource) WatchChanges(ctx context.Context, since time.Time) (<-chan ChangeEvent, error) {
+	ch := make(chan ChangeEvent)
+	close(ch)
+	_ = ctx
+	_ = since
+	return ch, nil
+}
+
 // FetchDocuments 根据内部 URL 拉取当前文档及其子文档。
 func (s *GeelibSource) FetchDocuments(ctx context.Context, rawURL string) ([]Document, error) {
 	ref, err := parseGeelibURL(rawURL, s.cfg.Domains)

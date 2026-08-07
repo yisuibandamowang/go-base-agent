@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,21 @@ func (f *fakeScheduleSource) WatchChanges(context.Context, time.Time) (<-chan cr
 	return ch, nil
 }
 
+type fakeScheduleGeelibSource struct {
+	fakeScheduleSource
+	fetchedTreeURL string
+	docs           []crawler.Document
+}
+
+func (f *fakeScheduleGeelibSource) Name() string {
+	return "internal_url"
+}
+
+func (f *fakeScheduleGeelibSource) FetchDocuments(_ context.Context, rawURL string) ([]crawler.Document, error) {
+	f.fetchedTreeURL = rawURL
+	return f.docs, nil
+}
+
 type fakeScheduleFileStore struct {
 	docID string
 	name  string
@@ -58,6 +74,37 @@ func (f *fakeScheduleFileStore) Put(docID string, name string, data []byte) {
 	f.docID = docID
 	f.name = name
 	f.data = append([]byte(nil), data...)
+}
+
+type fakeScheduleCollectionFileStore struct {
+	files    map[string][]byte
+	readErrs map[string]error
+	puts     []string
+}
+
+func (f *fakeScheduleCollectionFileStore) Put(docID string, name string, data []byte) {
+	_ = f.PutWithCollection(context.Background(), "", docID, name, data)
+}
+
+func (f *fakeScheduleCollectionFileStore) PutWithCollection(_ context.Context, collectionName, docID, name string, data []byte) error {
+	if f.files == nil {
+		f.files = make(map[string][]byte)
+	}
+	key := collectionName + "/" + docID
+	f.files[key] = append([]byte(nil), data...)
+	f.puts = append(f.puts, docID+":"+name)
+	return nil
+}
+
+func (f *fakeScheduleCollectionFileStore) ReadWithCollection(_ context.Context, collectionName, docID string) ([]byte, error) {
+	if f.files == nil {
+		return nil, nil
+	}
+	key := collectionName + "/" + docID
+	if err := f.readErrs[key]; err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), f.files[key]...), nil
 }
 
 type fakeScheduleChunkStarter struct {
@@ -76,6 +123,7 @@ type fakeScheduleChunkRunner struct {
 	userID    string
 	runErr    error
 	runCalled bool
+	runDocIDs []string
 }
 
 func (f *fakeScheduleChunkRunner) StartChunk(_ context.Context, docID string, userID string) error {
@@ -88,7 +136,329 @@ func (f *fakeScheduleChunkRunner) RunChunkNow(_ context.Context, docID string, u
 	f.runCalled = true
 	f.docID = docID
 	f.userID = userID
+	f.runDocIDs = append(f.runDocIDs, docID)
 	return f.runErr
+}
+
+func TestDocumentScheduleService_ScanDueSyncsInternalURLTree(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+		&knowledgeModel.KnowledgeDocumentScheduleExec{},
+	); err != nil {
+		t.Fatalf("migrate schedule tables: %v", err)
+	}
+
+	now := time.Date(2026, 8, 7, 10, 0, 0, 0, time.UTC)
+	parentURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"
+	childAURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=437090"
+	childBURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=439113"
+	childCURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=439175"
+	kb := &knowledgeModel.KnowledgeBase{Name: "kb", CollectionName: "kb_collection", EmbeddingModel: "emb", CreatedBy: "tester"}
+	kb.ID = "kb-1"
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	docA := &knowledgeModel.KnowledgeDocument{
+		KbID:            kb.ID,
+		DocName:         "游客模式.md",
+		FileURL:         childAURL,
+		FileType:        "md",
+		SourceType:      "internal_url",
+		SourceLocation:  parentURL,
+		ScheduleEnabled: 1,
+		ScheduleCron:    "@every 1h",
+		Status:          "success",
+		CreatedBy:       "user-1",
+	}
+	docA.ID = "doc-a"
+	docB := &knowledgeModel.KnowledgeDocument{
+		KbID:           kb.ID,
+		DocName:        "旧子文档.md",
+		FileURL:        childBURL,
+		FileType:       "md",
+		SourceType:     "internal_url",
+		SourceLocation: parentURL,
+		Status:         "success",
+		CreatedBy:      "user-1",
+	}
+	docB.ID = "doc-b"
+	if err := gdb.Create(docA).Error; err != nil {
+		t.Fatalf("seed doc a: %v", err)
+	}
+	if err := gdb.Create(docB).Error; err != nil {
+		t.Fatalf("seed doc b: %v", err)
+	}
+	schedule := &knowledgeModel.KnowledgeDocumentSchedule{
+		DocID:       docA.ID,
+		KbID:        kb.ID,
+		CronExpr:    "@every 1h",
+		Enabled:     1,
+		NextRunTime: ptrTime(now.Add(-time.Minute)),
+	}
+	if err := gdb.Create(schedule).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+
+	fileStore := &fakeScheduleCollectionFileStore{files: map[string][]byte{
+		kb.CollectionName + "/" + docA.ID: []byte("old content"),
+		kb.CollectionName + "/" + docB.ID: []byte("removed content"),
+	}}
+	chunkStarter := &fakeScheduleChunkRunner{}
+	source := &fakeScheduleGeelibSource{
+		docs: []crawler.Document{
+			{
+				Meta:    crawler.DocumentMeta{ID: "437090", Title: "游客模式.md", URL: childAURL, MimeType: "text/markdown", SourceName: "geelib"},
+				Content: []byte("new content"),
+			},
+			{
+				Meta:    crawler.DocumentMeta{ID: "439175", Title: "新增子文档.md", URL: childCURL, MimeType: "text/markdown", SourceName: "geelib"},
+				Content: []byte("created content"),
+			},
+		},
+	}
+
+	svc := NewDocumentScheduleService(
+		gdb,
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		fileStore,
+		chunkStarter,
+		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 60},
+	)
+	svc.now = func() time.Time { return now }
+	svc.RegisterSource(source)
+
+	count, err := svc.ScanDue(context.Background())
+	if err != nil {
+		t.Fatalf("scan due: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 processed schedule, got %d", count)
+	}
+	if source.fetchedTreeURL != parentURL {
+		t.Fatalf("expected tree fetch %q, got %q", parentURL, source.fetchedTreeURL)
+	}
+
+	var updatedA knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&updatedA, "id = ?", docA.ID).Error; err != nil {
+		t.Fatalf("find doc a: %v", err)
+	}
+	if updatedA.Enabled != 1 || updatedA.FileURL != childAURL || updatedA.SourceLocation != parentURL {
+		t.Fatalf("doc a not preserved as active child: %+v", updatedA)
+	}
+	var disabledB knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&disabledB, "id = ?", docB.ID).Error; err != nil {
+		t.Fatalf("find doc b: %v", err)
+	}
+	if disabledB.Enabled != 0 {
+		t.Fatalf("removed child should be disabled, got %+v", disabledB)
+	}
+	var createdC knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&createdC, "file_url = ?", childCURL).Error; err != nil {
+		t.Fatalf("find created child: %v", err)
+	}
+	if createdC.KbID != kb.ID || createdC.SourceLocation != parentURL || createdC.SourceType != "internal_url" || createdC.Enabled != 1 {
+		t.Fatalf("created child has unexpected fields: %+v", createdC)
+	}
+	if len(chunkStarter.runDocIDs) != 2 || chunkStarter.runDocIDs[0] != docA.ID || chunkStarter.runDocIDs[1] != createdC.ID {
+		t.Fatalf("expected changed and created docs to be chunked, got %v", chunkStarter.runDocIDs)
+	}
+	if string(fileStore.files[kb.CollectionName+"/"+docA.ID]) != "new content" {
+		t.Fatalf("doc a file not updated: %q", string(fileStore.files[kb.CollectionName+"/"+docA.ID]))
+	}
+	if string(fileStore.files[kb.CollectionName+"/"+createdC.ID]) != "created content" {
+		t.Fatalf("doc c file not saved: %q", string(fileStore.files[kb.CollectionName+"/"+createdC.ID]))
+	}
+
+	var updatedSchedule knowledgeModel.KnowledgeDocumentSchedule
+	if err := gdb.First(&updatedSchedule, "doc_id = ?", docA.ID).Error; err != nil {
+		t.Fatalf("find updated schedule: %v", err)
+	}
+	if updatedSchedule.LastStatus != "success" || updatedSchedule.LastContentHash == "" || updatedSchedule.NextRunTime == nil {
+		t.Fatalf("schedule not marked success: %+v", updatedSchedule)
+	}
+}
+
+func TestDocumentScheduleService_ScanDueKeepsManuallyDisabledInternalURLChildDisabled(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+		&knowledgeModel.KnowledgeDocumentScheduleExec{},
+	); err != nil {
+		t.Fatalf("migrate schedule tables: %v", err)
+	}
+
+	now := time.Date(2026, 8, 7, 11, 0, 0, 0, time.UTC)
+	parentURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"
+	childURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=437090"
+	kb := &knowledgeModel.KnowledgeBase{Name: "kb", CollectionName: "kb_collection", EmbeddingModel: "emb", CreatedBy: "tester"}
+	kb.ID = "kb-disabled"
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:            kb.ID,
+		DocName:         "手动停用.md",
+		Enabled:         0,
+		FileURL:         childURL,
+		FileType:        "md",
+		SourceType:      "internal_url",
+		SourceLocation:  parentURL,
+		ScheduleEnabled: 1,
+		ScheduleCron:    "@every 1h",
+		Status:          "success",
+		CreatedBy:       "user-1",
+	}
+	doc.ID = "doc-disabled"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Where("id = ?", doc.ID).Update("enabled", int16(0)).Error; err != nil {
+		t.Fatalf("disable doc: %v", err)
+	}
+	schedule := &knowledgeModel.KnowledgeDocumentSchedule{
+		DocID:       doc.ID,
+		KbID:        kb.ID,
+		CronExpr:    "@every 1h",
+		Enabled:     1,
+		NextRunTime: ptrTime(now.Add(-time.Minute)),
+	}
+	if err := gdb.Create(schedule).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+
+	fileStore := &fakeScheduleCollectionFileStore{files: map[string][]byte{
+		kb.CollectionName + "/" + doc.ID: []byte("old content"),
+	}}
+	source := &fakeScheduleGeelibSource{docs: []crawler.Document{{
+		Meta:    crawler.DocumentMeta{ID: "437090", Title: "手动停用.md", URL: childURL, MimeType: "text/markdown", SourceName: "geelib"},
+		Content: []byte("new content"),
+	}}}
+	chunkStarter := &fakeScheduleChunkRunner{}
+	svc := NewDocumentScheduleService(
+		gdb,
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		fileStore,
+		chunkStarter,
+		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 60},
+	)
+	svc.now = func() time.Time { return now }
+	svc.RegisterSource(source)
+
+	if _, err := svc.ScanDue(context.Background()); err != nil {
+		t.Fatalf("scan due: %v", err)
+	}
+	var updated knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&updated, "id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("find updated doc: %v", err)
+	}
+	if updated.Enabled != 0 {
+		t.Fatalf("manually disabled child should stay disabled, got %+v", updated)
+	}
+}
+
+func TestDocumentScheduleService_ScanDueRebuildsInternalURLChildWhenStoredFileMissing(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+		&knowledgeModel.KnowledgeDocumentScheduleExec{},
+	); err != nil {
+		t.Fatalf("migrate schedule tables: %v", err)
+	}
+
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	parentURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"
+	childURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=437090"
+	kb := &knowledgeModel.KnowledgeBase{Name: "kb", CollectionName: "kb_collection", EmbeddingModel: "emb", CreatedBy: "tester"}
+	kb.ID = "kb-missing-file"
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:            kb.ID,
+		DocName:         "源文件缺失.md",
+		Enabled:         1,
+		FileURL:         childURL,
+		FileType:        "md",
+		SourceType:      "internal_url",
+		SourceLocation:  parentURL,
+		ScheduleEnabled: 1,
+		ScheduleCron:    "@every 1h",
+		Status:          "success",
+		CreatedBy:       "user-1",
+	}
+	doc.ID = "doc-missing-file"
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	schedule := &knowledgeModel.KnowledgeDocumentSchedule{
+		DocID:       doc.ID,
+		KbID:        kb.ID,
+		CronExpr:    "@every 1h",
+		Enabled:     1,
+		NextRunTime: ptrTime(now.Add(-time.Minute)),
+	}
+	if err := gdb.Create(schedule).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+
+	key := kb.CollectionName + "/" + doc.ID
+	fileStore := &fakeScheduleCollectionFileStore{
+		files:    map[string][]byte{},
+		readErrs: map[string]error{key: errors.New("object not found")},
+	}
+	source := &fakeScheduleGeelibSource{docs: []crawler.Document{{
+		Meta:    crawler.DocumentMeta{ID: "437090", Title: "源文件缺失.md", URL: childURL, MimeType: "text/markdown", SourceName: "geelib"},
+		Content: []byte("rebuilt content"),
+	}}}
+	chunkStarter := &fakeScheduleChunkRunner{}
+	svc := NewDocumentScheduleService(
+		gdb,
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		fileStore,
+		chunkStarter,
+		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 60},
+	)
+	svc.now = func() time.Time { return now }
+	svc.RegisterSource(source)
+
+	if _, err := svc.ScanDue(context.Background()); err != nil {
+		t.Fatalf("scan due: %v", err)
+	}
+	if string(fileStore.files[key]) != "rebuilt content" {
+		t.Fatalf("missing stored file should be rebuilt, got %q", string(fileStore.files[key]))
+	}
+	if len(chunkStarter.runDocIDs) != 1 || chunkStarter.runDocIDs[0] != doc.ID {
+		t.Fatalf("expected rebuilt document to be chunked, got %v", chunkStarter.runDocIDs)
+	}
+	var updatedSchedule knowledgeModel.KnowledgeDocumentSchedule
+	if err := gdb.First(&updatedSchedule, "doc_id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("find updated schedule: %v", err)
+	}
+	if updatedSchedule.LastStatus != "success" {
+		t.Fatalf("schedule should succeed after rebuilding missing file, got %+v", updatedSchedule)
+	}
 }
 
 func TestDocumentScheduleService_ScanDueFetchesRemoteDocumentAndStartsChunk(t *testing.T) {
