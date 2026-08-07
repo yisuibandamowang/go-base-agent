@@ -74,7 +74,7 @@ func (s *GeelibSource) WatchChanges(ctx context.Context, since time.Time) (<-cha
 	return ch, nil
 }
 
-// FetchDocuments 根据内部 URL 拉取当前文档及其子文档。
+// FetchDocuments 根据内部 URL 递归拉取目录树中有正文内容的文档。
 func (s *GeelibSource) FetchDocuments(ctx context.Context, rawURL string) ([]Document, error) {
 	ref, err := parseGeelibURL(rawURL, s.cfg.Domains)
 	if err != nil {
@@ -100,6 +100,9 @@ func (s *GeelibSource) FetchDocuments(ctx context.Context, rawURL string) ([]Doc
 		doc, err := s.fetchDocument(ctx, ref, node)
 		if err != nil {
 			return nil, err
+		}
+		if isGeelibEmptyContentPlaceholder(doc.Content) {
+			continue
 		}
 		docs = append(docs, *doc)
 	}
@@ -252,8 +255,9 @@ func collectGeelibTreeNodes(value any) []geelibTreeNode {
 			return collectGeelibTreeNodes(tree)
 		}
 		node := geelibTreeNode{
-			DocID: firstString(v["docId"], v["docID"], v["id"]),
-			Title: firstString(v["title"], v["name"], v["docName"]),
+			DocID:       firstString(v["docId"], v["docID"], v["id"]),
+			Title:       firstString(v["title"], v["name"], v["docName"]),
+			HasChildren: boolFromAny(v["hasChildren"]),
 		}
 		if children, ok := v["children"]; ok {
 			node.Children = collectGeelibTreeNodes(children)
@@ -283,12 +287,23 @@ func flattenGeelibTreeNodes(nodes []geelibTreeNode) []geelibTreeNode {
 func flattenGeelibTreeNodesWithParent(nodes []geelibTreeNode, parentDocID string) []geelibTreeNode {
 	var out []geelibTreeNode
 	for _, node := range nodes {
-		out = append(out, geelibTreeNode{DocID: node.DocID, Title: node.Title, ParentDocID: parentDocID, HasChildren: len(node.Children) > 0})
+		hasChildren := node.HasChildren || len(node.Children) > 0
+		out = append(out, geelibTreeNode{
+			DocID:       node.DocID,
+			Title:       node.Title,
+			ParentDocID: parentDocID,
+			HasChildren: hasChildren,
+		})
 		if len(node.Children) > 0 {
 			out = append(out, flattenGeelibTreeNodesWithParent(node.Children, node.docIDString())...)
 		}
 	}
 	return out
+}
+
+func isGeelibEmptyContentPlaceholder(content []byte) bool {
+	text := strings.TrimSpace(strings.TrimPrefix(string(content), "\ufeff"))
+	return text == "该文档内容为空"
 }
 
 func extractGeelibReadContent(payload []byte) ([]byte, error) {
@@ -366,4 +381,18 @@ func firstString(values ...any) string {
 		}
 	}
 	return ""
+}
+
+func boolFromAny(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		v = strings.TrimSpace(strings.ToLower(v))
+		return v == "1" || v == "true" || v == "yes"
+	default:
+		return false
+	}
 }
