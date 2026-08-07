@@ -21,6 +21,7 @@ type KnowledgeDocument struct {
 	SourceRootKey      string `gorm:"column:source_root_key;type:varchar(256)" json:"sourceRootKey"`
 	SourceParentKey    string `gorm:"column:source_parent_key;type:varchar(256)" json:"sourceParentKey"`
 	SourceContentHash  string `gorm:"column:source_content_hash;type:varchar(64)" json:"sourceContentHash"`
+	SourceNodeType     string `gorm:"column:source_node_type;type:varchar(16)" json:"sourceNodeType"`
 	ScheduleEnabled    int16  `gorm:"column:schedule_enabled;type:smallint" json:"scheduleEnabled"`
 	ScheduleCron       string `gorm:"column:schedule_cron;type:varchar(64)" json:"scheduleCron"`
 	ChunkStrategy      string `gorm:"column:chunk_strategy;type:varchar(32)" json:"chunkStrategy"`

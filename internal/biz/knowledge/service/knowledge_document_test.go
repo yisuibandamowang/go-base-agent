@@ -1283,6 +1283,59 @@ func TestDocumentService_CreateDocumentKeepsScheduleForURLSource(t *testing.T) {
 	}
 }
 
+func TestDocumentService_StartChunkSkipsInternalURLFolderNode(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	vecStore := svc.vecStore.(*capturingVectorStore)
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:               kb.ID,
+		DocName:            "目录节点.md",
+		FileURL:            "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=folder",
+		FileType:           "md",
+		SourceType:         "internal_url",
+		SourceLocation:     "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231",
+		CanonicalSourceKey: InternalURLCanonicalSourceKey("https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=folder"),
+		SourceRootKey:      InternalURLCanonicalSourceKey("https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"),
+		SourceNodeType:     "folder",
+		Status:             "pending",
+		CreatedBy:          "admin-1",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create folder doc: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeChunk{
+		BaseModel:  db.BaseModel{ID: "old-folder-chunk"},
+		KbID:       kb.ID,
+		DocID:      doc.ID,
+		ChunkIndex: 0,
+		Content:    "旧正文",
+		Enabled:    1,
+		CreatedBy:  "admin-1",
+	}).Error; err != nil {
+		t.Fatalf("create stale folder chunk: %v", err)
+	}
+
+	if err := svc.RunChunkNow(context.Background(), doc.ID, "admin-1"); err != nil {
+		t.Fatalf("run chunk now for folder: %v", err)
+	}
+	var stored knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&stored, "id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("find folder doc: %v", err)
+	}
+	if stored.Status != "success" || stored.ChunkCount != 0 {
+		t.Fatalf("expected folder chunk skipped with success status, got %+v", stored)
+	}
+	var chunkCount int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeChunk{}).Where("doc_id = ? AND deleted = 0", doc.ID).Count(&chunkCount).Error; err != nil {
+		t.Fatalf("count chunks: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Fatalf("expected no active chunks for folder, got %d", chunkCount)
+	}
+	if len(vecStore.deletedDocCalls) != 1 || vecStore.deletedDocCalls[0] != kb.CollectionName+"|"+doc.ID {
+		t.Fatalf("expected folder vectors to be deleted, got %+v", vecStore.deletedDocCalls)
+	}
+}
+
 func TestDocumentService_CreateDocumentRejectsEnabledScheduleWithoutCron(t *testing.T) {
 	_, kb, svc := newDocumentServiceTestContext(t)
 

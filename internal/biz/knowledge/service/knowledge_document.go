@@ -200,6 +200,10 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		SourceRootKey:      strings.TrimSpace(req.SourceRootKey),
 		SourceParentKey:    strings.TrimSpace(req.SourceParentKey),
 		SourceContentHash:  strings.TrimSpace(req.SourceContentHash),
+		SourceNodeType:     normalizeInternalURLNodeType(req.SourceNodeType),
+	}
+	if isInternalURLFolderDocument(doc) {
+		doc.Status = "success"
 	}
 	if req.Enabled != nil {
 		doc.Enabled = normalizeDocumentEnabled(*req.Enabled)
@@ -300,9 +304,12 @@ func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID st
 	doc.SourceParentKey = strings.TrimSpace(req.SourceParentKey)
 	contentChanged := strings.TrimSpace(req.SourceContentHash) != "" && doc.SourceContentHash != "" && doc.SourceContentHash != req.SourceContentHash
 	doc.SourceContentHash = strings.TrimSpace(req.SourceContentHash)
+	doc.SourceNodeType = normalizeInternalURLNodeType(req.SourceNodeType)
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
 	doc.UpdatedBy = userID
-	if contentChanged {
+	if isInternalURLFolderDocument(doc) {
+		doc.Status = "success"
+	} else if contentChanged {
 		doc.Status = "pending"
 	}
 	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
@@ -350,6 +357,7 @@ func (s *DocumentService) upsertInternalURLDocumentTx(ctx context.Context, doc *
 			"source_root_key":      doc.SourceRootKey,
 			"source_parent_key":    doc.SourceParentKey,
 			"source_content_hash":  doc.SourceContentHash,
+			"source_node_type":     doc.SourceNodeType,
 			"schedule_enabled":     doc.ScheduleEnabled,
 			"schedule_cron":        doc.ScheduleCron,
 			"updated_by":           doc.UpdatedBy,
@@ -377,6 +385,34 @@ func InternalURLCanonicalSourceKey(rawURL string) string {
 		return ""
 	}
 	return "internal_url:geelib:" + spaceID + ":" + docID
+}
+
+// InternalURLNodeType 识别内部文档树节点类型。
+func InternalURLNodeType(content []byte, extra map[string]string) string {
+	if strings.TrimSpace(string(content)) == "" && strings.EqualFold(strings.TrimSpace(extra["has_children"]), "true") {
+		return "folder"
+	}
+	if strings.EqualFold(strings.TrimSpace(extra["node_type"]), "folder") {
+		return "folder"
+	}
+	return "document"
+}
+
+func normalizeInternalURLNodeType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "folder":
+		return "folder"
+	case "document":
+		return "document"
+	default:
+		return ""
+	}
+}
+
+func isInternalURLFolderDocument(doc *model.KnowledgeDocument) bool {
+	return doc != nil &&
+		strings.EqualFold(normalizeKnowledgeSourceType(doc.SourceType), "internal_url") &&
+		strings.EqualFold(strings.TrimSpace(doc.SourceNodeType), "folder")
 }
 
 func pipelineIDFromChunkConfig(raw string) string {
@@ -531,6 +567,9 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 	if doc.Status == "running" {
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
+	if isInternalURLFolderDocument(doc) {
+		return s.markFolderDocumentChunkSkipped(ctx, doc, userID)
+	}
 	if async {
 		if s.mqEnabled && s.mqProducer != nil {
 			operator := userID
@@ -615,6 +654,42 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
 	return s.executeChunk(ctx, docID)
+}
+
+func (s *DocumentService) markFolderDocumentChunkSkipped(ctx context.Context, doc *model.KnowledgeDocument, userID string) error {
+	if doc == nil {
+		return nil
+	}
+	if s.chunkRepo != nil {
+		if err := s.chunkRepo.DeleteByDocID(ctx, doc.ID); err != nil {
+			return fmt.Errorf("delete folder document chunks: %w", err)
+		}
+	}
+	if s.vecStore != nil {
+		kb, err := s.kbRepo.FindByID(ctx, doc.KbID)
+		if err != nil {
+			return fmt.Errorf("find knowledge base for folder document: %w", err)
+		}
+		if err := s.vecStore.DeleteDocumentVectors(ctx, kb.CollectionName, doc.ID); err != nil {
+			return fmt.Errorf("delete folder document vectors: %w", err)
+		}
+	}
+	updates := map[string]interface{}{
+		"status":      "success",
+		"chunk_count": 0,
+		"updated_by":  userID,
+		"update_time": time.Now(),
+	}
+	return s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", doc.ID).Updates(updates).Error
+}
+
+// SkipFolderDocumentChunk 跳过内部目录节点分块，并清理可能残留的检索数据。
+func (s *DocumentService) SkipFolderDocumentChunk(ctx context.Context, docID string, userID string) error {
+	doc, err := s.docRepo.FindByID(ctx, docID)
+	if err != nil {
+		return fmt.Errorf("文档不存在")
+	}
+	return s.markFolderDocumentChunkSkipped(ctx, doc, userID)
 }
 
 func (s *DocumentService) collectionNameForKB(ctx context.Context, kbID string) string {
@@ -2652,6 +2727,7 @@ func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentR
 		SourceRootKey:      doc.SourceRootKey,
 		SourceParentKey:    doc.SourceParentKey,
 		SourceContentHash:  doc.SourceContentHash,
+		SourceNodeType:     doc.SourceNodeType,
 		ScheduleEnabled:    doc.ScheduleEnabled,
 		ScheduleCron:       doc.ScheduleCron,
 		ChunkStrategy:      doc.ChunkStrategy,

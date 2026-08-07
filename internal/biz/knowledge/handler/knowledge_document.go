@@ -282,6 +282,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		docReq.SourceRootKey = rootKey
 		docReq.SourceParentKey = service.InternalURLCanonicalSourceKey(doc.Meta.Extra["parent_url"])
 		docReq.SourceContentHash = internalURLContentHash(doc.Content)
+		docReq.SourceNodeType = service.InternalURLNodeType(doc.Content, doc.Meta.Extra)
 		if req.ScheduleEnabled == 1 && idx > 0 {
 			docReq.ScheduleEnabled = 0
 			docReq.ScheduleCron = ""
@@ -292,10 +293,12 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 			resp.Errors = append(resp.Errors, err.Error())
 			continue
 		}
-		if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
-			resp.Failed++
-			resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
-			continue
+		if docReq.SourceNodeType != "folder" {
+			if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
+				resp.Failed++
+				resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
+				continue
+			}
 		}
 		resp.Success++
 		resp.Documents = append(resp.Documents, created)

@@ -172,6 +172,7 @@ CREATE TABLE t_knowledge_document (
     source_root_key      VARCHAR(256),
     source_parent_key    VARCHAR(256),
     source_content_hash  VARCHAR(64),
+    source_node_type     VARCHAR(16),
     schedule_enabled SMALLINT,
     schedule_cron    VARCHAR(64),
     chunk_strategy   VARCHAR(32),
@@ -567,6 +568,7 @@ COMMENT ON COLUMN t_knowledge_document.canonical_source_key IS '稳定来源唯�
 COMMENT ON COLUMN t_knowledge_document.source_root_key IS '来源树根节点稳定标识，用于内部文档树归属';
 COMMENT ON COLUMN t_knowledge_document.source_parent_key IS '来源直接父节点稳定标识，用于内部文档树层级定位';
 COMMENT ON COLUMN t_knowledge_document.source_content_hash IS '原始文档内容哈希，用于判断内容是否变化';
+COMMENT ON COLUMN t_knowledge_document.source_node_type IS '来源节点类型：document/folder';
 COMMENT ON COLUMN t_knowledge_document.schedule_enabled IS '是否启用定时刷新';
 COMMENT ON COLUMN t_knowledge_document.schedule_cron IS '定时表达式';
 COMMENT ON COLUMN t_knowledge_document.chunk_strategy IS '分块策略';

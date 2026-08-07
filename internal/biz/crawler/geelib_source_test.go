@@ -59,6 +59,9 @@ func TestGeelibSourceFetchDocumentsRecursesNestedTree(t *testing.T) {
 		docs[2].Meta.Extra["parent_doc_id"] != "111" {
 		t.Fatalf("unexpected parent metadata: root=%+v child=%+v grandchild=%+v", docs[0].Meta.Extra, docs[1].Meta.Extra, docs[2].Meta.Extra)
 	}
+	if docs[0].Meta.Extra["has_children"] != "true" || docs[1].Meta.Extra["has_children"] != "true" || docs[2].Meta.Extra["has_children"] != "" {
+		t.Fatalf("unexpected has_children metadata: root=%+v child=%+v grandchild=%+v", docs[0].Meta.Extra, docs[1].Meta.Extra, docs[2].Meta.Extra)
+	}
 }
 
 func TestGeelibSourceRejectsInvalidURL(t *testing.T) {

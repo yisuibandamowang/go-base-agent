@@ -263,6 +263,69 @@ func TestUploadInternalURLSingleDocumentRemainsPending(t *testing.T) {
 	}
 }
 
+func TestUploadInternalURLKeepsEmptyFolderNodeWithoutSourceFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	const (
+		rootURL   = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"
+		folderURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=folder"
+		leafURL   = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=leaf"
+	)
+	fileStore := NewFileStore()
+	svc := knowledgeService.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		knowledgeServiceTestEmbeddingService{},
+		&knowledgeServiceTestVectorStore{},
+		fileStore,
+	)
+	h := NewDocumentHandler(svc, fileStore)
+	h.SetInternalURLFetcher(fakeInternalURLFetcher{
+		docs: []crawler.Document{
+			{Meta: crawler.DocumentMeta{ID: "368231", Title: "根文档.md", URL: rootURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# 根文档")},
+			{Meta: crawler.DocumentMeta{ID: "folder", Title: "目录节点.md", URL: folderURL, MimeType: "text/markdown", SourceName: "geelib", Extra: map[string]string{"parent_url": rootURL, "has_children": "true"}}, Content: nil},
+			{Meta: crawler.DocumentMeta{ID: "leaf", Title: "正文文档.md", URL: leafURL, MimeType: "text/markdown", SourceName: "geelib", Extra: map[string]string{"parent_url": folderURL}}, Content: []byte("# 正文")},
+		},
+	})
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	w := postInternalURLUpload(t, r, kb.ID, rootURL, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var folder model.KnowledgeDocument
+	if err := gdb.First(&folder, "file_url = ?", folderURL).Error; err != nil {
+		t.Fatalf("find folder node: %v", err)
+	}
+	if folder.SourceNodeType != "folder" || folder.Status != "success" || folder.ChunkCount != 0 {
+		t.Fatalf("expected folder node to stay success without chunks, got %+v", folder)
+	}
+	if _, ok, err := fileStore.GetWithCollection(context.Background(), kb.CollectionName, folder.ID); err != nil || ok {
+		t.Fatalf("expected no empty source file for folder, ok=%v err=%v", ok, err)
+	}
+	var chunkCount int64
+	if err := gdb.Model(&model.KnowledgeChunk{}).Where("doc_id = ?", folder.ID).Count(&chunkCount).Error; err != nil {
+		t.Fatalf("count folder chunks: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Fatalf("expected no folder chunks, got %d", chunkCount)
+	}
+}
+
 func TestUploadInternalURLParentReusesExistingChildDocuments(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

@@ -135,6 +135,9 @@ func (s *GeelibSource) fetchDocument(ctx context.Context, ref geelibURLRef, node
 		extra["parent_doc_id"] = parentDocID
 		extra["parent_url"] = fmt.Sprintf("https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=%s&docId=%s", ref.spaceID, parentDocID)
 	}
+	if node.HasChildren {
+		extra["has_children"] = "true"
+	}
 	return &Document{
 		Meta: DocumentMeta{
 			ID:         node.docIDString(),
@@ -220,6 +223,7 @@ type geelibTreeNode struct {
 	DocID       string
 	Title       string
 	ParentDocID string
+	HasChildren bool
 	Children    []geelibTreeNode
 }
 
@@ -279,7 +283,7 @@ func flattenGeelibTreeNodes(nodes []geelibTreeNode) []geelibTreeNode {
 func flattenGeelibTreeNodesWithParent(nodes []geelibTreeNode, parentDocID string) []geelibTreeNode {
 	var out []geelibTreeNode
 	for _, node := range nodes {
-		out = append(out, geelibTreeNode{DocID: node.DocID, Title: node.Title, ParentDocID: parentDocID})
+		out = append(out, geelibTreeNode{DocID: node.DocID, Title: node.Title, ParentDocID: parentDocID, HasChildren: len(node.Children) > 0})
 		if len(node.Children) > 0 {
 			out = append(out, flattenGeelibTreeNodesWithParent(node.Children, node.docIDString())...)
 		}

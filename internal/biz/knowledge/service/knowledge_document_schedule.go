@@ -43,6 +43,10 @@ type scheduleChunkSynchronizer interface {
 	RunChunkNow(ctx context.Context, docID string, userID string) error
 }
 
+type scheduleFolderChunkSkipper interface {
+	SkipFolderDocumentChunk(ctx context.Context, docID string, userID string) error
+}
+
 type scheduleInternalURLTreeSource interface {
 	FetchDocuments(ctx context.Context, rawURL string) ([]crawler.Document, error)
 }
@@ -362,10 +366,17 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 		}
 		canonicalKey := InternalURLCanonicalSourceKey(childURL)
 		parentKey := InternalURLCanonicalSourceKey(remoteDoc.Meta.Extra["parent_url"])
+		nodeType := InternalURLNodeType(remoteDoc.Content, remoteDoc.Meta.Extra)
 		if existing := existingByURL[childURL]; existing != nil {
 			keepSchedule := existing.ID == anchor.ID
-			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, anchor.CreatedBy, keepSchedule); err != nil {
+			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, nodeType, anchor.CreatedBy, keepSchedule); err != nil {
 				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			if nodeType == "folder" {
+				if err := s.skipFolderDocumentChunk(ctx, existing.ID, anchor.CreatedBy); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				continue
 			}
 			changed, err := s.internalURLContentChanged(ctx, kbCollectionName, existing.ID, remoteDoc.Content)
 			if err != nil {
@@ -384,8 +395,14 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 		}
 		if existing := existingByCanonical[canonicalKey]; existing != nil {
 			keepSchedule := existing.ID == anchor.ID
-			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, anchor.CreatedBy, keepSchedule); err != nil {
+			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, nodeType, anchor.CreatedBy, keepSchedule); err != nil {
 				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			if nodeType == "folder" {
+				if err := s.skipFolderDocumentChunk(ctx, existing.ID, anchor.CreatedBy); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				continue
 			}
 			changed, err := s.internalURLContentChanged(ctx, kbCollectionName, existing.ID, remoteDoc.Content)
 			if err != nil {
@@ -404,8 +421,14 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 		}
 		if existing := existingByFileURL[childURL]; existing != nil {
 			keepSchedule := existing.ID == anchor.ID
-			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, anchor.CreatedBy, keepSchedule); err != nil {
+			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, nodeType, anchor.CreatedBy, keepSchedule); err != nil {
 				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			if nodeType == "folder" {
+				if err := s.skipFolderDocumentChunk(ctx, existing.ID, anchor.CreatedBy); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				continue
 			}
 			changed, err := s.internalURLContentChanged(ctx, kbCollectionName, existing.ID, remoteDoc.Content)
 			if err != nil {
@@ -422,9 +445,16 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 			}
 			continue
 		}
-		created, err := s.createInternalURLChild(ctx, anchor, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash)
+		created, err := s.createInternalURLChild(ctx, anchor, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, nodeType)
 		if err != nil {
 			return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+		}
+		if nodeType == "folder" {
+			if err := s.skipFolderDocumentChunk(ctx, created.ID, anchor.CreatedBy); err != nil {
+				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			createdCount++
+			continue
 		}
 		if err := s.saveScheduledFile(ctx, kbCollectionName, created.ID, fileName, remoteDoc.Content); err != nil {
 			return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
@@ -575,17 +605,32 @@ func (s *DocumentScheduleService) startScheduledChunk(ctx context.Context, docID
 	return nil
 }
 
-func (s *DocumentScheduleService) updateInternalURLChild(ctx context.Context, doc *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, canonicalKey, rootKey, parentKey, contentHash, operator string, keepSchedule bool) error {
+func (s *DocumentScheduleService) skipFolderDocumentChunk(ctx context.Context, docID, userID string) error {
+	if skipper, ok := s.chunkStarter.(scheduleFolderChunkSkipper); ok {
+		if err := skipper.SkipFolderDocumentChunk(ctx, docID, userID); err != nil {
+			return fmt.Errorf("skip folder document chunk: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *DocumentScheduleService) updateInternalURLChild(ctx context.Context, doc *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, canonicalKey, rootKey, parentKey, contentHash, nodeType, operator string, keepSchedule bool) error {
+	status := doc.Status
+	if nodeType == "folder" {
+		status = "success"
+	}
 	updates := map[string]any{
 		"doc_name":             fileName,
 		"file_url":             childURL,
 		"file_type":            fileType,
 		"file_size":            fileSize,
+		"status":               status,
 		"source_location":      parentURL,
 		"canonical_source_key": canonicalKey,
 		"source_root_key":      rootKey,
 		"source_parent_key":    parentKey,
 		"source_content_hash":  contentHash,
+		"source_node_type":     nodeType,
 		"updated_by":           operator,
 		"update_time":          s.now(),
 	}
@@ -607,10 +652,16 @@ func (s *DocumentScheduleService) updateInternalURLChild(ctx context.Context, do
 	doc.SourceRootKey = rootKey
 	doc.SourceParentKey = parentKey
 	doc.SourceContentHash = contentHash
+	doc.SourceNodeType = nodeType
+	doc.Status = status
 	return nil
 }
 
-func (s *DocumentScheduleService) createInternalURLChild(ctx context.Context, anchor *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, canonicalKey, rootKey, parentKey, contentHash string) (*model.KnowledgeDocument, error) {
+func (s *DocumentScheduleService) createInternalURLChild(ctx context.Context, anchor *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, canonicalKey, rootKey, parentKey, contentHash, nodeType string) (*model.KnowledgeDocument, error) {
+	status := "pending"
+	if nodeType == "folder" {
+		status = "success"
+	}
 	doc := &model.KnowledgeDocument{
 		KbID:               anchor.KbID,
 		DocName:            fileName,
@@ -619,13 +670,14 @@ func (s *DocumentScheduleService) createInternalURLChild(ctx context.Context, an
 		FileType:           fileType,
 		FileSize:           fileSize,
 		ProcessMode:        anchor.ProcessMode,
-		Status:             "pending",
+		Status:             status,
 		SourceType:         "internal_url",
 		SourceLocation:     parentURL,
 		CanonicalSourceKey: canonicalKey,
 		SourceRootKey:      rootKey,
 		SourceParentKey:    parentKey,
 		SourceContentHash:  contentHash,
+		SourceNodeType:     nodeType,
 		ScheduleEnabled:    0,
 		ChunkStrategy:      anchor.ChunkStrategy,
 		ChunkConfig:        anchor.ChunkConfig,

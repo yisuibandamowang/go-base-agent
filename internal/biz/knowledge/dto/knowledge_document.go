@@ -13,6 +13,7 @@ type CreateDocumentReq struct {
 	SourceRootKey      string `json:"sourceRootKey"`
 	SourceParentKey    string `json:"sourceParentKey"`
 	SourceContentHash  string `json:"sourceContentHash"`
+	SourceNodeType     string `json:"sourceNodeType"`
 	ScheduleEnabled    int16  `json:"scheduleEnabled"`
 	ScheduleCron       string `json:"scheduleCron"`
 	ProcessMode        string `json:"processMode"`
@@ -53,6 +54,7 @@ type DocumentResp struct {
 	SourceRootKey      string `json:"sourceRootKey"`
 	SourceParentKey    string `json:"sourceParentKey"`
 	SourceContentHash  string `json:"sourceContentHash"`
+	SourceNodeType     string `json:"sourceNodeType"`
 	ScheduleEnabled    int16  `json:"scheduleEnabled"`
 	ScheduleCron       string `json:"scheduleCron"`
 	ChunkStrategy      string `json:"chunkStrategy"`
