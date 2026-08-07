@@ -278,7 +278,11 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		c.JSON(http.StatusOK, convention.Failure("B000001", "文件存储未配置"))
 		return
 	}
-	resp := internalURLUploadResp{Total: len(docs)}
+	resp := internalURLUploadResp{
+		Total:                 len(docs),
+		ChunkableDocuments:    []*dto.DocumentResp{},
+		SkippedChunkDocuments: []*dto.DocumentResp{},
+	}
 	parentURL := strings.TrimSpace(req.SourceLocation)
 	rootKey := service.InternalURLCanonicalSourceKey(parentURL)
 	items := make([]internalURLUploadItem, 0, len(docs))
