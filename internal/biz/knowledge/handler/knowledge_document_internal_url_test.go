@@ -391,6 +391,137 @@ func TestUploadInternalURLDuplicateUnchangedDocsReportsChunkableSubset(t *testin
 	}
 }
 
+func TestUploadInternalURLDuplicateUnchangedDocWithChangedChunkStrategyIsChunkable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	const (
+		rootURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=368231"
+		docURL  = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=437090"
+	)
+	content := []byte("# 会员中台游客模式体系理解")
+	existing := &model.KnowledgeDocument{
+		KbID:               kb.ID,
+		DocName:            "会员中台游客模式体系理解.md",
+		Enabled:            1,
+		ChunkCount:         2,
+		FileURL:            docURL,
+		FileType:           "md",
+		FileSize:           int64(len(content)),
+		ProcessMode:        "chunk",
+		Status:             "success",
+		SourceType:         "internal_url",
+		SourceLocation:     docURL,
+		CanonicalSourceKey: knowledgeService.InternalURLCanonicalSourceKey(docURL),
+		SourceContentHash:  internalURLContentHash(content),
+		ChunkStrategy:      "fixed_size",
+		ChunkConfig:        `{"chunkSize":512,"overlapSize":50}`,
+		CreatedBy:          "tester",
+	}
+	if err := gdb.Create(existing).Error; err != nil {
+		t.Fatalf("seed existing doc: %v", err)
+	}
+
+	fileStore := NewFileStore()
+	svc := knowledgeService.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		knowledgeServiceTestEmbeddingService{},
+		&knowledgeServiceTestVectorStore{},
+		fileStore,
+	)
+	h := NewDocumentHandler(svc, fileStore)
+	h.SetInternalURLFetcher(fakeInternalURLFetcher{
+		docs: []crawler.Document{
+			{Meta: crawler.DocumentMeta{ID: "437090", Title: "会员中台游客模式体系理解.md", URL: docURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: content},
+		},
+	})
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("sourceType", "internal_url"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("sourceLocation", rootURL); err != nil {
+		t.Fatalf("write sourceLocation: %v", err)
+	}
+	if err := writer.WriteField("processMode", "chunk"); err != nil {
+		t.Fatalf("write processMode: %v", err)
+	}
+	if err := writer.WriteField("chunkStrategy", "fixed_size"); err != nil {
+		t.Fatalf("write chunkStrategy: %v", err)
+	}
+	if err := writer.WriteField("chunkConfig", `{"chunkSize":1024,"overlapSize":100}`); err != nil {
+		t.Fatalf("write chunkConfig: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kb.ID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Code string `json:"code"`
+		Data struct {
+			Total                    int `json:"total"`
+			Success                  int `json:"success"`
+			ExistingUnchanged        int `json:"existingUnchanged"`
+			ExistingChunked          int `json:"existingChunked"`
+			StrategyChangedDocuments int `json:"strategyChangedDocuments"`
+			ChunkableDocuments       []struct {
+				ID string `json:"id"`
+			} `json:"chunkableDocuments"`
+			SkippedChunkDocuments []struct {
+				ID string `json:"id"`
+			} `json:"skippedChunkDocuments"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != "0" {
+		t.Fatalf("expected success, got %s", w.Body.String())
+	}
+	if resp.Data.Total != 1 || resp.Data.Success != 1 || resp.Data.ExistingUnchanged != 1 || resp.Data.ExistingChunked != 1 {
+		t.Fatalf("unexpected summary: %s", w.Body.String())
+	}
+	if resp.Data.StrategyChangedDocuments != 1 {
+		t.Fatalf("expected one strategy changed document, got %s", w.Body.String())
+	}
+	if len(resp.Data.ChunkableDocuments) != 1 || resp.Data.ChunkableDocuments[0].ID != existing.ID {
+		t.Fatalf("expected changed-strategy doc to be chunkable, got %s", w.Body.String())
+	}
+	if len(resp.Data.SkippedChunkDocuments) != 0 {
+		t.Fatalf("expected no skipped docs, got %s", w.Body.String())
+	}
+	var updated model.KnowledgeDocument
+	if err := gdb.First(&updated, "id = ?", existing.ID).Error; err != nil {
+		t.Fatalf("find updated doc: %v", err)
+	}
+	if updated.ChunkStrategy != "fixed_size" || updated.ChunkConfig != `{"chunkSize":1024,"overlapSize":100}` {
+		t.Fatalf("expected chunk config to be updated, got strategy=%q config=%q", updated.ChunkStrategy, updated.ChunkConfig)
+	}
+}
+
 func TestUploadInternalURLKeepsEmptyFolderNodeWithoutSourceFile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

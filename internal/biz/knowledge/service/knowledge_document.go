@@ -305,11 +305,25 @@ func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID st
 	contentChanged := strings.TrimSpace(req.SourceContentHash) != "" && doc.SourceContentHash != "" && doc.SourceContentHash != req.SourceContentHash
 	doc.SourceContentHash = strings.TrimSpace(req.SourceContentHash)
 	doc.SourceNodeType = normalizeInternalURLNodeType(req.SourceNodeType)
+	oldProcessMode := doc.ProcessMode
+	oldChunkStrategy := doc.ChunkStrategy
+	oldChunkConfig := doc.ChunkConfig
+	oldPipelineID := doc.PipelineID
+	processingChanged := false
+	if hasCreateDocumentProcessingConfig(req) {
+		if err := s.applyCreateDocumentProcessingConfig(ctx, doc, req); err != nil {
+			return nil, err
+		}
+		processingChanged = oldProcessMode != doc.ProcessMode ||
+			oldChunkStrategy != doc.ChunkStrategy ||
+			oldChunkConfig != doc.ChunkConfig ||
+			oldPipelineID != doc.PipelineID
+	}
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
 	doc.UpdatedBy = userID
 	if isInternalURLFolderDocument(doc) {
 		doc.Status = "success"
-	} else if contentChanged {
+	} else if contentChanged || processingChanged {
 		doc.Status = "pending"
 	}
 	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
@@ -319,6 +333,68 @@ func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID st
 		return nil, err
 	}
 	return s.docToResp(doc), nil
+}
+
+// NormalizeCreateDocumentProcessingConfig 规范化创建文档请求中的处理模式与分块配置。
+func (s *DocumentService) NormalizeCreateDocumentProcessingConfig(ctx context.Context, req *dto.CreateDocumentReq) error {
+	if req == nil {
+		return nil
+	}
+	if !hasCreateDocumentProcessingConfig(*req) {
+		return nil
+	}
+	doc := &model.KnowledgeDocument{}
+	if err := s.applyCreateDocumentProcessingConfig(ctx, doc, *req); err != nil {
+		return err
+	}
+	req.ProcessMode = doc.ProcessMode
+	req.ChunkStrategy = doc.ChunkStrategy
+	req.ChunkConfig = doc.ChunkConfig
+	req.PipelineID = doc.PipelineID
+	return nil
+}
+
+func (s *DocumentService) applyCreateDocumentProcessingConfig(ctx context.Context, doc *model.KnowledgeDocument, req dto.CreateDocumentReq) error {
+	processMode, err := normalizeDocumentProcessMode(req.ProcessMode)
+	if err != nil {
+		return err
+	}
+	if processMode == "pipeline" || strings.EqualFold(req.ChunkStrategy, "pipeline") {
+		pipelineID := firstNonEmpty(req.PipelineID, pipelineIDFromChunkConfig(req.ChunkConfig))
+		if strings.TrimSpace(pipelineID) == "" {
+			return fmt.Errorf("使用Pipeline模式时，必须指定Pipeline ID")
+		}
+		if err := s.validateDocumentPipelineExists(ctx, pipelineID); err != nil {
+			return err
+		}
+		doc.ProcessMode = "pipeline"
+		doc.PipelineID = strings.TrimSpace(pipelineID)
+		doc.ChunkStrategy = ""
+		doc.ChunkConfig = ""
+		return nil
+	}
+	if processMode == "chunk" || req.ChunkStrategy != "" {
+		doc.ProcessMode = "chunk"
+		doc.ChunkStrategy = req.ChunkStrategy
+		doc.ChunkConfig = req.ChunkConfig
+		doc.PipelineID = ""
+		if processMode == "chunk" || isJavaChunkStrategy(req.ChunkStrategy) {
+			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
+			if err != nil {
+				return err
+			}
+			doc.ChunkStrategy = strategy
+			doc.ChunkConfig = chunkConfig
+		}
+	}
+	return nil
+}
+
+func hasCreateDocumentProcessingConfig(req dto.CreateDocumentReq) bool {
+	return strings.TrimSpace(req.ProcessMode) != "" ||
+		strings.TrimSpace(req.ChunkStrategy) != "" ||
+		strings.TrimSpace(req.ChunkConfig) != "" ||
+		strings.TrimSpace(req.PipelineID) != ""
 }
 
 func (s *DocumentService) findInternalURLDocumentByCanonicalKey(ctx context.Context, kbID, canonicalKey, fileURL string) (*model.KnowledgeDocument, error) {
@@ -397,6 +473,10 @@ func (s *DocumentService) upsertInternalURLDocumentTx(ctx context.Context, doc *
 			"source_parent_key":    doc.SourceParentKey,
 			"source_content_hash":  doc.SourceContentHash,
 			"source_node_type":     doc.SourceNodeType,
+			"process_mode":         doc.ProcessMode,
+			"chunk_strategy":       doc.ChunkStrategy,
+			"chunk_config":         doc.ChunkConfig,
+			"pipeline_id":          doc.PipelineID,
 			"schedule_enabled":     doc.ScheduleEnabled,
 			"schedule_cron":        doc.ScheduleCron,
 			"updated_by":           doc.UpdatedBy,

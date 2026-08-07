@@ -242,6 +242,7 @@ type internalURLUploadResp struct {
 	ExistingEnabled       int                 `json:"existingEnabled"`
 	NewDocuments          int                 `json:"newDocuments"`
 	ChangedDocuments      int                 `json:"changedDocuments"`
+	StrategyChanged       int                 `json:"strategyChangedDocuments"`
 	Chunkable             int                 `json:"chunkable"`
 	SkippedChunked        int                 `json:"skippedChunked"`
 	Documents             []*dto.DocumentResp `json:"documents"`
@@ -304,6 +305,10 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		docReq.SourceParentKey = service.InternalURLCanonicalSourceKey(doc.Meta.Extra["parent_url"])
 		docReq.SourceContentHash = internalURLContentHash(doc.Content)
 		docReq.SourceNodeType = service.InternalURLNodeType(doc.Content, doc.Meta.Extra)
+		if err := h.svc.NormalizeCreateDocumentProcessingConfig(c.Request.Context(), &docReq); err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+			return
+		}
 		if req.ScheduleEnabled == 1 && idx > 0 {
 			docReq.ScheduleEnabled = 0
 			docReq.ScheduleCron = ""
@@ -338,6 +343,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		existingUnchanged := existing != nil &&
 			strings.TrimSpace(existing.SourceContentHash) != "" &&
 			existing.SourceContentHash == docReq.SourceContentHash
+		strategyChanged := existing != nil && internalURLHasProcessingConfig(docReq) && internalURLProcessingChanged(existing, docReq)
 		if existingUnchanged {
 			resp.ExistingUnchanged++
 			if existing.ChunkCount > 0 {
@@ -350,6 +356,9 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 			resp.NewDocuments++
 		} else {
 			resp.ChangedDocuments++
+		}
+		if strategyChanged {
+			resp.StrategyChanged++
 		}
 		created, err := h.svc.UpsertInternalURLDocument(c.Request.Context(), kbID, docReq, operator)
 		if err != nil {
@@ -369,7 +378,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		if docReq.SourceNodeType == "folder" {
 			continue
 		}
-		if existingUnchanged && existing != nil && existing.ChunkCount > 0 {
+		if existingUnchanged && existing != nil && existing.ChunkCount > 0 && !strategyChanged {
 			resp.SkippedChunked++
 			resp.SkippedChunkDocuments = append(resp.SkippedChunkDocuments, created)
 			continue
@@ -378,6 +387,23 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		resp.ChunkableDocuments = append(resp.ChunkableDocuments, created)
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+func internalURLProcessingChanged(existing *dto.DocumentResp, req dto.CreateDocumentReq) bool {
+	if existing == nil {
+		return false
+	}
+	return strings.TrimSpace(existing.ProcessMode) != strings.TrimSpace(req.ProcessMode) ||
+		strings.TrimSpace(existing.ChunkStrategy) != strings.TrimSpace(req.ChunkStrategy) ||
+		strings.TrimSpace(existing.ChunkConfig) != strings.TrimSpace(req.ChunkConfig) ||
+		strings.TrimSpace(existing.PipelineID) != strings.TrimSpace(req.PipelineID)
+}
+
+func internalURLHasProcessingConfig(req dto.CreateDocumentReq) bool {
+	return strings.TrimSpace(req.ProcessMode) != "" ||
+		strings.TrimSpace(req.ChunkStrategy) != "" ||
+		strings.TrimSpace(req.ChunkConfig) != "" ||
+		strings.TrimSpace(req.PipelineID) != ""
 }
 
 func internalURLContentHash(content []byte) string {
