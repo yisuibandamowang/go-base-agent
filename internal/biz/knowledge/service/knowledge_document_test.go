@@ -1571,6 +1571,73 @@ func TestDocumentService_UpdateDocumentPersistsScheduleFields(t *testing.T) {
 	}
 }
 
+func TestDocumentService_UpdateDocumentRollsBackWhenScheduleSyncFails(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeChunk{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+	); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &knowledgeModel.KnowledgeBase{Name: "知识库A", EmbeddingModel: "emb-1", CollectionName: "collection_a", CreatedBy: "admin-1"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:            kb.ID,
+		DocName:         "会员Agent说明.md",
+		FileURL:         "https://example.com/old.md",
+		FileType:        "md",
+		SourceType:      "url",
+		SourceLocation:  "https://example.com/old.md",
+		Status:          "success",
+		ScheduleEnabled: 0,
+		ScheduleCron:    "",
+		CreatedBy:       "admin-1",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	if err := gdb.Migrator().DropTable(&knowledgeModel.KnowledgeDocumentSchedule{}); err != nil {
+		t.Fatalf("drop schedule table: %v", err)
+	}
+	svc := &DocumentService{
+		docRepo:      knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		scheduleRepo: knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		kbRepo:       knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		db:           gdb,
+		emb:          fakeEmbeddingService{},
+		vecStore:     &capturingVectorStore{},
+		fileStore:    fakeFileReader{},
+	}
+
+	_, err = svc.UpdateDocument(context.Background(), doc.ID, knowledgeDto.UpdateDocumentReq{
+		DocName:         ptrString("会员Agent能力说明.md"),
+		SourceLocation:  "https://example.com/new.md",
+		ScheduleEnabled: ptrInt16(1),
+		ScheduleCron:    "@every 1h",
+	}, "admin-1")
+	if err == nil {
+		t.Fatalf("expected schedule sync failure")
+	}
+
+	var stored knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&stored, "id = ?", doc.ID).Error; err != nil {
+		t.Fatalf("find stored document: %v", err)
+	}
+	if stored.DocName != "会员Agent说明.md" ||
+		stored.SourceLocation != "https://example.com/old.md" ||
+		stored.ScheduleEnabled != 0 ||
+		stored.ScheduleCron != "" {
+		t.Fatalf("document update should have been rolled back, got %+v", stored)
+	}
+}
+
 func TestDocumentService_RecordsChunkAuditLogs(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

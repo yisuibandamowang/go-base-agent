@@ -30,6 +30,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // DocumentService 文档管理业务逻辑层。
@@ -1656,10 +1657,7 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
 		return nil, err
 	}
-	if err := s.docRepo.Update(ctx, doc); err != nil {
-		return nil, fmt.Errorf("update document: %w", err)
-	}
-	if err := s.syncDocumentSchedule(ctx, doc, doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+	if err := s.updateDocumentAndSchedule(ctx, doc); err != nil {
 		return nil, err
 	}
 	resp := s.docToResp(doc)
@@ -1672,6 +1670,34 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 		AfterSnapshot:  resp,
 	})
 	return resp, nil
+}
+
+func (s *DocumentService) updateDocumentAndSchedule(ctx context.Context, doc *model.KnowledgeDocument) error {
+	if s.db == nil {
+		return fmt.Errorf("document service db not initialized")
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.updateDocumentTx(ctx, tx, doc); err != nil {
+			return fmt.Errorf("update document: %w", err)
+		}
+		if err := s.syncDocumentScheduleTx(ctx, tx, doc, doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+			return fmt.Errorf("sync document schedule: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *DocumentService) updateDocumentTx(ctx context.Context, tx *gorm.DB, doc *model.KnowledgeDocument) error {
+	result := tx.WithContext(ctx).Model(doc).
+		Select("doc_name", "enabled", "source_location", "schedule_enabled", "schedule_cron", "process_mode", "chunk_strategy", "chunk_config", "pipeline_id", "updated_by", "update_time").
+		Updates(doc)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // DeleteDocument 软删除文档。
@@ -2570,6 +2596,40 @@ func (s *DocumentService) syncDocumentSchedule(ctx context.Context, doc *model.K
 		NextRunTime: &nextRunTime,
 	}
 	return s.scheduleRepo.UpsertByDocID(ctx, schedule)
+}
+
+func (s *DocumentService) syncDocumentScheduleTx(ctx context.Context, tx *gorm.DB, doc *model.KnowledgeDocument, enabled int16, cronExpr string) error {
+	if s.scheduleRepo == nil || tx == nil {
+		return nil
+	}
+	if strings.TrimSpace(documentSourceURL(doc)) == "" {
+		return tx.WithContext(ctx).Where("doc_id = ?", doc.ID).Delete(&model.KnowledgeDocumentSchedule{}).Error
+	}
+	now := time.Now()
+	if enabled != 1 || strings.TrimSpace(cronExpr) == "" {
+		return tx.WithContext(ctx).Where("doc_id = ?", doc.ID).Delete(&model.KnowledgeDocumentSchedule{}).Error
+	}
+	nextRunTime, err := s.documentScheduleNextRunTime(cronExpr, now)
+	if err != nil {
+		return err
+	}
+	schedule := &model.KnowledgeDocumentSchedule{
+		DocID:       doc.ID,
+		KbID:        doc.KbID,
+		CronExpr:    strings.TrimSpace(cronExpr),
+		Enabled:     1,
+		NextRunTime: &nextRunTime,
+	}
+	return tx.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "doc_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"kb_id",
+			"cron_expr",
+			"enabled",
+			"next_run_time",
+			"update_time",
+		}),
+	}).Create(schedule).Error
 }
 
 func (s *DocumentService) syncDocumentScheduleIfExistsTx(ctx context.Context, tx *gorm.DB, doc *model.KnowledgeDocument) error {
