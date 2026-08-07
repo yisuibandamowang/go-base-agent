@@ -316,9 +316,29 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 			existingByURL[childURL] = &existingDocs[i]
 		}
 	}
+	canonicalKeys := make([]string, 0, len(docs))
+	childURLs := make([]string, 0, len(docs))
+	for _, remoteDoc := range docs {
+		childURL := strings.TrimSpace(remoteDoc.Meta.URL)
+		if childURL == "" {
+			childURL = strings.TrimSpace(remoteDoc.Meta.ID)
+		}
+		if childURL == "" {
+			continue
+		}
+		childURLs = append(childURLs, childURL)
+		if key := InternalURLCanonicalSourceKey(childURL); key != "" {
+			canonicalKeys = append(canonicalKeys, key)
+		}
+	}
+	existingByCanonical, existingByFileURL, err := s.listInternalURLDocumentsByCanonicalKeys(ctx, anchor.KbID, canonicalKeys, childURLs)
+	if err != nil {
+		return s.markFailed(ctx, schedule, startedAt, err, nil)
+	}
 
 	seen := make(map[string]struct{}, len(docs))
 	treeHashParts := make([]string, 0, len(docs))
+	rootKey := InternalURLCanonicalSourceKey(parentURL)
 	changedCount := 0
 	createdCount := 0
 	for _, remoteDoc := range docs {
@@ -340,8 +360,11 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 		if fileType == "" {
 			fileType = "md"
 		}
+		canonicalKey := InternalURLCanonicalSourceKey(childURL)
+		parentKey := InternalURLCanonicalSourceKey(remoteDoc.Meta.Extra["parent_url"])
 		if existing := existingByURL[childURL]; existing != nil {
-			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), anchor.CreatedBy); err != nil {
+			keepSchedule := existing.ID == anchor.ID
+			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, anchor.CreatedBy, keepSchedule); err != nil {
 				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
 			}
 			changed, err := s.internalURLContentChanged(ctx, kbCollectionName, existing.ID, remoteDoc.Content)
@@ -359,7 +382,47 @@ func (s *DocumentScheduleService) refreshInternalURLTree(ctx context.Context, sc
 			}
 			continue
 		}
-		created, err := s.createInternalURLChild(ctx, anchor, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)))
+		if existing := existingByCanonical[canonicalKey]; existing != nil {
+			keepSchedule := existing.ID == anchor.ID
+			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, anchor.CreatedBy, keepSchedule); err != nil {
+				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			changed, err := s.internalURLContentChanged(ctx, kbCollectionName, existing.ID, remoteDoc.Content)
+			if err != nil {
+				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			if changed {
+				if err := s.saveScheduledFile(ctx, kbCollectionName, existing.ID, fileName, remoteDoc.Content); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				if err := s.startScheduledChunk(ctx, existing.ID, firstNonEmpty(existing.CreatedBy, anchor.CreatedBy)); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				changedCount++
+			}
+			continue
+		}
+		if existing := existingByFileURL[childURL]; existing != nil {
+			keepSchedule := existing.ID == anchor.ID
+			if err := s.updateInternalURLChild(ctx, existing, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash, anchor.CreatedBy, keepSchedule); err != nil {
+				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			changed, err := s.internalURLContentChanged(ctx, kbCollectionName, existing.ID, remoteDoc.Content)
+			if err != nil {
+				return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+			}
+			if changed {
+				if err := s.saveScheduledFile(ctx, kbCollectionName, existing.ID, fileName, remoteDoc.Content); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				if err := s.startScheduledChunk(ctx, existing.ID, firstNonEmpty(existing.CreatedBy, anchor.CreatedBy)); err != nil {
+					return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
+				}
+				changedCount++
+			}
+			continue
+		}
+		created, err := s.createInternalURLChild(ctx, anchor, parentURL, childURL, fileName, fileType, int64(len(remoteDoc.Content)), canonicalKey, rootKey, parentKey, contentHash)
 		if err != nil {
 			return s.markFailed(ctx, schedule, startedAt, err, &remoteDoc)
 		}
@@ -432,6 +495,37 @@ func (s *DocumentScheduleService) listInternalURLChildren(ctx context.Context, k
 	return docs, nil
 }
 
+func (s *DocumentScheduleService) listInternalURLDocumentsByCanonicalKeys(ctx context.Context, kbID string, canonicalKeys, fileURLs []string) (map[string]*model.KnowledgeDocument, map[string]*model.KnowledgeDocument, error) {
+	byCanonical := make(map[string]*model.KnowledgeDocument)
+	byFileURL := make(map[string]*model.KnowledgeDocument)
+	if len(canonicalKeys) == 0 && len(fileURLs) == 0 {
+		return byCanonical, byFileURL, nil
+	}
+	var docs []model.KnowledgeDocument
+	query := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("kb_id = ? AND source_type = ?", kbID, "internal_url")
+	switch {
+	case len(canonicalKeys) > 0 && len(fileURLs) > 0:
+		query = query.Where("canonical_source_key IN ? OR file_url IN ?", canonicalKeys, fileURLs)
+	case len(canonicalKeys) > 0:
+		query = query.Where("canonical_source_key IN ?", canonicalKeys)
+	default:
+		query = query.Where("file_url IN ?", fileURLs)
+	}
+	if err := query.Find(&docs).Error; err != nil {
+		return nil, nil, fmt.Errorf("list internal url canonical documents: %w", err)
+	}
+	for i := range docs {
+		if key := strings.TrimSpace(docs[i].CanonicalSourceKey); key != "" {
+			byCanonical[key] = &docs[i]
+		}
+		if fileURL := strings.TrimSpace(docs[i].FileURL); fileURL != "" {
+			byFileURL[fileURL] = &docs[i]
+		}
+	}
+	return byCanonical, byFileURL, nil
+}
+
 func internalURLChildLocation(doc *model.KnowledgeDocument) string {
 	if doc == nil {
 		return ""
@@ -481,41 +575,63 @@ func (s *DocumentScheduleService) startScheduledChunk(ctx context.Context, docID
 	return nil
 }
 
-func (s *DocumentScheduleService) updateInternalURLChild(ctx context.Context, doc *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, operator string) error {
-	if err := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
-		Where("id = ?", doc.ID).
-		Updates(map[string]any{
-			"doc_name":        fileName,
-			"file_url":        childURL,
-			"file_type":       fileType,
-			"file_size":       fileSize,
-			"source_location": parentURL,
-			"updated_by":      operator,
-			"update_time":     s.now(),
-		}).Error; err != nil {
+func (s *DocumentScheduleService) updateInternalURLChild(ctx context.Context, doc *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, canonicalKey, rootKey, parentKey, contentHash, operator string, keepSchedule bool) error {
+	updates := map[string]any{
+		"doc_name":             fileName,
+		"file_url":             childURL,
+		"file_type":            fileType,
+		"file_size":            fileSize,
+		"source_location":      parentURL,
+		"canonical_source_key": canonicalKey,
+		"source_root_key":      rootKey,
+		"source_parent_key":    parentKey,
+		"source_content_hash":  contentHash,
+		"updated_by":           operator,
+		"update_time":          s.now(),
+	}
+	if !keepSchedule {
+		updates["schedule_enabled"] = int16(0)
+		updates["schedule_cron"] = ""
+	}
+	if err := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", doc.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update internal url child: %w", err)
 	}
+	if !keepSchedule && s.scheduleRepo != nil {
+		if err := s.scheduleRepo.DeleteByDocID(ctx, doc.ID); err != nil {
+			return fmt.Errorf("delete internal url child schedule: %w", err)
+		}
+	}
+	doc.FileURL = childURL
+	doc.SourceLocation = parentURL
+	doc.CanonicalSourceKey = canonicalKey
+	doc.SourceRootKey = rootKey
+	doc.SourceParentKey = parentKey
+	doc.SourceContentHash = contentHash
 	return nil
 }
 
-func (s *DocumentScheduleService) createInternalURLChild(ctx context.Context, anchor *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64) (*model.KnowledgeDocument, error) {
+func (s *DocumentScheduleService) createInternalURLChild(ctx context.Context, anchor *model.KnowledgeDocument, parentURL, childURL, fileName, fileType string, fileSize int64, canonicalKey, rootKey, parentKey, contentHash string) (*model.KnowledgeDocument, error) {
 	doc := &model.KnowledgeDocument{
-		KbID:            anchor.KbID,
-		DocName:         fileName,
-		Enabled:         1,
-		FileURL:         childURL,
-		FileType:        fileType,
-		FileSize:        fileSize,
-		ProcessMode:     anchor.ProcessMode,
-		Status:          "pending",
-		SourceType:      "internal_url",
-		SourceLocation:  parentURL,
-		ScheduleEnabled: 0,
-		ChunkStrategy:   anchor.ChunkStrategy,
-		ChunkConfig:     anchor.ChunkConfig,
-		PipelineID:      anchor.PipelineID,
-		CreatedBy:       anchor.CreatedBy,
-		UpdatedBy:       anchor.CreatedBy,
+		KbID:               anchor.KbID,
+		DocName:            fileName,
+		Enabled:            1,
+		FileURL:            childURL,
+		FileType:           fileType,
+		FileSize:           fileSize,
+		ProcessMode:        anchor.ProcessMode,
+		Status:             "pending",
+		SourceType:         "internal_url",
+		SourceLocation:     parentURL,
+		CanonicalSourceKey: canonicalKey,
+		SourceRootKey:      rootKey,
+		SourceParentKey:    parentKey,
+		SourceContentHash:  contentHash,
+		ScheduleEnabled:    0,
+		ChunkStrategy:      anchor.ChunkStrategy,
+		ChunkConfig:        anchor.ChunkConfig,
+		PipelineID:         anchor.PipelineID,
+		CreatedBy:          anchor.CreatedBy,
+		UpdatedBy:          anchor.CreatedBy,
 	}
 	if strings.TrimSpace(doc.ProcessMode) == "" {
 		doc.ProcessMode = "chunk"

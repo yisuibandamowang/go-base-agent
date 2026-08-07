@@ -168,6 +168,10 @@ CREATE TABLE t_knowledge_document (
     status           VARCHAR(16)   NOT NULL DEFAULT 'pending',
     source_type      VARCHAR(16),
     source_location  VARCHAR(1024),
+    canonical_source_key VARCHAR(256),
+    source_root_key      VARCHAR(256),
+    source_parent_key    VARCHAR(256),
+    source_content_hash  VARCHAR(64),
     schedule_enabled SMALLINT,
     schedule_cron    VARCHAR(64),
     chunk_strategy   VARCHAR(32),
@@ -180,6 +184,8 @@ CREATE TABLE t_knowledge_document (
     deleted          SMALLINT      NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_kb_id ON t_knowledge_document (kb_id);
+CREATE INDEX idx_knowledge_document_source_root ON t_knowledge_document (kb_id, source_type, source_root_key);
+CREATE UNIQUE INDEX uk_knowledge_document_canonical_source ON t_knowledge_document (kb_id, source_type, canonical_source_key) WHERE deleted = 0 AND canonical_source_key IS NOT NULL AND canonical_source_key <> '';
 COMMENT ON TABLE t_knowledge_document IS '知识库文档表';
 
 CREATE TABLE t_knowledge_chunk (
@@ -555,8 +561,12 @@ COMMENT ON COLUMN t_knowledge_document.file_type IS '文件类型';
 COMMENT ON COLUMN t_knowledge_document.file_size IS '文件大小（字节）';
 COMMENT ON COLUMN t_knowledge_document.process_mode IS '处理模式：chunk/pipeline';
 COMMENT ON COLUMN t_knowledge_document.status IS '状态：pending/running/success/failed';
-COMMENT ON COLUMN t_knowledge_document.source_type IS '来源类型：file/url';
+COMMENT ON COLUMN t_knowledge_document.source_type IS '来源类型：file/url/internal_url/feishu/confluence';
 COMMENT ON COLUMN t_knowledge_document.source_location IS '来源地址';
+COMMENT ON COLUMN t_knowledge_document.canonical_source_key IS '稳定来源唯一标识，用于同一知识库内远程文档去重';
+COMMENT ON COLUMN t_knowledge_document.source_root_key IS '来源树根节点稳定标识，用于内部文档树归属';
+COMMENT ON COLUMN t_knowledge_document.source_parent_key IS '来源直接父节点稳定标识，用于内部文档树层级定位';
+COMMENT ON COLUMN t_knowledge_document.source_content_hash IS '原始文档内容哈希，用于判断内容是否变化';
 COMMENT ON COLUMN t_knowledge_document.schedule_enabled IS '是否启用定时刷新';
 COMMENT ON COLUMN t_knowledge_document.schedule_cron IS '定时表达式';
 COMMENT ON COLUMN t_knowledge_document.chunk_strategy IS '分块策略';

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -186,15 +187,19 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		return nil, fmt.Errorf("知识库不存在")
 	}
 	doc := &model.KnowledgeDocument{
-		KbID:           kbID,
-		DocName:        req.DocName,
-		FileURL:        req.FileURL,
-		FileType:       req.FileType,
-		FileSize:       req.FileSize,
-		SourceType:     normalizeKnowledgeSourceType(req.SourceType),
-		Status:         "pending",
-		CreatedBy:      userID,
-		SourceLocation: req.SourceLocation,
+		KbID:               kbID,
+		DocName:            req.DocName,
+		FileURL:            req.FileURL,
+		FileType:           req.FileType,
+		FileSize:           req.FileSize,
+		SourceType:         normalizeKnowledgeSourceType(req.SourceType),
+		Status:             "pending",
+		CreatedBy:          userID,
+		SourceLocation:     req.SourceLocation,
+		CanonicalSourceKey: strings.TrimSpace(req.CanonicalSourceKey),
+		SourceRootKey:      strings.TrimSpace(req.SourceRootKey),
+		SourceParentKey:    strings.TrimSpace(req.SourceParentKey),
+		SourceContentHash:  strings.TrimSpace(req.SourceContentHash),
 	}
 	if req.Enabled != nil {
 		doc.Enabled = normalizeDocumentEnabled(*req.Enabled)
@@ -261,6 +266,117 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 		AfterSnapshot: resp,
 	})
 	return resp, nil
+}
+
+// UpsertInternalURLDocument 按内部文档稳定来源标识创建或更新文档。
+func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID string, req dto.CreateDocumentReq, userID string) (*dto.DocumentResp, error) {
+	if !strings.EqualFold(normalizeKnowledgeSourceType(req.SourceType), "internal_url") {
+		return s.CreateDocument(ctx, kbID, req, userID)
+	}
+	req.SourceType = "internal_url"
+	if strings.TrimSpace(req.CanonicalSourceKey) == "" {
+		req.CanonicalSourceKey = InternalURLCanonicalSourceKey(firstNonEmpty(req.FileURL, req.SourceLocation))
+	}
+	if strings.TrimSpace(req.CanonicalSourceKey) == "" {
+		return s.CreateDocument(ctx, kbID, req, userID)
+	}
+
+	doc, err := s.findInternalURLDocumentByCanonicalKey(ctx, kbID, req.CanonicalSourceKey, req.FileURL)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return s.CreateDocument(ctx, kbID, req, userID)
+		}
+		return nil, fmt.Errorf("find internal url document: %w", err)
+	}
+
+	doc.DocName = req.DocName
+	doc.FileURL = req.FileURL
+	doc.FileType = req.FileType
+	doc.FileSize = req.FileSize
+	doc.SourceType = "internal_url"
+	doc.SourceLocation = req.SourceLocation
+	doc.CanonicalSourceKey = strings.TrimSpace(req.CanonicalSourceKey)
+	doc.SourceRootKey = strings.TrimSpace(req.SourceRootKey)
+	doc.SourceParentKey = strings.TrimSpace(req.SourceParentKey)
+	contentChanged := strings.TrimSpace(req.SourceContentHash) != "" && doc.SourceContentHash != "" && doc.SourceContentHash != req.SourceContentHash
+	doc.SourceContentHash = strings.TrimSpace(req.SourceContentHash)
+	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, req.ScheduleEnabled, req.ScheduleCron)
+	doc.UpdatedBy = userID
+	if contentChanged {
+		doc.Status = "pending"
+	}
+	if err := s.validateDocumentSchedule(doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+		return nil, err
+	}
+	if err := s.upsertInternalURLDocumentTx(ctx, doc); err != nil {
+		return nil, err
+	}
+	return s.docToResp(doc), nil
+}
+
+func (s *DocumentService) findInternalURLDocumentByCanonicalKey(ctx context.Context, kbID, canonicalKey, fileURL string) (*model.KnowledgeDocument, error) {
+	var doc model.KnowledgeDocument
+	query := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("kb_id = ? AND source_type = ?", kbID, "internal_url").
+		Where("canonical_source_key = ?", strings.TrimSpace(canonicalKey))
+	if err := query.First(&doc).Error; err == nil {
+		return &doc, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if strings.TrimSpace(fileURL) == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	if err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("kb_id = ? AND source_type = ? AND file_url = ?", kbID, "internal_url", strings.TrimSpace(fileURL)).
+		First(&doc).Error; err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
+func (s *DocumentService) upsertInternalURLDocumentTx(ctx context.Context, doc *model.KnowledgeDocument) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		updates := map[string]any{
+			"doc_name":             doc.DocName,
+			"enabled":              int16(1),
+			"file_url":             doc.FileURL,
+			"file_type":            doc.FileType,
+			"file_size":            doc.FileSize,
+			"status":               doc.Status,
+			"source_type":          doc.SourceType,
+			"source_location":      doc.SourceLocation,
+			"canonical_source_key": doc.CanonicalSourceKey,
+			"source_root_key":      doc.SourceRootKey,
+			"source_parent_key":    doc.SourceParentKey,
+			"source_content_hash":  doc.SourceContentHash,
+			"schedule_enabled":     doc.ScheduleEnabled,
+			"schedule_cron":        doc.ScheduleCron,
+			"updated_by":           doc.UpdatedBy,
+			"update_time":          time.Now(),
+		}
+		if err := tx.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", doc.ID).Updates(updates).Error; err != nil {
+			return fmt.Errorf("update internal url document: %w", err)
+		}
+		if err := s.syncDocumentScheduleTx(ctx, tx, doc, doc.ScheduleEnabled, doc.ScheduleCron); err != nil {
+			return fmt.Errorf("sync document schedule: %w", err)
+		}
+		return nil
+	})
+}
+
+// InternalURLCanonicalSourceKey 返回内部文档在知识库内去重使用的稳定来源标识。
+func InternalURLCanonicalSourceKey(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	spaceID := strings.TrimSpace(parsed.Query().Get("spaceId"))
+	docID := strings.TrimSpace(parsed.Query().Get("docId"))
+	if spaceID == "" || docID == "" {
+		return ""
+	}
+	return "internal_url:geelib:" + spaceID + ":" + docID
 }
 
 func pipelineIDFromChunkConfig(raw string) string {
@@ -2520,27 +2636,31 @@ func (s *DocumentService) PreviewDocument(ctx context.Context, docID string) (st
 
 func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentResp {
 	return &dto.DocumentResp{
-		ID:              doc.ID,
-		KbID:            doc.KbID,
-		DocName:         doc.DocName,
-		Enabled:         doc.Enabled == 1,
-		ChunkCount:      doc.ChunkCount,
-		FileURL:         doc.FileURL,
-		FileType:        doc.FileType,
-		FileSize:        doc.FileSize,
-		ProcessMode:     doc.ProcessMode,
-		Status:          doc.Status,
-		SourceType:      doc.SourceType,
-		SourceLocation:  doc.SourceLocation,
-		ScheduleEnabled: doc.ScheduleEnabled,
-		ScheduleCron:    doc.ScheduleCron,
-		ChunkStrategy:   doc.ChunkStrategy,
-		ChunkConfig:     doc.ChunkConfig,
-		PipelineID:      doc.PipelineID,
-		CreatedBy:       doc.CreatedBy,
-		UpdatedBy:       doc.UpdatedBy,
-		CreateTime:      doc.CreateTime.Format(time.RFC3339),
-		UpdateTime:      doc.UpdateTime.Format(time.RFC3339),
+		ID:                 doc.ID,
+		KbID:               doc.KbID,
+		DocName:            doc.DocName,
+		Enabled:            doc.Enabled == 1,
+		ChunkCount:         doc.ChunkCount,
+		FileURL:            doc.FileURL,
+		FileType:           doc.FileType,
+		FileSize:           doc.FileSize,
+		ProcessMode:        doc.ProcessMode,
+		Status:             doc.Status,
+		SourceType:         doc.SourceType,
+		SourceLocation:     doc.SourceLocation,
+		CanonicalSourceKey: doc.CanonicalSourceKey,
+		SourceRootKey:      doc.SourceRootKey,
+		SourceParentKey:    doc.SourceParentKey,
+		SourceContentHash:  doc.SourceContentHash,
+		ScheduleEnabled:    doc.ScheduleEnabled,
+		ScheduleCron:       doc.ScheduleCron,
+		ChunkStrategy:      doc.ChunkStrategy,
+		ChunkConfig:        doc.ChunkConfig,
+		PipelineID:         doc.PipelineID,
+		CreatedBy:          doc.CreatedBy,
+		UpdatedBy:          doc.UpdatedBy,
+		CreateTime:         doc.CreateTime.Format(time.RFC3339),
+		UpdateTime:         doc.UpdateTime.Format(time.RFC3339),
 	}
 }
 

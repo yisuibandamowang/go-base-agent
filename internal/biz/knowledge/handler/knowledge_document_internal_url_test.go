@@ -21,12 +21,46 @@ import (
 )
 
 type fakeInternalURLFetcher struct {
-	docs []crawler.Document
-	err  error
+	docs      []crawler.Document
+	docsByURL map[string][]crawler.Document
+	err       error
 }
 
-func (f fakeInternalURLFetcher) FetchDocuments(context.Context, string) ([]crawler.Document, error) {
+func (f fakeInternalURLFetcher) FetchDocuments(_ context.Context, location string) ([]crawler.Document, error) {
+	if f.docsByURL != nil {
+		if docs, ok := f.docsByURL[location]; ok {
+			return docs, f.err
+		}
+	}
 	return f.docs, f.err
+}
+
+func postInternalURLUpload(t *testing.T, r http.Handler, kbID, sourceLocation string, scheduleEnabled bool) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("sourceType", "internal_url"); err != nil {
+		t.Fatalf("write sourceType: %v", err)
+	}
+	if err := writer.WriteField("sourceLocation", sourceLocation); err != nil {
+		t.Fatalf("write sourceLocation: %v", err)
+	}
+	if scheduleEnabled {
+		if err := writer.WriteField("scheduleEnabled", "1"); err != nil {
+			t.Fatalf("write scheduleEnabled: %v", err)
+		}
+		if err := writer.WriteField("scheduleCron", "@every 1h"); err != nil {
+			t.Fatalf("write scheduleCron: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/ragent/knowledge-base/"+kbID+"/docs/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	r.ServeHTTP(w, req)
+	return w
 }
 
 func TestUploadInternalURLDocumentCreatesPendingDocsWithoutAutoChunk(t *testing.T) {
@@ -226,6 +260,200 @@ func TestUploadInternalURLSingleDocumentRemainsPending(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected no auto chunks, got %d", count)
+	}
+}
+
+func TestUploadInternalURLParentReusesExistingChildDocuments(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	const (
+		sURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=s"
+		aURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=a"
+		bURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=b"
+		cURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=c"
+		dURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=d"
+		eURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=e"
+		fURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=f"
+	)
+
+	fileStore := NewFileStore()
+	svc := knowledgeService.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		knowledgeServiceTestEmbeddingService{},
+		&knowledgeServiceTestVectorStore{},
+		fileStore,
+	)
+	h := NewDocumentHandler(svc, fileStore)
+	h.SetInternalURLFetcher(fakeInternalURLFetcher{
+		docsByURL: map[string][]crawler.Document{
+			aURL: {
+				{Meta: crawler.DocumentMeta{ID: "a", Title: "A.md", URL: aURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# A")},
+				{Meta: crawler.DocumentMeta{ID: "b", Title: "B.md", URL: bURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# B")},
+				{Meta: crawler.DocumentMeta{ID: "c", Title: "C.md", URL: cURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# C")},
+			},
+			sURL: {
+				{Meta: crawler.DocumentMeta{ID: "s", Title: "S.md", URL: sURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# S")},
+				{Meta: crawler.DocumentMeta{ID: "a", Title: "A.md", URL: aURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# A")},
+				{Meta: crawler.DocumentMeta{ID: "b", Title: "B.md", URL: bURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# B")},
+				{Meta: crawler.DocumentMeta{ID: "c", Title: "C.md", URL: cURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# C")},
+				{Meta: crawler.DocumentMeta{ID: "d", Title: "D.md", URL: dURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# D")},
+				{Meta: crawler.DocumentMeta{ID: "e", Title: "E.md", URL: eURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# E")},
+				{Meta: crawler.DocumentMeta{ID: "f", Title: "F.md", URL: fURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# F")},
+			},
+		},
+	})
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	first := postInternalURLUpload(t, r, kb.ID, aURL, false)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first upload expected 200, got %d", first.Code)
+	}
+	var oldA model.KnowledgeDocument
+	if err := gdb.First(&oldA, "file_url = ?", aURL).Error; err != nil {
+		t.Fatalf("find uploaded a: %v", err)
+	}
+
+	second := postInternalURLUpload(t, r, kb.ID, sURL, false)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second upload expected 200, got %d", second.Code)
+	}
+
+	var count int64
+	if err := gdb.Model(&model.KnowledgeDocument{}).Count(&count).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if count != 7 {
+		t.Fatalf("expected parent upload to reuse existing a/b/c and keep 7 docs total, got %d", count)
+	}
+	var currentA model.KnowledgeDocument
+	if err := gdb.First(&currentA, "file_url = ?", aURL).Error; err != nil {
+		t.Fatalf("find current a: %v", err)
+	}
+	if currentA.ID != oldA.ID {
+		t.Fatalf("expected existing a doc to be reused, old=%s current=%s", oldA.ID, currentA.ID)
+	}
+	if currentA.SourceRootKey != "internal_url:geelib:5:s" {
+		t.Fatalf("expected a to be reassigned under s root, got source_root_key=%q", currentA.SourceRootKey)
+	}
+}
+
+func TestUploadInternalURLParentScheduleTakesOverChildSchedule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}, &model.KnowledgeDocumentSchedule{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	const (
+		sURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=s"
+		aURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=a"
+		bURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=b"
+		cURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=c"
+		dURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=d"
+		eURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=e"
+		fURL = "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=f"
+	)
+
+	fileStore := NewFileStore()
+	svc := knowledgeService.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		knowledgeServiceTestEmbeddingService{},
+		&knowledgeServiceTestVectorStore{},
+		fileStore,
+	)
+	svc.SetScheduleRepo(repo.NewKnowledgeDocumentScheduleRepo(gdb))
+	h := NewDocumentHandler(svc, fileStore)
+	h.SetInternalURLFetcher(fakeInternalURLFetcher{
+		docsByURL: map[string][]crawler.Document{
+			aURL: {
+				{Meta: crawler.DocumentMeta{ID: "a", Title: "A.md", URL: aURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# A")},
+				{Meta: crawler.DocumentMeta{ID: "b", Title: "B.md", URL: bURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# B")},
+				{Meta: crawler.DocumentMeta{ID: "c", Title: "C.md", URL: cURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# C")},
+			},
+			sURL: {
+				{Meta: crawler.DocumentMeta{ID: "s", Title: "S.md", URL: sURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# S")},
+				{Meta: crawler.DocumentMeta{ID: "a", Title: "A.md", URL: aURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# A")},
+				{Meta: crawler.DocumentMeta{ID: "b", Title: "B.md", URL: bURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# B")},
+				{Meta: crawler.DocumentMeta{ID: "c", Title: "C.md", URL: cURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# C")},
+				{Meta: crawler.DocumentMeta{ID: "d", Title: "D.md", URL: dURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# D")},
+				{Meta: crawler.DocumentMeta{ID: "e", Title: "E.md", URL: eURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# E")},
+				{Meta: crawler.DocumentMeta{ID: "f", Title: "F.md", URL: fURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# F")},
+			},
+		},
+	})
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+
+	first := postInternalURLUpload(t, r, kb.ID, aURL, true)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first upload expected 200, got %d", first.Code)
+	}
+	var oldA model.KnowledgeDocument
+	if err := gdb.First(&oldA, "file_url = ?", aURL).Error; err != nil {
+		t.Fatalf("find uploaded a: %v", err)
+	}
+
+	second := postInternalURLUpload(t, r, kb.ID, sURL, true)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second upload expected 200, got %d", second.Code)
+	}
+
+	var docCount int64
+	if err := gdb.Model(&model.KnowledgeDocument{}).Count(&docCount).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if docCount != 7 {
+		t.Fatalf("expected 7 docs after parent takeover, got %d", docCount)
+	}
+	var scheduleCount int64
+	if err := gdb.Model(&model.KnowledgeDocumentSchedule{}).Count(&scheduleCount).Error; err != nil {
+		t.Fatalf("count schedules: %v", err)
+	}
+	if scheduleCount != 1 {
+		t.Fatalf("expected only parent schedule to remain, got %d", scheduleCount)
+	}
+	var childScheduleCount int64
+	if err := gdb.Model(&model.KnowledgeDocumentSchedule{}).Where("doc_id = ?", oldA.ID).Count(&childScheduleCount).Error; err != nil {
+		t.Fatalf("count child schedules: %v", err)
+	}
+	if childScheduleCount != 0 {
+		t.Fatalf("expected old a schedule to be removed, got %d", childScheduleCount)
+	}
+	var parentSchedule model.KnowledgeDocumentSchedule
+	if err := gdb.First(&parentSchedule).Error; err != nil {
+		t.Fatalf("find parent schedule: %v", err)
+	}
+	var parentDoc model.KnowledgeDocument
+	if err := gdb.First(&parentDoc, "id = ?", parentSchedule.DocID).Error; err != nil {
+		t.Fatalf("find parent schedule doc: %v", err)
+	}
+	if parentDoc.FileURL != sURL || parentDoc.ScheduleEnabled != 1 {
+		t.Fatalf("expected s to own schedule, got doc=%+v schedule=%+v", parentDoc, parentSchedule)
 	}
 }
 

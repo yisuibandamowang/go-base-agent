@@ -54,6 +54,11 @@ func TestGeelibSourceFetchDocumentsRecursesNestedTree(t *testing.T) {
 	if docs[0].Meta.SourceName != "geelib" || docs[0].Meta.URL != "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=425274" {
 		t.Fatalf("unexpected source metadata: %+v", docs[0].Meta)
 	}
+	if docs[0].Meta.Extra["parent_doc_id"] != "" ||
+		docs[1].Meta.Extra["parent_doc_id"] != "425274" ||
+		docs[2].Meta.Extra["parent_doc_id"] != "111" {
+		t.Fatalf("unexpected parent metadata: root=%+v child=%+v grandchild=%+v", docs[0].Meta.Extra, docs[1].Meta.Extra, docs[2].Meta.Extra)
+	}
 }
 
 func TestGeelibSourceRejectsInvalidURL(t *testing.T) {

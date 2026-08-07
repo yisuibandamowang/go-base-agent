@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"mime"
@@ -265,6 +266,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 	}
 	resp := internalURLUploadResp{Total: len(docs)}
 	parentURL := strings.TrimSpace(req.SourceLocation)
+	rootKey := service.InternalURLCanonicalSourceKey(parentURL)
 	for idx, doc := range docs {
 		docReq := req
 		docReq.SourceType = "internal_url"
@@ -276,11 +278,15 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		docReq.FileURL = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
 		docReq.FileType = internalURLFileType(doc.Meta.MimeType, docReq.DocName)
 		docReq.FileSize = int64(len(doc.Content))
+		docReq.CanonicalSourceKey = service.InternalURLCanonicalSourceKey(docReq.FileURL)
+		docReq.SourceRootKey = rootKey
+		docReq.SourceParentKey = service.InternalURLCanonicalSourceKey(doc.Meta.Extra["parent_url"])
+		docReq.SourceContentHash = internalURLContentHash(doc.Content)
 		if req.ScheduleEnabled == 1 && idx > 0 {
 			docReq.ScheduleEnabled = 0
 			docReq.ScheduleCron = ""
 		}
-		created, err := h.svc.CreateDocument(c.Request.Context(), kbID, docReq, operator)
+		created, err := h.svc.UpsertInternalURLDocument(c.Request.Context(), kbID, docReq, operator)
 		if err != nil {
 			resp.Failed++
 			resp.Errors = append(resp.Errors, err.Error())
@@ -295,6 +301,11 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		resp.Documents = append(resp.Documents, created)
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+func internalURLContentHash(content []byte) string {
+	sum := sha256.Sum256(content)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func internalURLFileType(mimeType, docName string) string {

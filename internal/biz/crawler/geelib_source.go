@@ -126,6 +126,15 @@ func (s *GeelibSource) fetchDocument(ctx context.Context, ref geelibURLRef, node
 		title += ".md"
 	}
 	docURL := fmt.Sprintf("https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=%s&docId=%s", ref.spaceID, node.docIDString())
+	extra := map[string]string{
+		"space_id":    ref.spaceID,
+		"doc_id":      node.docIDString(),
+		"source_type": "internal_url",
+	}
+	if parentDocID := strings.TrimSpace(node.ParentDocID); parentDocID != "" {
+		extra["parent_doc_id"] = parentDocID
+		extra["parent_url"] = fmt.Sprintf("https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=%s&docId=%s", ref.spaceID, parentDocID)
+	}
 	return &Document{
 		Meta: DocumentMeta{
 			ID:         node.docIDString(),
@@ -133,11 +142,7 @@ func (s *GeelibSource) fetchDocument(ctx context.Context, ref geelibURLRef, node
 			URL:        docURL,
 			MimeType:   "text/markdown",
 			SourceName: "geelib",
-			Extra: map[string]string{
-				"space_id":    ref.spaceID,
-				"doc_id":      node.docIDString(),
-				"source_type": "internal_url",
-			},
+			Extra:      extra,
 		},
 		Content: content,
 	}, nil
@@ -212,9 +217,10 @@ func hostAllowed(host string, domains []string) bool {
 }
 
 type geelibTreeNode struct {
-	DocID    string
-	Title    string
-	Children []geelibTreeNode
+	DocID       string
+	Title       string
+	ParentDocID string
+	Children    []geelibTreeNode
 }
 
 func (n geelibTreeNode) docIDString() string {
@@ -267,11 +273,15 @@ func collectGeelibTreeNodes(value any) []geelibTreeNode {
 }
 
 func flattenGeelibTreeNodes(nodes []geelibTreeNode) []geelibTreeNode {
+	return flattenGeelibTreeNodesWithParent(nodes, "")
+}
+
+func flattenGeelibTreeNodesWithParent(nodes []geelibTreeNode, parentDocID string) []geelibTreeNode {
 	var out []geelibTreeNode
 	for _, node := range nodes {
-		out = append(out, geelibTreeNode{DocID: node.DocID, Title: node.Title})
+		out = append(out, geelibTreeNode{DocID: node.DocID, Title: node.Title, ParentDocID: parentDocID})
 		if len(node.Children) > 0 {
-			out = append(out, flattenGeelibTreeNodes(node.Children)...)
+			out = append(out, flattenGeelibTreeNodesWithParent(node.Children, node.docIDString())...)
 		}
 	}
 	return out

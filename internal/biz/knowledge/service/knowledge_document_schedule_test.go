@@ -286,6 +286,122 @@ func TestDocumentScheduleService_ScanDueSyncsInternalURLTree(t *testing.T) {
 	}
 }
 
+func TestDocumentScheduleService_InternalURLTreeRefreshReusesCanonicalChild(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeBase{},
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+		&knowledgeModel.KnowledgeDocumentScheduleExec{},
+	); err != nil {
+		t.Fatalf("migrate schedule tables: %v", err)
+	}
+
+	now := time.Date(2026, 8, 7, 10, 0, 0, 0, time.UTC)
+	sURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=s"
+	aURL := "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=a"
+	kb := &knowledgeModel.KnowledgeBase{Name: "kb", CollectionName: "kb_collection", EmbeddingModel: "emb", CreatedBy: "tester"}
+	kb.ID = "kb-canonical"
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+	docS := &knowledgeModel.KnowledgeDocument{
+		KbID:               kb.ID,
+		DocName:            "S.md",
+		FileURL:            sURL,
+		FileType:           "md",
+		SourceType:         "internal_url",
+		SourceLocation:     sURL,
+		CanonicalSourceKey: InternalURLCanonicalSourceKey(sURL),
+		SourceRootKey:      InternalURLCanonicalSourceKey(sURL),
+		ScheduleEnabled:    1,
+		ScheduleCron:       "@every 1h",
+		Status:             "success",
+		CreatedBy:          "user-1",
+	}
+	docS.ID = "doc-s"
+	docA := &knowledgeModel.KnowledgeDocument{
+		KbID:               kb.ID,
+		DocName:            "A.md",
+		FileURL:            aURL,
+		FileType:           "md",
+		SourceType:         "internal_url",
+		SourceLocation:     aURL,
+		CanonicalSourceKey: InternalURLCanonicalSourceKey(aURL),
+		SourceRootKey:      InternalURLCanonicalSourceKey(aURL),
+		Status:             "success",
+		CreatedBy:          "user-1",
+	}
+	docA.ID = "doc-a"
+	if err := gdb.Create(docS).Error; err != nil {
+		t.Fatalf("seed doc s: %v", err)
+	}
+	if err := gdb.Create(docA).Error; err != nil {
+		t.Fatalf("seed doc a: %v", err)
+	}
+	schedule := &knowledgeModel.KnowledgeDocumentSchedule{
+		DocID:       docS.ID,
+		KbID:        kb.ID,
+		CronExpr:    "@every 1h",
+		Enabled:     1,
+		NextRunTime: ptrTime(now.Add(-time.Minute)),
+	}
+	if err := gdb.Create(schedule).Error; err != nil {
+		t.Fatalf("seed schedule: %v", err)
+	}
+
+	fileStore := &fakeScheduleCollectionFileStore{files: map[string][]byte{
+		kb.CollectionName + "/" + docS.ID: []byte("# S old"),
+		kb.CollectionName + "/" + docA.ID: []byte("# A old"),
+	}}
+	chunkStarter := &fakeScheduleChunkRunner{}
+	source := &fakeScheduleGeelibSource{
+		docs: []crawler.Document{
+			{Meta: crawler.DocumentMeta{ID: "s", Title: "S.md", URL: sURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# S")},
+			{Meta: crawler.DocumentMeta{ID: "a", Title: "A.md", URL: aURL, MimeType: "text/markdown", SourceName: "geelib", Extra: map[string]string{"parent_url": sURL}}, Content: []byte("# A")},
+		},
+	}
+	svc := NewDocumentScheduleService(
+		gdb,
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		fileStore,
+		chunkStarter,
+		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 60},
+	)
+	svc.now = func() time.Time { return now }
+	svc.RegisterSource(source)
+
+	count, err := svc.ScanDue(context.Background())
+	if err != nil {
+		t.Fatalf("scan due: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 processed schedule, got %d", count)
+	}
+	var docCount int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocument{}).Count(&docCount).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if docCount != 2 {
+		t.Fatalf("expected canonical child reuse and 2 docs total, got %d", docCount)
+	}
+	var updatedA knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&updatedA, "id = ?", docA.ID).Error; err != nil {
+		t.Fatalf("find updated a: %v", err)
+	}
+	if updatedA.SourceRootKey != InternalURLCanonicalSourceKey(sURL) {
+		t.Fatalf("expected a to be reassigned under s root, got %q", updatedA.SourceRootKey)
+	}
+	if updatedA.SourceParentKey != InternalURLCanonicalSourceKey(sURL) {
+		t.Fatalf("expected a parent to be s, got %q", updatedA.SourceParentKey)
+	}
+}
+
 func TestDocumentScheduleService_ScanDueKeepsManuallyDisabledInternalURLChildDisabled(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

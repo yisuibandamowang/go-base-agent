@@ -6,24 +6,28 @@ import "go-base-agent/internal/framework/db"
 type KnowledgeDocument struct {
 	db.BaseModel
 
-	KbID            string `gorm:"column:kb_id;type:varchar(20);not null;index:idx_kb_id" json:"kbId"`
-	DocName         string `gorm:"column:doc_name;type:varchar(256);not null" json:"docName"`
-	Enabled         int16  `gorm:"column:enabled;type:smallint;default:1" json:"enabled"`
-	ChunkCount      int    `gorm:"column:chunk_count;default:0" json:"chunkCount"`
-	FileURL         string `gorm:"column:file_url;type:varchar(1024);not null" json:"fileUrl"`
-	FileType        string `gorm:"column:file_type;type:varchar(16);not null" json:"fileType"`
-	FileSize        int64  `gorm:"column:file_size;type:bigint" json:"fileSize"`
-	ProcessMode     string `gorm:"column:process_mode;type:varchar(16);default:chunk" json:"processMode"`
-	Status          string `gorm:"column:status;type:varchar(16);default:pending" json:"status"`
-	SourceType      string `gorm:"column:source_type;type:varchar(16)" json:"sourceType"`
-	SourceLocation  string `gorm:"column:source_location;type:varchar(1024)" json:"sourceLocation"`
-	ScheduleEnabled int16  `gorm:"column:schedule_enabled;type:smallint" json:"scheduleEnabled"`
-	ScheduleCron    string `gorm:"column:schedule_cron;type:varchar(64)" json:"scheduleCron"`
-	ChunkStrategy   string `gorm:"column:chunk_strategy;type:varchar(32)" json:"chunkStrategy"`
-	ChunkConfig     string `gorm:"column:chunk_config;type:jsonb" json:"chunkConfig"`
-	PipelineID      string `gorm:"column:pipeline_id;type:varchar(20)" json:"pipelineId"`
-	CreatedBy       string `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
-	UpdatedBy       string `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`
+	KbID               string `gorm:"column:kb_id;type:varchar(20);not null;index:idx_kb_id" json:"kbId"`
+	DocName            string `gorm:"column:doc_name;type:varchar(256);not null" json:"docName"`
+	Enabled            int16  `gorm:"column:enabled;type:smallint;default:1" json:"enabled"`
+	ChunkCount         int    `gorm:"column:chunk_count;default:0" json:"chunkCount"`
+	FileURL            string `gorm:"column:file_url;type:varchar(1024);not null" json:"fileUrl"`
+	FileType           string `gorm:"column:file_type;type:varchar(16);not null" json:"fileType"`
+	FileSize           int64  `gorm:"column:file_size;type:bigint" json:"fileSize"`
+	ProcessMode        string `gorm:"column:process_mode;type:varchar(16);default:chunk" json:"processMode"`
+	Status             string `gorm:"column:status;type:varchar(16);default:pending" json:"status"`
+	SourceType         string `gorm:"column:source_type;type:varchar(16)" json:"sourceType"`
+	SourceLocation     string `gorm:"column:source_location;type:varchar(1024)" json:"sourceLocation"`
+	CanonicalSourceKey string `gorm:"column:canonical_source_key;type:varchar(256)" json:"canonicalSourceKey"`
+	SourceRootKey      string `gorm:"column:source_root_key;type:varchar(256)" json:"sourceRootKey"`
+	SourceParentKey    string `gorm:"column:source_parent_key;type:varchar(256)" json:"sourceParentKey"`
+	SourceContentHash  string `gorm:"column:source_content_hash;type:varchar(64)" json:"sourceContentHash"`
+	ScheduleEnabled    int16  `gorm:"column:schedule_enabled;type:smallint" json:"scheduleEnabled"`
+	ScheduleCron       string `gorm:"column:schedule_cron;type:varchar(64)" json:"scheduleCron"`
+	ChunkStrategy      string `gorm:"column:chunk_strategy;type:varchar(32)" json:"chunkStrategy"`
+	ChunkConfig        string `gorm:"column:chunk_config;type:jsonb" json:"chunkConfig"`
+	PipelineID         string `gorm:"column:pipeline_id;type:varchar(20)" json:"pipelineId"`
+	CreatedBy          string `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
+	UpdatedBy          string `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`
 }
 
 func (KnowledgeDocument) TableName() string {
