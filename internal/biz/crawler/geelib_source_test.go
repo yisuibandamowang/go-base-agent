@@ -75,6 +75,17 @@ func TestGeelibSourceRejectsInvalidURL(t *testing.T) {
 	}
 }
 
+func TestGeelibReadContentExtractsEditorCLIWrappedText(t *testing.T) {
+	payload := []byte(`{"success":true,"command":"read","data":{"docId":437010,"format":"markdown","content":{"content":[{"type":"text","text":"该文档内容为空"}]}}}`)
+	content, err := extractGeelibReadContent(payload)
+	if err != nil {
+		t.Fatalf("extract geelib read content: %v", err)
+	}
+	if string(content) != "该文档内容为空" {
+		t.Fatalf("expected wrapped text content, got %q", string(content))
+	}
+}
+
 func TestGeelibSourceParsesTreePayloadShape(t *testing.T) {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(`{"errno":2000,"errmsg":"Success","data":{"tree":{"docId":425274,"title":"根文档","children":[{"docId":111,"title":"一级子文档"}]}}}`), &payload); err != nil {

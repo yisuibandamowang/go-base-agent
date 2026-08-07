@@ -389,6 +389,9 @@ func InternalURLCanonicalSourceKey(rawURL string) string {
 
 // InternalURLNodeType 识别内部文档树节点类型。
 func InternalURLNodeType(content []byte, extra map[string]string) string {
+	if isInternalURLEmptyContentPlaceholder(content) {
+		return "folder"
+	}
 	if strings.TrimSpace(string(content)) == "" && strings.EqualFold(strings.TrimSpace(extra["has_children"]), "true") {
 		return "folder"
 	}
@@ -396,6 +399,11 @@ func InternalURLNodeType(content []byte, extra map[string]string) string {
 		return "folder"
 	}
 	return "document"
+}
+
+func isInternalURLEmptyContentPlaceholder(content []byte) bool {
+	text := strings.TrimSpace(strings.TrimPrefix(string(content), "\ufeff"))
+	return text == "该文档内容为空"
 }
 
 func normalizeInternalURLNodeType(raw string) string {

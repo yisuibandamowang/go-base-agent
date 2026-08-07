@@ -1336,6 +1336,13 @@ func TestDocumentService_StartChunkSkipsInternalURLFolderNode(t *testing.T) {
 	}
 }
 
+func TestInternalURLNodeTypeTreatsGeelibEmptyPlaceholderAsFolder(t *testing.T) {
+	nodeType := InternalURLNodeType([]byte("该文档内容为空"), nil)
+	if nodeType != "folder" {
+		t.Fatalf("expected geelib empty placeholder to be folder, got %q", nodeType)
+	}
+}
+
 func TestDocumentService_CreateDocumentRejectsEnabledScheduleWithoutCron(t *testing.T) {
 	_, kb, svc := newDocumentServiceTestContext(t)
 

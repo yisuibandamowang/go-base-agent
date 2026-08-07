@@ -467,7 +467,7 @@ func TestDocumentScheduleService_InternalURLTreeSkipsEmptyFolderChunking(t *test
 	source := &fakeScheduleGeelibSource{
 		docs: []crawler.Document{
 			{Meta: crawler.DocumentMeta{ID: "368231", Title: "根文档.md", URL: rootURL, MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# 根文档")},
-			{Meta: crawler.DocumentMeta{ID: "folder", Title: "目录节点.md", URL: folderURL, MimeType: "text/markdown", SourceName: "geelib", Extra: map[string]string{"parent_url": rootURL, "has_children": "true"}}, Content: nil},
+			{Meta: crawler.DocumentMeta{ID: "folder", Title: "目录节点.md", URL: folderURL, MimeType: "text/markdown", SourceName: "geelib", Extra: map[string]string{"parent_url": rootURL, "has_children": "true"}}, Content: []byte("该文档内容为空")},
 			{Meta: crawler.DocumentMeta{ID: "leaf", Title: "正文文档.md", URL: leafURL, MimeType: "text/markdown", SourceName: "geelib", Extra: map[string]string{"parent_url": folderURL}}, Content: []byte("# 正文")},
 		},
 	}
