@@ -609,6 +609,29 @@ rag:
 	}
 }
 
+func TestLoadParsesRAGKnowledgeGeelibImportTaskTimeout(t *testing.T) {
+	yaml := `
+rag:
+  knowledge:
+    geelib:
+      import-task-timeout-minutes: 45
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Knowledge.Geelib.ImportTaskTimeoutMinutes != 45 {
+		t.Fatalf("unexpected geelib import task timeout minutes: %d", cfg.RAG.Knowledge.Geelib.ImportTaskTimeoutMinutes)
+	}
+}
+
 func TestLoadParsesAppIntentTreeInitFromFactory(t *testing.T) {
 	yaml := `
 app:

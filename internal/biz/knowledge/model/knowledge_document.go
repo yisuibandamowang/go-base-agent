@@ -35,6 +35,34 @@ func (KnowledgeDocument) TableName() string {
 	return "t_knowledge_document"
 }
 
+// KnowledgeInternalURLImportTask 对应内部 URL 导入任务表。
+type KnowledgeInternalURLImportTask struct {
+	db.BaseModel
+
+	KbID              string  `gorm:"column:kb_id;type:varchar(20);not null;index:idx_internal_url_import_kb" json:"kbId"`
+	SourceLocation    string  `gorm:"column:source_location;type:varchar(1024);not null" json:"sourceLocation"`
+	Status            string  `gorm:"column:status;type:varchar(16);not null;index:idx_internal_url_import_status" json:"status"`
+	Total             int     `gorm:"column:total;default:0" json:"total"`
+	Success           int     `gorm:"column:success;default:0" json:"success"`
+	Failed            int     `gorm:"column:failed;default:0" json:"failed"`
+	ExistingUnchanged int     `gorm:"column:existing_unchanged;default:0" json:"existingUnchanged"`
+	ExistingChunked   int     `gorm:"column:existing_chunked;default:0" json:"existingChunked"`
+	ExistingEnabled   int     `gorm:"column:existing_enabled;default:0" json:"existingEnabled"`
+	NewDocuments      int     `gorm:"column:new_documents;default:0" json:"newDocuments"`
+	ChangedDocuments  int     `gorm:"column:changed_documents;default:0" json:"changedDocuments"`
+	StrategyChanged   int     `gorm:"column:strategy_changed_documents;default:0" json:"strategyChangedDocuments"`
+	Chunkable         int     `gorm:"column:chunkable;default:0" json:"chunkable"`
+	SkippedChunked    int     `gorm:"column:skipped_chunked;default:0" json:"skippedChunked"`
+	ResultJSON        *string `gorm:"column:result_json;type:jsonb" json:"resultJson"`
+	ErrorMessage      string  `gorm:"column:error_message;type:varchar(1024)" json:"errorMessage"`
+	CreatedBy         string  `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
+	UpdatedBy         string  `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`
+}
+
+func (KnowledgeInternalURLImportTask) TableName() string {
+	return "t_knowledge_internal_url_import_task"
+}
+
 // KnowledgeChunk 对应 t_knowledge_chunk 表。
 type KnowledgeChunk struct {
 	db.BaseModel

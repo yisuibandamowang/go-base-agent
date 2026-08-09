@@ -247,18 +247,19 @@ type RAGKnowledgeConfluenceConfig struct {
 }
 
 type RAGKnowledgeGeelibConfig struct {
-	Enabled        *bool    `mapstructure:"enabled"`
-	APIBaseURL     string   `mapstructure:"api-base-url"`
-	AppToken       string   `mapstructure:"app-token"`
-	UserMail       string   `mapstructure:"user-mail"`
-	UserToken      string   `mapstructure:"user-token"`
-	SessionCookie  string   `mapstructure:"session-cookie"`
-	WorkDir        string   `mapstructure:"work-dir"`
-	Command        string   `mapstructure:"command"`
-	Tool           string   `mapstructure:"tool"`
-	TimeoutSeconds int      `mapstructure:"timeout-seconds"`
-	MaxBytes       int64    `mapstructure:"max-bytes"`
-	Domains        []string `mapstructure:"domains"`
+	Enabled                  *bool    `mapstructure:"enabled"`
+	APIBaseURL               string   `mapstructure:"api-base-url"`
+	AppToken                 string   `mapstructure:"app-token"`
+	UserMail                 string   `mapstructure:"user-mail"`
+	UserToken                string   `mapstructure:"user-token"`
+	SessionCookie            string   `mapstructure:"session-cookie"`
+	WorkDir                  string   `mapstructure:"work-dir"`
+	Command                  string   `mapstructure:"command"`
+	Tool                     string   `mapstructure:"tool"`
+	TimeoutSeconds           int      `mapstructure:"timeout-seconds"`
+	ImportTaskTimeoutMinutes int      `mapstructure:"import-task-timeout-minutes"`
+	MaxBytes                 int64    `mapstructure:"max-bytes"`
+	Domains                  []string `mapstructure:"domains"`
 }
 
 func (c RAGKnowledgeGeelibConfig) IsEnabledByDefault() bool {

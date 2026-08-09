@@ -100,6 +100,7 @@ rag:
       command: ${GEELIB_CLI_COMMAND:editor-cli}
       tool: ${GEELIB_CLI_TOOL:}
       timeout-seconds: ${GEELIB_CLI_TIMEOUT_SECONDS:30}
+      import-task-timeout-minutes: ${GEELIB_IMPORT_TASK_TIMEOUT_MINUTES:30}
       max-bytes: ${GEELIB_CLI_MAX_BYTES:52428800}
       domains:
         - geelib.qihoo.net

@@ -3,8 +3,10 @@ package handler
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -18,12 +20,14 @@ import (
 	coreparser "go-base-agent/internal/biz/core/parser"
 	"go-base-agent/internal/biz/crawler"
 	"go-base-agent/internal/biz/knowledge/dto"
+	"go-base-agent/internal/biz/knowledge/model"
 	"go-base-agent/internal/biz/knowledge/service"
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/ratelimit"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // DocumentHandler 文档管理 HTTP 处理层。
@@ -33,6 +37,8 @@ type DocumentHandler struct {
 	internalURLFetcher internalURLFetcher
 	uploadLimiter      uploadLimiter
 	uploadMaxWait      time.Duration
+	internalURLTaskDB  *gorm.DB
+	internalURLTaskTTL time.Duration
 }
 
 type uploadLimiter interface {
@@ -57,6 +63,24 @@ func (h *DocumentHandler) SetUploadLimiter(limiter uploadLimiter, maxWait time.D
 // SetInternalURLFetcher 设置内部 URL 拉取器。
 func (h *DocumentHandler) SetInternalURLFetcher(fetcher internalURLFetcher) {
 	h.internalURLFetcher = fetcher
+}
+
+// SetInternalURLImportTaskStore 设置内部 URL 异步导入任务存储。
+func (h *DocumentHandler) SetInternalURLImportTaskStore(gdb *gorm.DB, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	if gdb == nil {
+		h.internalURLTaskDB = nil
+		h.internalURLTaskTTL = timeout
+		return nil
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeInternalURLImportTask{}); err != nil {
+		return fmt.Errorf("migrate internal url import task table: %w", err)
+	}
+	h.internalURLTaskDB = gdb
+	h.internalURLTaskTTL = timeout
+	return nil
 }
 
 // Upload POST /knowledge-base/:id/docs/upload
@@ -256,28 +280,71 @@ type internalURLUploadItem struct {
 	req dto.CreateDocumentReq
 }
 
+type internalURLImportTaskResp struct {
+	TaskID                string              `json:"taskId"`
+	Status                string              `json:"status"`
+	ErrorMessage          string              `json:"errorMessage,omitempty"`
+	Total                 int                 `json:"total"`
+	Success               int                 `json:"success"`
+	Failed                int                 `json:"failed"`
+	ExistingUnchanged     int                 `json:"existingUnchanged"`
+	ExistingChunked       int                 `json:"existingChunked"`
+	ExistingEnabled       int                 `json:"existingEnabled"`
+	NewDocuments          int                 `json:"newDocuments"`
+	ChangedDocuments      int                 `json:"changedDocuments"`
+	StrategyChanged       int                 `json:"strategyChangedDocuments"`
+	Chunkable             int                 `json:"chunkable"`
+	SkippedChunked        int                 `json:"skippedChunked"`
+	Documents             []*dto.DocumentResp `json:"documents,omitempty"`
+	ChunkableDocuments    []*dto.DocumentResp `json:"chunkableDocuments,omitempty"`
+	SkippedChunkDocuments []*dto.DocumentResp `json:"skippedChunkDocuments,omitempty"`
+	Errors                []string            `json:"errors,omitempty"`
+}
+
 func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string, req dto.CreateDocumentReq, operator string) {
 	if h.internalURLFetcher == nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", "内部URL拉取器未配置"))
 		return
 	}
-	kb, err := h.svc.GetKnowledgeBase(c.Request.Context(), kbID)
-	if err != nil {
-		c.JSON(http.StatusOK, convention.Failure("B000001", "查询知识库失败: "+err.Error()))
+	if h.fileStore == nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "文件存储未配置"))
 		return
 	}
-	docs, err := h.internalURLFetcher.FetchDocuments(c.Request.Context(), req.SourceLocation)
+	if h.internalURLTaskDB != nil {
+		task, err := h.createInternalURLImportTask(c.Request.Context(), kbID, req.SourceLocation, operator)
+		if err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", "创建内部文档导入任务失败: "+err.Error()))
+			return
+		}
+		h.startInternalURLImportTask(task.ID, kbID, req, operator)
+		c.JSON(http.StatusOK, convention.Success(internalURLImportTaskResp{TaskID: task.ID, Status: task.Status}))
+		return
+	}
+	resp, err := h.runInternalURLImport(c.Request.Context(), kbID, req, operator)
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 		return
 	}
+	c.JSON(http.StatusOK, convention.Success(resp))
+}
+
+func (h *DocumentHandler) runInternalURLImport(ctx context.Context, kbID string, req dto.CreateDocumentReq, operator string) (*internalURLUploadResp, error) {
+	if h.internalURLFetcher == nil {
+		return nil, fmt.Errorf("内部URL拉取器未配置")
+	}
+	kb, err := h.svc.GetKnowledgeBase(ctx, kbID)
+	if err != nil {
+		return nil, fmt.Errorf("查询知识库失败: %w", err)
+	}
+	docs, err := h.internalURLFetcher.FetchDocuments(ctx, req.SourceLocation)
+	if err != nil {
+		return nil, err
+	}
 	if len(docs) == 0 {
-		c.JSON(http.StatusOK, convention.Failure("B000001", "未读取到内部文档内容"))
-		return
+		return nil, fmt.Errorf("未读取到内部文档内容")
 	}
 	if h.fileStore == nil {
-		c.JSON(http.StatusOK, convention.Failure("B000001", "文件存储未配置"))
-		return
+		return nil, fmt.Errorf("文件存储未配置")
 	}
 	resp := internalURLUploadResp{
 		Total:                 len(docs),
@@ -305,9 +372,8 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		docReq.SourceParentKey = service.InternalURLCanonicalSourceKey(doc.Meta.Extra["parent_url"])
 		docReq.SourceContentHash = internalURLContentHash(doc.Content)
 		docReq.SourceNodeType = service.InternalURLNodeType(doc.Content, doc.Meta.Extra)
-		if err := h.svc.NormalizeCreateDocumentProcessingConfig(c.Request.Context(), &docReq); err != nil {
-			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
-			return
+		if err := h.svc.NormalizeCreateDocumentProcessingConfig(ctx, &docReq); err != nil {
+			return nil, err
 		}
 		if req.ScheduleEnabled == 1 && idx > 0 {
 			docReq.ScheduleEnabled = 0
@@ -317,10 +383,9 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		canonicalKeys = append(canonicalKeys, docReq.CanonicalSourceKey)
 		fileURLs = append(fileURLs, docReq.FileURL)
 	}
-	existingDocs, err := h.svc.ListInternalURLDocumentsBySourceKeys(c.Request.Context(), kbID, canonicalKeys, fileURLs)
+	existingDocs, err := h.svc.ListInternalURLDocumentsBySourceKeys(ctx, kbID, canonicalKeys, fileURLs)
 	if err != nil {
-		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
-		return
+		return nil, err
 	}
 	existingByCanonical := make(map[string]*dto.DocumentResp, len(existingDocs))
 	existingByURL := make(map[string]*dto.DocumentResp, len(existingDocs))
@@ -381,7 +446,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 			created = &pending
 		} else {
 			var err error
-			created, err = h.svc.UpsertInternalURLDocument(c.Request.Context(), kbID, docReq, operator)
+			created, err = h.svc.UpsertInternalURLDocument(ctx, kbID, docReq, operator)
 			if err != nil {
 				resp.Failed++
 				resp.Errors = append(resp.Errors, err.Error())
@@ -390,7 +455,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		}
 		skipSourceUpload := existingUnchanged && existing != nil
 		if docReq.SourceNodeType != "folder" && !skipSourceUpload {
-			if err := h.fileStore.PutWithCollection(c.Request.Context(), kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
+			if err := h.fileStore.PutWithCollection(ctx, kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
 				resp.Failed++
 				resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
 				continue
@@ -408,6 +473,127 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 		}
 		resp.Chunkable++
 		resp.ChunkableDocuments = append(resp.ChunkableDocuments, created)
+	}
+	return &resp, nil
+}
+
+func (h *DocumentHandler) createInternalURLImportTask(ctx context.Context, kbID, sourceLocation, operator string) (*model.KnowledgeInternalURLImportTask, error) {
+	task := &model.KnowledgeInternalURLImportTask{
+		KbID:           kbID,
+		SourceLocation: strings.TrimSpace(sourceLocation),
+		Status:         "running",
+		CreatedBy:      operator,
+		UpdatedBy:      operator,
+	}
+	if err := h.internalURLTaskDB.WithContext(ctx).Create(task).Error; err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+func (h *DocumentHandler) startInternalURLImportTask(taskID, kbID string, req dto.CreateDocumentReq, operator string) {
+	timeout := h.internalURLTaskTTL
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	go func() {
+		runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		resp, err := h.runInternalURLImport(runCtx, kbID, req, operator)
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer updateCancel()
+		if err != nil {
+			if updateErr := h.finishInternalURLImportTask(updateCtx, taskID, nil, err, operator); updateErr != nil {
+				slog.Warn("failed to mark internal url import task failed", "taskID", taskID, "err", updateErr)
+			}
+			return
+		}
+		if updateErr := h.finishInternalURLImportTask(updateCtx, taskID, resp, nil, operator); updateErr != nil {
+			slog.Warn("failed to mark internal url import task success", "taskID", taskID, "err", updateErr)
+		}
+	}()
+}
+
+func (h *DocumentHandler) finishInternalURLImportTask(ctx context.Context, taskID string, resp *internalURLUploadResp, cause error, operator string) error {
+	updates := map[string]any{
+		"updated_by": operator,
+	}
+	if cause != nil {
+		updates["status"] = "failed"
+		updates["error_message"] = cause.Error()
+		return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
+	}
+	resultJSON, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("marshal internal url import result: %w", err)
+	}
+	updates["status"] = "success"
+	updates["result_json"] = string(resultJSON)
+	updates["total"] = resp.Total
+	updates["success"] = resp.Success
+	updates["failed"] = resp.Failed
+	updates["existing_unchanged"] = resp.ExistingUnchanged
+	updates["existing_chunked"] = resp.ExistingChunked
+	updates["existing_enabled"] = resp.ExistingEnabled
+	updates["new_documents"] = resp.NewDocuments
+	updates["changed_documents"] = resp.ChangedDocuments
+	updates["strategy_changed_documents"] = resp.StrategyChanged
+	updates["chunkable"] = resp.Chunkable
+	updates["skipped_chunked"] = resp.SkippedChunked
+	return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
+}
+
+// GetInternalURLImportTask GET /knowledge-base/:id/docs/internal-url-import-tasks/:taskId
+func (h *DocumentHandler) GetInternalURLImportTask(c *gin.Context) {
+	if h.internalURLTaskDB == nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "内部文档导入任务存储未配置"))
+		return
+	}
+	var task model.KnowledgeInternalURLImportTask
+	err := h.internalURLTaskDB.WithContext(c.Request.Context()).
+		Where("id = ? AND kb_id = ?", c.Param("taskId"), c.Param("id")).
+		First(&task).Error
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", "查询内部文档导入任务失败: "+err.Error()))
+		return
+	}
+	resp := internalURLImportTaskResp{
+		TaskID:            task.ID,
+		Status:            task.Status,
+		ErrorMessage:      task.ErrorMessage,
+		Total:             task.Total,
+		Success:           task.Success,
+		Failed:            task.Failed,
+		ExistingUnchanged: task.ExistingUnchanged,
+		ExistingChunked:   task.ExistingChunked,
+		ExistingEnabled:   task.ExistingEnabled,
+		NewDocuments:      task.NewDocuments,
+		ChangedDocuments:  task.ChangedDocuments,
+		StrategyChanged:   task.StrategyChanged,
+		Chunkable:         task.Chunkable,
+		SkippedChunked:    task.SkippedChunked,
+	}
+	if strings.EqualFold(task.Status, "success") && task.ResultJSON != nil && strings.TrimSpace(*task.ResultJSON) != "" {
+		var result internalURLUploadResp
+		if err := json.Unmarshal([]byte(*task.ResultJSON), &result); err != nil {
+			c.JSON(http.StatusOK, convention.Failure("B000001", "解析内部文档导入结果失败: "+err.Error()))
+			return
+		}
+		resp.Total = result.Total
+		resp.Success = result.Success
+		resp.Failed = result.Failed
+		resp.ExistingUnchanged = result.ExistingUnchanged
+		resp.ExistingChunked = result.ExistingChunked
+		resp.ExistingEnabled = result.ExistingEnabled
+		resp.NewDocuments = result.NewDocuments
+		resp.ChangedDocuments = result.ChangedDocuments
+		resp.StrategyChanged = result.StrategyChanged
+		resp.Chunkable = result.Chunkable
+		resp.SkippedChunked = result.SkippedChunked
+		resp.Documents = result.Documents
+		resp.ChunkableDocuments = result.ChunkableDocuments
+		resp.SkippedChunkDocuments = result.SkippedChunkDocuments
+		resp.Errors = result.Errors
 	}
 	c.JSON(http.StatusOK, convention.Success(resp))
 }

@@ -161,6 +161,9 @@ func main() {
 	}
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
+	if err := docHandler.SetInternalURLImportTaskStore(gormDB, time.Duration(cfg.RAG.Knowledge.Geelib.ImportTaskTimeoutMinutes)*time.Minute); err != nil {
+		slog.Warn("failed to initialize internal url import task store", "err", err)
+	}
 	var geelibSource *crawler.GeelibSource
 	if geelibCfg := cfg.RAG.Knowledge.Geelib; geelibCfg.IsEnabledByDefault() {
 		geelibSource = crawler.NewGeelibSource(crawler.GeelibSourceConfig{
@@ -528,6 +531,7 @@ func main() {
 			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
 
 			kb.POST("/:id/docs/upload", docHandler.Upload)
+			kb.GET("/:id/docs/internal-url-import-tasks/:taskId", docHandler.GetInternalURLImportTask)
 			kb.GET("/:id/docs", docHandler.ListDocs)
 			kb.GET("/docs/search", docHandler.SearchDocs)
 			kb.GET("/docs/:docId/chunk-logs", docHandler.ChunkLogs)

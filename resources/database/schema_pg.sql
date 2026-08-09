@@ -274,6 +274,34 @@ CREATE INDEX idx_next_run ON t_knowledge_document_schedule (next_run_time);
 CREATE INDEX idx_lock_until ON t_knowledge_document_schedule (lock_until);
 COMMENT ON TABLE t_knowledge_document_schedule IS '知识库文档定时刷新任务表';
 
+CREATE TABLE t_knowledge_internal_url_import_task (
+    id                          VARCHAR(20)       NOT NULL PRIMARY KEY,
+    kb_id                       VARCHAR(20)       NOT NULL,
+    source_location             VARCHAR(1024)     NOT NULL,
+    status                      VARCHAR(16)       NOT NULL,
+    total                       INTEGER      DEFAULT 0,
+    success                     INTEGER      DEFAULT 0,
+    failed                      INTEGER      DEFAULT 0,
+    existing_unchanged          INTEGER      DEFAULT 0,
+    existing_chunked            INTEGER      DEFAULT 0,
+    existing_enabled            INTEGER      DEFAULT 0,
+    new_documents               INTEGER      DEFAULT 0,
+    changed_documents           INTEGER      DEFAULT 0,
+    strategy_changed_documents  INTEGER      DEFAULT 0,
+    chunkable                   INTEGER      DEFAULT 0,
+    skipped_chunked             INTEGER      DEFAULT 0,
+    result_json                 JSONB,
+    error_message               VARCHAR(1024),
+    created_by                  VARCHAR(20)       NOT NULL,
+    updated_by                  VARCHAR(20),
+    create_time                 TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time                 TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted                     SMALLINT     DEFAULT 0
+);
+CREATE INDEX idx_internal_url_import_kb ON t_knowledge_internal_url_import_task (kb_id);
+CREATE INDEX idx_internal_url_import_status ON t_knowledge_internal_url_import_task (status);
+COMMENT ON TABLE t_knowledge_internal_url_import_task IS '内部URL文档导入任务表';
+
 CREATE TABLE t_knowledge_document_schedule_exec (
     id            VARCHAR(20)       NOT NULL PRIMARY KEY,
     schedule_id   VARCHAR(20)       NOT NULL,
@@ -633,6 +661,30 @@ COMMENT ON COLUMN t_knowledge_document_schedule.lock_owner IS '锁持有者';
 COMMENT ON COLUMN t_knowledge_document_schedule.lock_until IS '锁过期时间';
 COMMENT ON COLUMN t_knowledge_document_schedule.create_time IS '创建时间';
 COMMENT ON COLUMN t_knowledge_document_schedule.update_time IS '更新时间';
+
+-- t_knowledge_internal_url_import_task
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.id IS 'ID';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.kb_id IS '知识库ID';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.source_location IS '内部文档来源地址';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.status IS '任务状态：running/success/failed';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.total IS '拉取到的内部文档总数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.success IS '导入成功文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.failed IS '导入失败文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.existing_unchanged IS '已存在且内容未变化文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.existing_chunked IS '已存在且已分块文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.existing_enabled IS '已存在且启用中文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.new_documents IS '新增文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.changed_documents IS '内容变化文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.strategy_changed_documents IS '分块策略变化文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.chunkable IS '本次可分块文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.skipped_chunked IS '已跳过的已分块未变化文档数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.result_json IS '导入完成后的结果摘要JSON';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.error_message IS '失败原因';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.created_by IS '创建人';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.updated_by IS '修改人';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.create_time IS '创建时间';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.update_time IS '更新时间';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.deleted IS '是否删除 0：正常 1：删除';
 
 -- t_knowledge_document_schedule_exec
 COMMENT ON COLUMN t_knowledge_document_schedule_exec.id IS 'ID';

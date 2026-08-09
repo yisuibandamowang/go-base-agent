@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"go-base-agent/internal/biz/crawler"
 	"go-base-agent/internal/biz/knowledge/model"
@@ -33,6 +35,22 @@ func (f fakeInternalURLFetcher) FetchDocuments(_ context.Context, location strin
 		}
 	}
 	return f.docs, f.err
+}
+
+type blockingInternalURLFetcher struct {
+	started chan struct{}
+	release chan struct{}
+	docs    []crawler.Document
+}
+
+func (f blockingInternalURLFetcher) FetchDocuments(ctx context.Context, _ string) ([]crawler.Document, error) {
+	close(f.started)
+	select {
+	case <-f.release:
+		return f.docs, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func postInternalURLUpload(t *testing.T, r http.Handler, kbID, sourceLocation string, scheduleEnabled bool) *httptest.ResponseRecorder {
@@ -61,6 +79,161 @@ func postInternalURLUpload(t *testing.T, r http.Handler, kbID, sourceLocation st
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	r.ServeHTTP(w, req)
 	return w
+}
+
+func TestUploadInternalURLStartsAsyncImportTask(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open("file:internal_url_async?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if err := gdb.AutoMigrate(&model.KnowledgeBase{}, &model.KnowledgeDocument{}, &model.KnowledgeChunk{}, &model.KnowledgeInternalURLImportTask{}); err != nil {
+		t.Fatalf("migrate knowledge tables: %v", err)
+	}
+	kb := &model.KnowledgeBase{Name: "kb", EmbeddingModel: "emb", CollectionName: "kb_collection", CreatedBy: "tester"}
+	if err := gdb.Create(kb).Error; err != nil {
+		t.Fatalf("seed kb: %v", err)
+	}
+
+	fileStore := NewFileStore()
+	svc := knowledgeService.NewDocumentService(
+		repo.NewKnowledgeDocumentRepo(gdb),
+		repo.NewKnowledgeChunkRepo(gdb),
+		repo.NewKnowledgeBaseRepo(gdb),
+		gdb,
+		knowledgeServiceTestEmbeddingService{},
+		&knowledgeServiceTestVectorStore{},
+		fileStore,
+	)
+	fetcher := blockingInternalURLFetcher{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		docs: []crawler.Document{
+			{Meta: crawler.DocumentMeta{ID: "425274", Title: "根文档.md", URL: "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=425274", MimeType: "text/markdown", SourceName: "geelib"}, Content: []byte("# 根文档\n\n根正文")},
+		},
+	}
+	h := NewDocumentHandler(svc, fileStore)
+	h.SetInternalURLFetcher(fetcher)
+	if err := h.SetInternalURLImportTaskStore(gdb, time.Minute); err != nil {
+		t.Fatalf("set import task store: %v", err)
+	}
+
+	r := gin.New()
+	r.POST("/api/ragent/knowledge-base/:id/docs/upload", h.Upload)
+	r.GET("/api/ragent/knowledge-base/:id/docs/internal-url-import-tasks/:taskId", h.GetInternalURLImportTask)
+
+	w := postInternalURLUpload(t, r, kb.ID, "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=425274", false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var startedResp struct {
+		Code string `json:"code"`
+		Data struct {
+			TaskID string `json:"taskId"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startedResp); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if startedResp.Code != "0" || startedResp.Data.TaskID == "" || startedResp.Data.Status != "running" {
+		t.Fatalf("expected running task response, got %s", w.Body.String())
+	}
+	select {
+	case <-fetcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("expected async fetcher to start")
+	}
+	close(fetcher.release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var pollBody string
+	for time.Now().Before(deadline) {
+		poll := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ragent/knowledge-base/"+kb.ID+"/docs/internal-url-import-tasks/"+startedResp.Data.TaskID, nil)
+		r.ServeHTTP(poll, req)
+		pollBody = poll.Body.String()
+		var pollResp struct {
+			Code string `json:"code"`
+			Data struct {
+				Status    string `json:"status"`
+				Total     int    `json:"total"`
+				Success   int    `json:"success"`
+				Documents []struct {
+					DocName string `json:"docName"`
+					Status  string `json:"status"`
+				} `json:"documents"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(poll.Body.Bytes(), &pollResp); err != nil {
+			t.Fatalf("decode poll response: %v", err)
+		}
+		if pollResp.Code != "0" {
+			t.Fatalf("expected poll success, got %s", poll.Body.String())
+		}
+		if pollResp.Data.Status == "success" {
+			if pollResp.Data.Total != 1 || pollResp.Data.Success != 1 || len(pollResp.Data.Documents) != 1 {
+				t.Fatalf("unexpected finished result: %s", poll.Body.String())
+			}
+			if pollResp.Data.Documents[0].DocName != "根文档.md" || pollResp.Data.Documents[0].Status != "pending" {
+				t.Fatalf("unexpected document result: %s", poll.Body.String())
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("task did not finish, last response: %s", pollBody)
+}
+
+func TestGetInternalURLImportTaskReturnsFailureMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&model.KnowledgeInternalURLImportTask{}); err != nil {
+		t.Fatalf("migrate task table: %v", err)
+	}
+	h := NewDocumentHandler(nil, nil)
+	if err := h.SetInternalURLImportTaskStore(gdb, time.Minute); err != nil {
+		t.Fatalf("set import task store: %v", err)
+	}
+	task := &model.KnowledgeInternalURLImportTask{
+		KbID:           "kb-1",
+		SourceLocation: "https://geelib.qihoo.net/geelib/knowledge/doc?spaceId=5&docId=1",
+		Status:         "failed",
+		ErrorMessage:   errors.New("读取内部文档树失败").Error(),
+		CreatedBy:      "tester",
+	}
+	if err := gdb.Create(task).Error; err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	r := gin.New()
+	r.GET("/api/ragent/knowledge-base/:id/docs/internal-url-import-tasks/:taskId", h.GetInternalURLImportTask)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ragent/knowledge-base/kb-1/docs/internal-url-import-tasks/"+task.ID, nil)
+	r.ServeHTTP(w, req)
+
+	var resp struct {
+		Code string `json:"code"`
+		Data struct {
+			TaskID       string `json:"taskId"`
+			Status       string `json:"status"`
+			ErrorMessage string `json:"errorMessage"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != "0" || resp.Data.TaskID != task.ID || resp.Data.Status != "failed" || resp.Data.ErrorMessage != "读取内部文档树失败" {
+		t.Fatalf("unexpected failure task response: %s", w.Body.String())
+	}
 }
 
 func TestUploadInternalURLDocumentCreatesPendingDocsWithoutAutoChunk(t *testing.T) {
