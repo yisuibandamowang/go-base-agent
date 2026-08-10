@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Log Agent</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="query-pane">
+        <header class="topbar">
+          <div>
+            <h1>Log Agent</h1>
+            <p>会员 K8S 日志排查</p>
+          </div>
+          <div class="status" id="status">idle</div>
+        </header>
+
+        <form id="query-form" class="query-form">
+          <label>
+            Backend
+            <input id="backend-url" name="backend_url" value="http://localhost:9108" />
+          </label>
+
+          <div class="grid two">
+            <label>
+              Env
+              <select name="env" id="env-select">
+                <option value="all">全部环境</option>
+                <option value="test2">test2</option>
+                <option value="test">test</option>
+                <option value="test3">test3</option>
+                <option value="test4">test4</option>
+                <option value="regress">regress</option>
+                <option value="online">online</option>
+              </select>
+            </label>
+            <label>
+              Service
+              <select name="service" id="service-select">
+                <option value="all">全部服务</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid two">
+            <label>
+              Deployment
+              <select name="deployment" id="deployment-select">
+                <option value="all">全部 Deployment</option>
+              </select>
+            </label>
+            <label>
+              Pod
+              <select name="pod" id="pod-select">
+                <option value="all">全部 Pod</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid three">
+            <label>
+              Time
+              <input name="at" placeholder="2026-08-10 15:30:00" />
+            </label>
+            <label>
+              Before (分钟)
+              <input name="before_minutes" type="number" min="0" value="2" />
+            </label>
+            <label>
+              After (分钟)
+              <input name="after_minutes" type="number" min="0" value="1" />
+            </label>
+          </div>
+
+          <label>
+            Keywords
+            <textarea name="keywords" rows="4" placeholder="每行一个关键词；field=value 会按字段值严格匹配，例如 qihoo_id=3523031789"></textarea>
+          </label>
+
+          <label>
+            问题
+            <textarea name="question" rows="3" placeholder="描述要排查的现象，例如订单支付成功但会员未到账"></textarea>
+          </label>
+
+          <div class="switches">
+            <label><input name="all_pods" type="checkbox" /> all pods</label>
+            <label><input name="include_critical" type="checkbox" /> critical</label>
+            <label><input name="include_gz" type="checkbox" /> gzip</label>
+            <label><input name="resolve_only" type="checkbox" /> resolve only</label>
+          </div>
+
+          <div class="actions">
+            <button type="submit">查询</button>
+            <button type="button" id="resolve-btn">刷新资源</button>
+            <button type="button" id="reset-btn">重置</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="result-pane">
+        <div class="summary-band" id="summary-band">
+          <div>
+            <span class="metric-label">Target</span>
+            <strong id="summary-target">-</strong>
+          </div>
+          <div>
+            <span class="metric-label">Stdout</span>
+            <strong id="summary-stdout">0</strong>
+          </div>
+          <div>
+            <span class="metric-label">File</span>
+            <strong id="summary-file">0</strong>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active" data-tab="pretty">结果</button>
+          <button class="tab" data-tab="raw">JSON</button>
+          <button class="tab" data-tab="command">Command</button>
+        </div>
+
+        <pre id="pretty-output" class="output active"></pre>
+        <pre id="raw-output" class="output"></pre>
+        <pre id="command-output" class="output"></pre>
+      </section>
+
+      <section class="analysis-pane">
+        <div class="analysis-header">
+          <div>
+            <h2>智能分析</h2>
+            <p>结合日志证据和代码线索定位问题</p>
+          </div>
+          <span id="analysis-status">idle</span>
+        </div>
+        <pre id="analysis-output" class="analysis-output"></pre>
+      </section>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
