@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ func (s *PgVectorStore) IndexDocumentChunks(ctx context.Context, collectionName,
 		return nil
 	}
 	rows := make([]pgVectorRow, 0, len(chunks))
+	chunkIDs := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		rows = append(rows, pgVectorRow{
 			ID:             c.ChunkID,
@@ -50,8 +52,13 @@ func (s *PgVectorStore) IndexDocumentChunks(ctx context.Context, collectionName,
 			Metadata:       buildVectorMetadata(docID, c),
 			Embedding:      vecToString(c.Embedding),
 		})
+		chunkIDs = append(chunkIDs, c.ChunkID)
 	}
-	return s.db.WithContext(ctx).Create(rows).Error
+	if err := s.db.WithContext(ctx).Create(rows).Error; err != nil {
+		return err
+	}
+	s.refreshSearchVectors(ctx, chunkIDs)
+	return nil
 }
 
 // UpdateChunk 更新单个分块向量。
@@ -63,10 +70,40 @@ func (s *PgVectorStore) UpdateChunk(ctx context.Context, collectionName, docID s
 		Metadata:       buildVectorMetadata(docID, chunk),
 		Embedding:      vecToString(chunk.Embedding),
 	}
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"collection_name", "content", "metadata", "embedding"}),
-	}).Create(&row).Error
+	}).Create(&row).Error; err != nil {
+		return err
+	}
+	s.refreshSearchVectors(ctx, []string{chunk.ChunkID})
+	return nil
+}
+
+func (s *PgVectorStore) refreshSearchVectors(ctx context.Context, chunkIDs []string) {
+	if s == nil || s.db == nil || len(chunkIDs) == 0 {
+		return
+	}
+	sql, args := refreshSearchVectorSQL(chunkIDs)
+	if strings.TrimSpace(sql) == "" {
+		return
+	}
+	if err := s.db.WithContext(ctx).Exec(sql, args...).Error; err != nil {
+		slog.Warn("refresh knowledge vector search_vector failed", "err", err)
+	}
+}
+
+func refreshSearchVectorSQL(chunkIDs []string) (string, []any) {
+	if len(chunkIDs) == 0 {
+		return "", nil
+	}
+	return `UPDATE t_knowledge_vector AS v
+	        SET search_vector =
+	            setweight(to_tsvector('jiebacfg', COALESCE(d.doc_name, '')), 'A') ||
+	            setweight(to_tsvector('jiebacfg', COALESCE(v.content, '')), 'D')
+	        FROM t_knowledge_document AS d
+	        WHERE d.id = v.metadata::jsonb->>'doc_id'
+	          AND v.id IN ?`, []any{chunkIDs}
 }
 
 // DeleteDocumentVectors 删除文档的所有向量。

@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -56,15 +57,79 @@ func (b *PgKnowledgeSearchBackend) SearchKeywordChunks(ctx context.Context, kb k
 	if topK <= 0 {
 		topK = 10
 	}
-	type row struct {
-		ID             string  `gorm:"column:id"`
-		Content        string  `gorm:"column:content"`
-		Metadata       string  `gorm:"column:metadata"`
-		DocName        string  `gorm:"column:doc_name"`
-		SourceLocation string  `gorm:"column:source_location"`
-		FileURL        string  `gorm:"column:file_url"`
-		Score          float64 `gorm:"column:score"`
+	pgChunks, err := b.searchPGJiebaKeywordChunks(ctx, kb, query, topK)
+	if err != nil {
+		if !isPGJiebaUnavailableError(err) {
+			return nil, err
+		}
+		return b.searchLikeKeywordChunks(ctx, kb, query, topK)
 	}
+	likeChunks, likeErr := b.searchLikeKeywordChunks(ctx, kb, query, topK)
+	if likeErr != nil {
+		if len(pgChunks) > 0 {
+			return pgChunks, nil
+		}
+		return nil, likeErr
+	}
+	return mergeKeywordChunks(topK, pgChunks, likeChunks), nil
+}
+
+type keywordSearchRow struct {
+	ID             string  `gorm:"column:id"`
+	Content        string  `gorm:"column:content"`
+	Metadata       string  `gorm:"column:metadata"`
+	DocName        string  `gorm:"column:doc_name"`
+	SourceLocation string  `gorm:"column:source_location"`
+	FileURL        string  `gorm:"column:file_url"`
+	Score          float64 `gorm:"column:score"`
+}
+
+func (b *PgKnowledgeSearchBackend) searchPGJiebaKeywordChunks(ctx context.Context, kb knowledgeModel.KnowledgeBase, query string, topK int) ([]RetrievedChunk, error) {
+	sql, args := pgJiebaKeywordSearchQuery(kb.CollectionName, pgJiebaWebSearchText(query), topK)
+	rows := make([]keywordSearchRow, 0)
+	if err := b.vectorDB.WithContext(ctx).Raw(sql, args...).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("search pg_jieba keyword chunks: %w", err)
+	}
+	return keywordRowsToChunks(rows, kb), nil
+}
+
+func pgJiebaWebSearchText(query string) string {
+	terms := keywordSearchTerms(query)
+	if len(terms) == 0 {
+		return strings.TrimSpace(query)
+	}
+	return strings.Join(terms, " OR ")
+}
+
+func pgJiebaKeywordSearchQuery(collectionName, query string, topK int) (string, []any) {
+	return `WITH keyword_query AS (
+		       SELECT websearch_to_tsquery('jiebacfg', ?) AS q
+		     )
+		     SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url,
+		            ts_rank_cd(v.search_vector, keyword_query.q) AS score
+		     FROM t_knowledge_vector v
+		     LEFT JOIN t_knowledge_document d
+		       ON d.id = v.metadata::jsonb->>'doc_id'
+		      AND d.deleted = 0
+		     CROSS JOIN keyword_query
+		     WHERE v.collection_name = ?
+		       AND v.deleted = 0
+		       AND v.search_vector @@ keyword_query.q
+		     ORDER BY score DESC, v.create_time DESC
+		     LIMIT ?`, []any{query, collectionName, topK}
+}
+
+func isPGJiebaUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "jiebacfg") ||
+		strings.Contains(message, "search_vector") ||
+		strings.Contains(message, "tsvector")
+}
+
+func (b *PgKnowledgeSearchBackend) searchLikeKeywordChunks(ctx context.Context, kb knowledgeModel.KnowledgeBase, query string, topK int) ([]RetrievedChunk, error) {
 	terms := keywordSearchTerms(query)
 	if len(terms) == 0 {
 		return nil, nil
@@ -88,7 +153,7 @@ func (b *PgKnowledgeSearchBackend) SearchKeywordChunks(ctx context.Context, kb k
 	args = append(args, kb.CollectionName)
 	args = append(args, whereArgs...)
 	args = append(args, topK)
-	rows := make([]row, 0)
+	rows := make([]keywordSearchRow, 0)
 	err := b.vectorDB.WithContext(ctx).Raw(
 		`SELECT v.id, v.content, v.metadata, d.doc_name, d.source_location, d.file_url, (`+strings.Join(scoreParts, " + ")+`)::float AS score
 		 FROM t_knowledge_vector v
@@ -104,6 +169,10 @@ func (b *PgKnowledgeSearchBackend) SearchKeywordChunks(ctx context.Context, kb k
 	if err != nil {
 		return nil, fmt.Errorf("search keyword chunks: %w", err)
 	}
+	return keywordRowsToChunks(rows, kb), nil
+}
+
+func keywordRowsToChunks(rows []keywordSearchRow, kb knowledgeModel.KnowledgeBase) []RetrievedChunk {
 	chunks := make([]RetrievedChunk, 0, len(rows))
 	for _, row := range rows {
 		chunks = append(chunks, RetrievedChunk{
@@ -113,7 +182,29 @@ func (b *PgKnowledgeSearchBackend) SearchKeywordChunks(ctx context.Context, kb k
 			Metadata: metadataWithSources(parseVectorMetadata(row.Metadata), knowledgeModel.KnowledgeBase(kb), row.DocName, row.SourceLocation, row.FileURL),
 		})
 	}
-	return chunks, nil
+	return chunks
+}
+
+func mergeKeywordChunks(topK int, groups ...[]RetrievedChunk) []RetrievedChunk {
+	byID := make(map[string]RetrievedChunk)
+	for _, group := range groups {
+		for _, chunk := range group {
+			if existing, ok := byID[chunk.ID]; !ok || chunk.Score > existing.Score {
+				byID[chunk.ID] = chunk
+			}
+		}
+	}
+	chunks := make([]RetrievedChunk, 0, len(byID))
+	for _, chunk := range byID {
+		chunks = append(chunks, chunk)
+	}
+	sort.SliceStable(chunks, func(i, j int) bool {
+		return chunks[i].Score > chunks[j].Score
+	})
+	if topK > 0 && len(chunks) > topK {
+		return chunks[:topK]
+	}
+	return chunks
 }
 
 func keywordSearchTerms(query string) []string {

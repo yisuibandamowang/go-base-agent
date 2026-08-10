@@ -3,6 +3,7 @@
 
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_jieba;
 
 -- ============================================
 -- User & Conversation Tables
@@ -510,19 +511,23 @@ CREATE TABLE t_knowledge_vector (
     content         TEXT,
     metadata        JSONB,
     embedding       vector(1536),
+    search_vector   TSVECTOR,
     deleted         SMALLINT    NOT NULL DEFAULT 0
 );
 
 CREATE INDEX idx_kv_collection_name ON t_knowledge_vector (collection_name);
 CREATE INDEX idx_kv_metadata ON t_knowledge_vector USING gin(metadata);
 CREATE INDEX idx_kv_embedding ON t_knowledge_vector USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_kv_search_vector ON t_knowledge_vector USING gin(search_vector);
 COMMENT ON TABLE t_knowledge_vector IS '知识库向量存储表';
 COMMENT ON COLUMN t_knowledge_vector.id IS '分块ID';
 COMMENT ON COLUMN t_knowledge_vector.collection_name IS '知识库Collection';
 COMMENT ON COLUMN t_knowledge_vector.content IS '分块文本内容';
 COMMENT ON COLUMN t_knowledge_vector.metadata IS '元数据';
 COMMENT ON COLUMN t_knowledge_vector.embedding IS '向量';
+COMMENT ON COLUMN t_knowledge_vector.search_vector IS 'pg_jieba 全文检索向量，包含文档名和分块文本';
 COMMENT ON COLUMN t_knowledge_vector.deleted IS '是否删除 0：正常 1：删除';
+COMMENT ON INDEX idx_kv_search_vector IS '知识库分块 pg_jieba 全文检索 GIN 索引';
 
 -- ============================================
 -- Column Comments
