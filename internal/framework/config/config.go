@@ -109,6 +109,7 @@ type RAGConfig struct {
 	Search       RAGSearchConfig       `mapstructure:"search"`
 	Guidance     RAGGuidanceConfig     `mapstructure:"guidance"`
 	Trace        RAGTraceConfig        `mapstructure:"trace"`
+	AnswerCache  RAGAnswerCacheConfig  `mapstructure:"answer-cache"`
 }
 
 type RAGVectorConfig struct {
@@ -354,6 +355,25 @@ func (c RAGTraceConfig) IsEnabledByDefault() bool {
 		return true
 	}
 	return *c.Enabled
+}
+
+type RAGAnswerCacheConfig struct {
+	Enabled    *bool `mapstructure:"enabled"`
+	TTLMinutes int   `mapstructure:"ttl-minutes"`
+}
+
+func (c RAGAnswerCacheConfig) IsEnabledByDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+func (c RAGAnswerCacheConfig) TTLDuration() time.Duration {
+	if c.TTLMinutes <= 0 {
+		return time.Hour
+	}
+	return time.Duration(c.TTLMinutes) * time.Minute
 }
 
 type AIConfig struct {

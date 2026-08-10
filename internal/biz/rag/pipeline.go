@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/infra/chat"
@@ -26,6 +27,9 @@ type Pipeline struct {
 	guidance         *IntentGuidanceService
 	trace            TraceRecorder
 	tasks            *streamTaskManager
+	answerCache      AnswerCacheManager
+	answerCacheOn    bool
+	answerCacheTTL   time.Duration
 	messageChunkSize int
 	streamTimeout    time.Duration
 	defaultTopK      int
@@ -74,6 +78,13 @@ func (p *Pipeline) SetDefaultTopK(topK int) {
 // SetPreferredLLMService sets the lightweight LLM used for non-RAG responses.
 func (p *Pipeline) SetPreferredLLMService(llm chat.LLMService) {
 	p.preferredLLM = llm
+}
+
+// SetAnswerCache configures completed answer cache for standalone RAG questions.
+func (p *Pipeline) SetAnswerCache(cache AnswerCacheManager, enabled bool, ttl time.Duration) {
+	p.answerCache = cache
+	p.answerCacheOn = enabled
+	p.answerCacheTTL = ttl
 }
 
 // StreamChat implements Service.StreamChat.
@@ -187,6 +198,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
 	chunks, err := p.retrieveChunks(ctx, q, subQuestions, resolvedSubIntents, p.resolveDefaultTopK())
 	var kbCtx string
+	var answerCacheKey string
 	if err != nil {
 		retrieveSpan.finish(traceStatusError, err)
 		slog.Warn("rag: retrieve failed", "err", err)
@@ -196,6 +208,15 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	} else if len(chunks) > 0 {
 		retrieveSpan.finish(traceStatusSuccess, nil)
 		slog.Info("rag: chunks retrieved", "count", len(chunks))
+		chunks = selectFinalEvidenceChunks(chunks, q, p.resolveDefaultTopK(), intentEvidenceCollections(resolvedSubIntents))
+		answerCacheKey = p.answerCacheKey(question, deepThinking, history, mcpCtx, chunks)
+		if answerCacheKey != "" {
+			if cached, hit := p.loadCachedAnswer(ctx, answerCacheKey); hit {
+				p.streamCachedAnswer(persistenceCtx, conversationID, question, cached, sender, task)
+				finishTraceRun(traceStatusSuccess, nil)
+				return
+			}
+		}
 		for _, c := range chunks {
 			kbCtx += c.Text + "\n"
 		}
@@ -240,6 +261,9 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		traceRun:            traceRun,
 		sendTitleOnComplete: sendTitleOnComplete,
 		messageChunkSize:    p.messageChunkSize,
+		answerCache:         p.answerCache,
+		answerCacheKey:      answerCacheKey,
+		answerCacheTTL:      p.answerCacheTTL,
 	}
 	task.setCancelPayloadFn(cb.buildCompletionPayloadOnCancel)
 	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)
@@ -293,6 +317,69 @@ func (p *Pipeline) resolveDefaultTopK() int {
 		return p.defaultTopK
 	}
 	return 10
+}
+
+func (p *Pipeline) answerCacheKey(question string, deepThinking bool, history []chat.Message, mcpCtx string, chunks []RetrievedChunk) string {
+	if p == nil || !p.answerCacheOn || p.answerCache == nil || p.answerCacheTTL <= 0 {
+		return ""
+	}
+	if len(history) > 0 || strings.TrimSpace(mcpCtx) != "" || len(chunks) == 0 {
+		return ""
+	}
+	return buildAnswerCacheKey(question, deepThinking, answerCacheEvidenceKeys(chunks))
+}
+
+func (p *Pipeline) loadCachedAnswer(ctx context.Context, key string) (*CachedAnswer, bool) {
+	if p == nil || p.answerCache == nil || strings.TrimSpace(key) == "" {
+		return nil, false
+	}
+	answer, hit, err := p.answerCache.LoadAnswer(ctx, key)
+	if err != nil {
+		slog.Warn("rag answer cache: load failed", "err", err)
+		return nil, false
+	}
+	if !hit || answer == nil {
+		return nil, false
+	}
+	return answer, true
+}
+
+func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, question string, cached *CachedAnswer, sender *SSESender, task *streamTask) {
+	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
+	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+		slog.Warn("rag memory: save cached user message failed", "conversationId", conversationID, "err", err)
+	}
+	if task != nil && task.isCancelled() {
+		return
+	}
+	cb := &pipelineCallback{
+		ctx:                 ctx,
+		conversationID:      conversationID,
+		memory:              p.memory,
+		sender:              sender,
+		answerPrefix:        cached.Content,
+		citations:           cached.Citations,
+		sendTitleOnComplete: sendTitleOnComplete,
+		thinkingDuration:    cached.ThinkingDuration,
+	}
+	msg := chat.Message{
+		Role:             chat.RoleAssistant,
+		Content:          cached.fullContent(),
+		ThinkingContent:  cached.ThinkingContent,
+		ThinkingDuration: cached.ThinkingDuration,
+	}
+	messageID, err := appendConversationMessage(ctx, p.memory, conversationID, msg)
+	if err != nil {
+		slog.Warn("rag memory: save cached assistant message failed", "conversationId", conversationID, "err", err)
+		messageID = ""
+	}
+	sendChunkedToSender(sender, MsgTypeResponse, cached.Content, p.messageChunkSize)
+	if cached.Citations != "" {
+		_ = sender.SendMessage(MsgTypeResponse, cached.Citations)
+	}
+	sender.SendFinish(messageID, cb.resolveConversationTitle())
+	sender.SendDone()
+	sender.Close()
 }
 
 func (p *Pipeline) startTraceRun(ctx context.Context, conversationID, taskID string) *TraceRunRecord {
@@ -495,6 +582,9 @@ type pipelineCallback struct {
 	thinkingDuration    int
 	messageChunkSize    int
 	firstPacket         bool
+	answerCache         AnswerCacheManager
+	answerCacheKey      string
+	answerCacheTTL      time.Duration
 }
 
 func (c *pipelineCallback) OnContent(content string) {
@@ -551,9 +641,15 @@ func (c *pipelineCallback) OnError(err error) {
 }
 
 func (c *pipelineCallback) sendChunked(msgType, content string) {
-	size := c.messageChunkSize
+	sendChunkedToSender(c.sender, msgType, content, c.messageChunkSize)
+}
+
+func sendChunkedToSender(sender *SSESender, msgType, content string, size int) {
+	if sender == nil {
+		return
+	}
 	if size <= 0 {
-		c.sender.SendMessage(msgType, content)
+		sender.SendMessage(msgType, content)
 		return
 	}
 	var b strings.Builder
@@ -562,13 +658,13 @@ func (c *pipelineCallback) sendChunked(msgType, content string) {
 		b.WriteRune(r)
 		count++
 		if count >= size {
-			_ = c.sender.SendMessage(msgType, b.String())
+			_ = sender.SendMessage(msgType, b.String())
 			b.Reset()
 			count = 0
 		}
 	}
 	if b.Len() > 0 {
-		_ = c.sender.SendMessage(msgType, b.String())
+		_ = sender.SendMessage(msgType, b.String())
 	}
 }
 
@@ -606,17 +702,24 @@ func (c *pipelineCallback) saveCompletedAssistantMessage() string {
 	if c == nil || c.memory == nil {
 		return ""
 	}
-	msg := chat.Message{
-		Role:             chat.RoleAssistant,
-		Content:          c.answer.String(),
+	answer := CachedAnswer{
+		Content:          c.answerPrefix + c.answer.String(),
 		ThinkingContent:  c.thinking.String(),
 		ThinkingDuration: c.resolveThinkingDuration(),
+		Citations:        c.citations,
+	}
+	msg := chat.Message{
+		Role:             chat.RoleAssistant,
+		Content:          answer.fullContent(),
+		ThinkingContent:  answer.ThinkingContent,
+		ThinkingDuration: answer.ThinkingDuration,
 	}
 	id, err := appendConversationMessage(c.ctx, c.memory, c.conversationID, msg)
 	if err != nil {
 		slog.Warn("rag memory: save assistant message failed", "conversationId", c.conversationID, "err", err)
 		return ""
 	}
+	c.saveAnswerCache(answer)
 	return id
 }
 
@@ -644,6 +747,9 @@ func (c *pipelineCallback) saveCancelledAssistantMessage() string {
 
 func (c *pipelineCallback) resolveThinkingDuration() int {
 	if c == nil || c.thinkingStart.IsZero() {
+		if c != nil && c.thinkingDuration > 0 {
+			return c.thinkingDuration
+		}
 		return 0
 	}
 	duration := int(time.Since(c.thinkingStart).Round(time.Second) / time.Second)
@@ -651,6 +757,15 @@ func (c *pipelineCallback) resolveThinkingDuration() int {
 		return 1
 	}
 	return duration
+}
+
+func (c *pipelineCallback) saveAnswerCache(answer CachedAnswer) {
+	if c == nil || c.answerCache == nil || strings.TrimSpace(c.answerCacheKey) == "" || c.answerCacheTTL <= 0 {
+		return
+	}
+	if err := c.answerCache.SaveAnswer(c.ctx, c.answerCacheKey, answer, c.answerCacheTTL); err != nil {
+		slog.Warn("rag answer cache: save failed", "err", err)
+	}
 }
 
 func shouldSendTitleOnComplete(ctx context.Context, memory MemoryService, conversationID string) bool {
@@ -853,6 +968,209 @@ func withChunkSources(chunks []RetrievedChunk, fallback string) string {
 		b.WriteString("\n</content>")
 	}
 	return b.String()
+}
+
+func selectFinalEvidenceChunks(chunks []RetrievedChunk, question string, limit int, preferredCollections ...[]string) []RetrievedChunk {
+	if len(chunks) == 0 {
+		return nil
+	}
+	selected := append([]RetrievedChunk(nil), chunks...)
+	sort.SliceStable(selected, func(i, j int) bool {
+		if selected[i].Score != selected[j].Score {
+			return selected[i].Score > selected[j].Score
+		}
+		leftDoc := strings.TrimSpace(selected[i].Metadata["doc_id"])
+		rightDoc := strings.TrimSpace(selected[j].Metadata["doc_id"])
+		if leftDoc != rightDoc {
+			return leftDoc < rightDoc
+		}
+		leftIndex, leftOK := contextChunkIndex(selected[i])
+		rightIndex, rightOK := contextChunkIndex(selected[j])
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftIndex != rightIndex {
+			return leftIndex < rightIndex
+		}
+		return strings.TrimSpace(selected[i].ID) < strings.TrimSpace(selected[j].ID)
+	})
+	if preferred := filterPreferredCollectionEvidence(selected, preferredCollections...); len(preferred) > 0 {
+		selected = preferred
+	}
+	if anchored := filterMetadataAnchorEvidence(selected, question); len(anchored) > 0 {
+		selected = anchored
+	}
+	if related := filterQuestionRelatedEvidence(selected, question); len(related) > 0 {
+		selected = related
+	}
+	if limit > 0 && len(selected) > limit {
+		return selected[:limit]
+	}
+	return selected
+}
+
+func intentEvidenceCollections(subIntents []SubQuestionIntent) []string {
+	seen := make(map[string]bool)
+	collections := make([]string, 0)
+	for _, subIntent := range subIntents {
+		for _, score := range subIntent.NodeScores {
+			if score.Node.Kind != IntentKindKB {
+				continue
+			}
+			collection := strings.TrimSpace(score.Node.CollectionName)
+			if collection == "" || seen[collection] {
+				continue
+			}
+			seen[collection] = true
+			collections = append(collections, collection)
+		}
+	}
+	return collections
+}
+
+func filterPreferredCollectionEvidence(chunks []RetrievedChunk, preferredCollections ...[]string) []RetrievedChunk {
+	allowed := make(map[string]bool)
+	for _, group := range preferredCollections {
+		for _, collection := range group {
+			collection = strings.TrimSpace(collection)
+			if collection != "" {
+				allowed[collection] = true
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	filtered := make([]RetrievedChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if allowed[strings.TrimSpace(chunk.Metadata["collection_name"])] {
+			filtered = append(filtered, chunk)
+		}
+	}
+	return filtered
+}
+
+func filterMetadataAnchorEvidence(chunks []RetrievedChunk, question string) []RetrievedChunk {
+	anchorTerms := evidenceAnchorTerms(keywordSearchTerms(question))
+	if len(anchorTerms) == 0 {
+		return nil
+	}
+	allowedCollections := make(map[string]bool)
+	for _, chunk := range chunks {
+		metadataText := strings.ToLower(strings.Join([]string{
+			chunk.Metadata["kb_name"],
+			chunk.Metadata["collection_name"],
+			chunk.Metadata["doc_name"],
+			chunk.Metadata["source_location"],
+			chunk.Metadata["source_url"],
+		}, "\n"))
+		if evidenceTextTermMatches(metadataText, anchorTerms) == 0 {
+			continue
+		}
+		collection := strings.TrimSpace(chunk.Metadata["collection_name"])
+		if collection != "" {
+			allowedCollections[collection] = true
+		}
+	}
+	if len(allowedCollections) == 0 {
+		return nil
+	}
+	filtered := make([]RetrievedChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		collection := strings.TrimSpace(chunk.Metadata["collection_name"])
+		if collection != "" && allowedCollections[collection] {
+			filtered = append(filtered, chunk)
+		}
+	}
+	return filtered
+}
+
+func filterQuestionRelatedEvidence(chunks []RetrievedChunk, question string) []RetrievedChunk {
+	terms := keywordSearchTerms(question)
+	if len(terms) == 0 {
+		return nil
+	}
+	anchorTerms := evidenceAnchorTerms(terms)
+	requiredMatches := 1
+	if len(terms) > 1 {
+		requiredMatches = 2
+	}
+	related := make([]RetrievedChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if len(anchorTerms) > 0 && evidenceTermMatches(chunk, anchorTerms) == 0 {
+			continue
+		}
+		if evidenceTermMatches(chunk, terms) >= requiredMatches {
+			related = append(related, chunk)
+		}
+	}
+	return related
+}
+
+func evidenceAnchorTerms(terms []string) []string {
+	cjkTerms := make([]string, 0, 4)
+	latinTerms := make([]string, 0, 4)
+	for _, term := range terms {
+		term = strings.TrimSpace(term)
+		if term == "" || isGenericEvidenceTerm(term) {
+			continue
+		}
+		if isLatinEvidenceTerm(term) {
+			latinTerms = append(latinTerms, term)
+			continue
+		}
+		cjkTerms = append(cjkTerms, term)
+	}
+	if len(cjkTerms) > 0 {
+		return limitEvidenceTerms(cjkTerms, 4)
+	}
+	return limitEvidenceTerms(latinTerms, 4)
+}
+
+func limitEvidenceTerms(terms []string, limit int) []string {
+	if limit > 0 && len(terms) > limit {
+		return terms[:limit]
+	}
+	return terms
+}
+
+func isLatinEvidenceTerm(term string) bool {
+	for _, r := range term {
+		if r > unicode.MaxASCII || !(unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return term != ""
+}
+
+func isGenericEvidenceTerm(term string) bool {
+	switch term {
+	case "服务", "平台", "系统", "技术", "问题", "使用", "支持", "工具", "页面", "文档", "整体", "业务", "流程":
+		return true
+	default:
+		return false
+	}
+}
+
+func evidenceTermMatches(chunk RetrievedChunk, terms []string) int {
+	haystack := strings.ToLower(strings.Join([]string{
+		chunk.Text,
+		chunk.Metadata["kb_name"],
+		chunk.Metadata["doc_name"],
+		chunk.Metadata["source_location"],
+		chunk.Metadata["source_url"],
+	}, "\n"))
+	return evidenceTextTermMatches(haystack, terms)
+}
+
+func evidenceTextTermMatches(haystack string, terms []string) int {
+	matches := 0
+	for _, term := range terms {
+		if strings.Contains(haystack, term) {
+			matches++
+		}
+	}
+	return matches
 }
 
 type contextChunkGroup struct {

@@ -146,6 +146,10 @@ rag:
     ambiguity-margin: 0.15
     max-options: 3
 
+  answer-cache:
+    enabled: true
+    ttl-minutes: 60
+
   trace:
     enabled: true
     max-error-length: 1000

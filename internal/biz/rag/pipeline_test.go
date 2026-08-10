@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,13 +170,14 @@ type recordingRetriever struct {
 	queries  []string
 	topKs    []int
 	chunks   []RetrievedChunk
+	err      error
 }
 
 func (r *recordingRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
 	r.question = question
 	r.queries = append(r.queries, question)
 	r.topKs = append(r.topKs, topK)
-	return r.chunks, nil
+	return r.chunks, r.err
 }
 
 type recordingRewriter struct {
@@ -197,6 +199,39 @@ type staticIntentResolutionService struct {
 
 func (s staticIntentResolutionService) ResolveQuestions(ctx context.Context, questions []string) ([]SubQuestionIntent, error) {
 	return s.subIntents, nil
+}
+
+type fakeAnswerCacheManager struct {
+	loadKey    string
+	saveKey    string
+	saveAnswer CachedAnswer
+	saveTTL    time.Duration
+	answer     *CachedAnswer
+	answers    map[string]CachedAnswer
+	hit        bool
+}
+
+func (m *fakeAnswerCacheManager) LoadAnswer(ctx context.Context, key string) (*CachedAnswer, bool, error) {
+	m.loadKey = key
+	if m.answers != nil {
+		answer, ok := m.answers[key]
+		if !ok {
+			return nil, false, nil
+		}
+		return &answer, true, nil
+	}
+	if !m.hit || m.answer == nil {
+		return nil, false, nil
+	}
+	cp := *m.answer
+	return &cp, true, nil
+}
+
+func (m *fakeAnswerCacheManager) SaveAnswer(ctx context.Context, key string, answer CachedAnswer, ttl time.Duration) error {
+	m.saveKey = key
+	m.saveAnswer = answer
+	m.saveTTL = ttl
+	return nil
 }
 
 type recordingIntentAwareRetriever struct {
@@ -397,6 +432,163 @@ func TestPipeline_StreamChat_SavesConversationTurn(t *testing.T) {
 	}
 }
 
+func TestPipeline_StreamChat_PersistsCitationsWithAssistantMessage(t *testing.T) {
+	mem := &recordingMemoryService{}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("当前助手支持错误排查能力。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, citationRetriever(), mem)
+	p.StreamChat(context.Background(), "助手支持什么能力", "conv-1", "task-1", false, s)
+
+	if len(mem.saved) != 2 {
+		t.Fatalf("expected user and assistant messages to be saved, got %d", len(mem.saved))
+	}
+	content := mem.saved[1].Content
+	for _, want := range []string{"当前助手支持错误排查能力。", "依据：", "会员Agent说明.md", "https://example.com/member-agent.md"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected persisted assistant content to contain %q, got: %s", want, content)
+		}
+	}
+}
+
+func TestPipeline_StreamChat_IgnoresQuestionOnlyCachedAnswerBeforeRetrieval(t *testing.T) {
+	mem := &recordingMemoryService{}
+	retriever := &recordingRetriever{chunks: []RetrievedChunk{{
+		ID:    "fresh-chunk",
+		Text:  "新的准确证据",
+		Score: 0.9,
+		Metadata: map[string]string{
+			"doc_id":      "fresh-doc",
+			"chunk_index": "1",
+			"doc_name":    "iOS整体链路.md",
+		},
+	}}}
+	question := "会员服务的ios整体链路是什么样的?"
+	staleKey := buildAnswerCacheKey(question, false, []string{"member"})
+	cache := &fakeAnswerCacheManager{
+		answers: map[string]CachedAnswer{
+			staleKey: {
+				Content:   "旧的低质量缓存答案",
+				Citations: "\n\n依据：\n1. 知识库：会员知识库；文档：《会员说明.md》\n",
+			},
+		},
+	}
+	llmCalled := false
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			llmCalled = true
+			cb.OnContent("新的高质量答案")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, mem)
+	p.SetAnswerCache(cache, true, time.Hour)
+	p.StreamChat(context.Background(), question, "conv-1", "task-1", false, s)
+
+	body := w.Body.String()
+	if len(retriever.queries) == 0 {
+		t.Fatal("expected retrieval to run before answer cache lookup")
+	}
+	if !llmCalled {
+		t.Fatal("expected stale question-only cache to be ignored and llm to run")
+	}
+	if strings.Contains(body, "旧的低质量缓存答案") {
+		t.Fatalf("expected stale cached answer to be ignored, got: %s", body)
+	}
+	if !strings.Contains(body, "新的高质量答案") {
+		t.Fatalf("expected generated answer, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_StreamsCachedAnswerAfterSameEvidenceRetrieved(t *testing.T) {
+	mem := &recordingMemoryService{}
+	chunks := []RetrievedChunk{{
+		ID:    "chunk-1",
+		Text:  "准确证据",
+		Score: 0.9,
+		Metadata: map[string]string{
+			"doc_id":      "doc-1",
+			"chunk_index": "1",
+			"doc_name":    "会员说明.md",
+		},
+	}}
+	key := buildAnswerCacheKey("会员服务链路是什么", false, answerCacheEvidenceKeys(chunks))
+	retriever := &recordingRetriever{chunks: chunks}
+	cache := &fakeAnswerCacheManager{
+		answers: map[string]CachedAnswer{
+			key: {
+				Content:   "缓存答案",
+				Citations: "\n\n依据：\n1. 知识库：会员知识库；文档：《会员说明.md》\n",
+			},
+		},
+	}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			t.Fatal("llm should be skipped when the same evidence cache hits")
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, mem)
+	p.SetAnswerCache(cache, true, time.Hour)
+	p.StreamChat(context.Background(), "会员服务链路是什么", "conv-1", "task-1", false, s)
+
+	body := w.Body.String()
+	if len(retriever.queries) == 0 {
+		t.Fatal("expected retrieval to run before cache hit")
+	}
+	for _, want := range []string{"缓存答案", "依据：", "会员说明.md", "event: finish", "event: done"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected cached SSE response to contain %q, got: %s", want, body)
+		}
+	}
+	if len(mem.saved) != 2 {
+		t.Fatalf("expected cached turn to save user and assistant messages, got %d", len(mem.saved))
+	}
+	if mem.saved[1].Role != chat.RoleAssistant || !strings.Contains(mem.saved[1].Content, "缓存答案") || !strings.Contains(mem.saved[1].Content, "依据：") {
+		t.Fatalf("unexpected cached assistant message: %+v", mem.saved[1])
+	}
+}
+
+func TestPipeline_StreamChat_SavesCompletedAnswerToCache(t *testing.T) {
+	cache := &fakeAnswerCacheManager{}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("稳定答案")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, citationRetriever(), &NoopMemoryService{})
+	p.SetAnswerCache(cache, true, 30*time.Minute)
+	p.StreamChat(context.Background(), "助手支持什么能力", "conv-1", "task-1", false, s)
+
+	if cache.saveKey == "" {
+		t.Fatal("expected completed answer to be saved to cache")
+	}
+	if cache.saveAnswer.Content != "稳定答案" {
+		t.Fatalf("expected answer content to be cached, got %+v", cache.saveAnswer)
+	}
+	if !strings.Contains(cache.saveAnswer.Citations, "依据：") || !strings.Contains(cache.saveAnswer.Citations, "会员Agent说明.md") {
+		t.Fatalf("expected citations to be cached, got %+v", cache.saveAnswer)
+	}
+	if cache.saveTTL != 30*time.Minute {
+		t.Fatalf("expected configured cache ttl, got %s", cache.saveTTL)
+	}
+}
+
 func TestPipeline_StreamChat_ChunksResponseByConfiguredSize(t *testing.T) {
 	llm := &fakeLLMService{
 		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
@@ -536,6 +728,197 @@ func TestPipeline_StreamChat_AppendsCitationsAndLinks(t *testing.T) {
 	}
 	if strings.Index(body, answer) > strings.Index(body, evidence) {
 		t.Fatalf("expected citations after answer, got: %s", body)
+	}
+}
+
+func TestPipeline_StreamChat_UsesOnlyFinalEvidenceChunksForPromptAndCitations(t *testing.T) {
+	done := make(chan struct{})
+	var prompt string
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			if len(req.Messages) > 0 {
+				prompt = req.Messages[len(req.Messages)-1].Content
+			}
+			go func() {
+				cb.OnContent("已根据高相关证据回答。")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+	chunks := []RetrievedChunk{
+		{
+			ID:    "high-1",
+			Text:  "高相关正文1",
+			Score: 0.9,
+			Metadata: map[string]string{
+				"kb_name":     "会员知识库",
+				"doc_id":      "doc-high-1",
+				"doc_name":    "会员服务架构.md",
+				"chunk_index": "1",
+			},
+		},
+		{
+			ID:    "high-2",
+			Text:  "高相关正文2",
+			Score: 0.8,
+			Metadata: map[string]string{
+				"kb_name":     "会员知识库",
+				"doc_id":      "doc-high-2",
+				"doc_name":    "iOS 整体链路.md",
+				"chunk_index": "2",
+			},
+		},
+		{
+			ID:    "low-1",
+			Text:  "低相关收银台正文",
+			Score: 0.1,
+			Metadata: map[string]string{
+				"kb_name":     "go 语言知识库",
+				"doc_id":      "doc-low",
+				"doc_name":    "收银台诊断工具当前支持能力.md",
+				"chunk_index": "3",
+			},
+		},
+	}
+
+	s, w := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, staticRetriever{chunks: chunks}, &NoopMemoryService{})
+	p.SetDefaultTopK(2)
+	go p.StreamChat(context.Background(), "会员服务的ios整体链路是什么样的?", "conv-1", "task-1", false, s)
+
+	<-done
+
+	if strings.Contains(prompt, "低相关收银台正文") {
+		t.Fatalf("expected low ranked chunk to be excluded from prompt, got: %s", prompt)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "收银台诊断工具当前支持能力.md") {
+		t.Fatalf("expected low ranked chunk citation to be excluded, got: %s", body)
+	}
+	if !strings.Contains(body, "会员服务架构.md") || !strings.Contains(body, "iOS 整体链路.md") {
+		t.Fatalf("expected high ranked citations to remain, got: %s", body)
+	}
+}
+
+func TestSelectFinalEvidenceChunksSortsDeterministically(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{ID: "c", Score: 0.8, Metadata: map[string]string{"doc_id": "doc-b", "chunk_index": "2"}},
+		{ID: "b", Score: 0.9, Metadata: map[string]string{"doc_id": "doc-b", "chunk_index": "2"}},
+		{ID: "a", Score: 0.9, Metadata: map[string]string{"doc_id": "doc-a", "chunk_index": "3"}},
+		{ID: "d", Score: 0.9, Metadata: map[string]string{"doc_id": "doc-a", "chunk_index": "1"}},
+	}
+
+	got := selectFinalEvidenceChunks(chunks, "会员服务说明", 3)
+
+	if len(got) != 3 {
+		t.Fatalf("expected 3 chunks, got %+v", got)
+	}
+	ids := []string{got[0].ID, got[1].ID, got[2].ID}
+	want := []string{"d", "a", "b"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("unexpected deterministic evidence order: got %v, want %v", ids, want)
+	}
+}
+
+func TestSelectFinalEvidenceChunksFiltersLexicalNoise(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{
+			ID:    "noise",
+			Text:  "iOS 客户端展示收银台诊断入口。",
+			Score: 0.99,
+			Metadata: map[string]string{
+				"kb_name":  "go 语言知识库",
+				"doc_name": "收银台诊断工具使用手册.md",
+			},
+		},
+		{
+			ID:    "member",
+			Text:  "该页面暂无具体正文。",
+			Score: 0.4,
+			Metadata: map[string]string{
+				"kb_name":  "会员知识库",
+				"doc_name": "iOS 整体链路.md",
+			},
+		},
+	}
+
+	got := selectFinalEvidenceChunks(chunks, "会员服务的ios整体链路是什么样的?", 2)
+
+	if len(got) != 1 {
+		t.Fatalf("expected only lexical related evidence, got %+v", got)
+	}
+	if got[0].ID != "member" {
+		t.Fatalf("expected member evidence to remain, got %+v", got)
+	}
+}
+
+func TestSelectFinalEvidenceChunksPrefersIntentCollections(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{
+			ID:    "global-noise",
+			Text:  "会员服务 iOS 收银台诊断说明。",
+			Score: 0.99,
+			Metadata: map[string]string{
+				"collection_name": "goknowladge",
+				"kb_name":         "go 语言知识库",
+				"doc_name":        "收银台诊断工具使用手册.md",
+			},
+		},
+		{
+			ID:    "intent-member",
+			Text:  "会员服务架构目录。",
+			Score: 0.4,
+			Metadata: map[string]string{
+				"collection_name": "member",
+				"kb_name":         "会员知识库",
+				"doc_name":        "会员服务架构.md",
+			},
+		},
+	}
+
+	got := selectFinalEvidenceChunks(chunks, "会员服务的ios整体链路是什么样的?", 5, []string{"member"})
+
+	if len(got) != 1 {
+		t.Fatalf("expected only preferred collection evidence, got %+v", got)
+	}
+	if got[0].ID != "intent-member" {
+		t.Fatalf("expected intent collection evidence to remain, got %+v", got)
+	}
+}
+
+func TestSelectFinalEvidenceChunksPrefersMetadataAnchorCollections(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{
+			ID:    "global-noise",
+			Text:  "会员服务 iOS 收银台诊断说明。",
+			Score: 0.99,
+			Metadata: map[string]string{
+				"collection_name": "goknowladge",
+				"kb_name":         "go 语言知识库",
+				"doc_name":        "收银台诊断工具使用手册.md",
+			},
+		},
+		{
+			ID:    "member",
+			Text:  "会员服务架构目录。",
+			Score: 0.4,
+			Metadata: map[string]string{
+				"collection_name": "member",
+				"kb_name":         "会员知识库",
+				"doc_name":        "会员服务架构.md",
+			},
+		},
+	}
+
+	got := selectFinalEvidenceChunks(chunks, "会员服务的ios整体链路是什么样的?", 5)
+
+	if len(got) != 1 {
+		t.Fatalf("expected metadata anchored collection evidence only, got %+v", got)
+	}
+	if got[0].ID != "member" {
+		t.Fatalf("expected member metadata anchored evidence to remain, got %+v", got)
 	}
 }
 

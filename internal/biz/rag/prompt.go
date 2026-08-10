@@ -68,7 +68,7 @@ func buildPromptUserContent(ctx PromptContext) string {
 		return ctx.Question
 	}
 
-	instruction := "只能依据以下知识库内容回答用户问题；如果知识库内容不足以回答，请直接说明知识库中没有相关信息，不要使用模型自身知识补充。"
+	instruction := "只能依据以下知识库内容回答用户问题；如果知识库内容不足以回答，或只命中文档标题、目录或链接但没有正文细节，请直接说明知识库中没有相关信息，不要使用模型自身知识补充。"
 	if strings.TrimSpace(ctx.McpContext) != "" && strings.TrimSpace(ctx.KbContext) != "" {
 		instruction = "请结合以下MCP工具结果和知识库内容回答用户问题；如果工具结果与知识库内容冲突，请优先说明冲突并给出可追溯依据。"
 	} else if strings.TrimSpace(ctx.McpContext) != "" {

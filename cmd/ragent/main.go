@@ -406,6 +406,7 @@ func main() {
 	ragPipeline.SetStreamTimeout(cfg.RAG.Default.SSETimeoutDuration())
 	ragPipeline.SetDefaultTopK(cfg.RAG.Search.DefaultTopK)
 	ragPipeline.SetPreferredLLMService(preferredLLMService)
+	ragPipeline.SetAnswerCache(rag.NewRedisAnswerCacheManager(rdb), cfg.RAG.AnswerCache.IsEnabledByDefault(), cfg.RAG.AnswerCache.TTLDuration())
 	ragPipeline.SetMcpContextProvider(mcpContextProvider)
 	ragPipeline.SetIntentResolver(intentResolverSvc)
 	ragPipeline.SetIntentGuidanceService(intentGuidanceSvc)
