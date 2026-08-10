@@ -23,6 +23,11 @@
             <input id="backend-url" name="backend_url" value="http://localhost:9108" />
           </label>
 
+          <label>
+            代码目录
+            <input id="code-repo-path" name="code_repo_path" value="/Users/work_project/360/member" />
+          </label>
+
           <div class="grid two">
             <label>
               Env
@@ -85,14 +90,15 @@
           </label>
 
           <div class="switches">
-            <label><input name="all_pods" type="checkbox" /> all pods</label>
-            <label><input name="include_critical" type="checkbox" /> critical</label>
-            <label><input name="include_gz" type="checkbox" /> gzip</label>
-            <label><input name="resolve_only" type="checkbox" /> resolve only</label>
+            <label title="读取当前 Deployment 下所有运行中的 Pod。适合怀疑日志散落在不同副本时用，但会更慢、更费资源。"><input name="all_pods" type="checkbox" /> all pods</label>
+            <label title="额外读取服务对应的 critical/error 类日志文件。适合排查异常、告警、失败链路。"><input name="include_critical" type="checkbox" /> critical</label>
+            <label title="读取近期滚动压缩日志 .gz。适合查较早时间窗口，但会明显变慢。"><input name="include_gz" type="checkbox" /> gzip</label>
+            <label title="只解析 Deployment/Pod/Container/Image 信息，不读取日志。适合先确认选中的服务、环境、Pod 是否正确。"><input name="resolve_only" type="checkbox" /> resolve only</label>
           </div>
 
           <div class="actions">
             <button type="submit">查询</button>
+            <button type="button" id="stop-btn" disabled>停止</button>
             <button type="button" id="resolve-btn">刷新资源</button>
             <button type="button" id="reset-btn">重置</button>
           </div>

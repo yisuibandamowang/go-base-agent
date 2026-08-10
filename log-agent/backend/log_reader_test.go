@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ func testLogReaderConfig() LogReaderConfig {
 		MaxLines:       120,
 		MaxStdoutLines: 80,
 		MaxLineChars:   1200,
+		MaxConcurrency: 4,
 	}
 }
 
@@ -135,6 +137,46 @@ func TestBuildSearchJobsRejectsBroadSearchWithoutKeyword(t *testing.T) {
 	_, err := buildSearchJobs(LogSearchRequest{Env: "all", Service: "all"}, conf)
 	if err == nil {
 		t.Fatal("buildSearchJobs() error = nil, want broad search guard error")
+	}
+}
+
+func TestRunSearchBatchPreservesOrderAndRunsConcurrently(t *testing.T) {
+	jobs := []LogSearchRequest{
+		{TraceID: "trace-1", Env: "test2", Service: "pay"},
+		{TraceID: "trace-1", Env: "test2", Service: "membergateway"},
+	}
+	start := time.Now()
+	resp, err := runSearchBatch(context.Background(), "trace-1", jobs, 2, func(ctx context.Context, job LogSearchRequest) (*LogSearchResponse, error) {
+		time.Sleep(80 * time.Millisecond)
+		return &LogSearchResponse{
+			TraceID: job.TraceID,
+			Command: []string{"node", job.Service},
+			Summary: LogSearchSummary{
+				Target:       job.Service + " / " + job.Env,
+				FileLogLines: 1,
+			},
+			Raw: map[string]interface{}{
+				"service": job.Service,
+			},
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("runSearchBatch() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 140*time.Millisecond {
+		t.Fatalf("runSearchBatch() elapsed = %s, want concurrent execution", elapsed)
+	}
+	if resp.Summary.FileLogLines != 2 {
+		t.Fatalf("FileLogLines = %d, want 2", resp.Summary.FileLogLines)
+	}
+	results := interfaceSlice(resp.Raw["results"])
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(results))
+	}
+	first, _ := results[0].(map[string]interface{})
+	second, _ := results[1].(map[string]interface{})
+	if first["service"] != "pay" || second["service"] != "membergateway" {
+		t.Fatalf("results order = %#v", results)
 	}
 }
 

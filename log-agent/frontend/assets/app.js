@@ -2,6 +2,8 @@ const form = document.querySelector("#query-form");
 const statusEl = document.querySelector("#status");
 const resetBtn = document.querySelector("#reset-btn");
 const resolveBtn = document.querySelector("#resolve-btn");
+const stopBtn = document.querySelector("#stop-btn");
+const submitBtn = form.querySelector('button[type="submit"]');
 const prettyOutput = document.querySelector("#pretty-output");
 const rawOutput = document.querySelector("#raw-output");
 const commandOutput = document.querySelector("#command-output");
@@ -16,10 +18,18 @@ const summaryTarget = document.querySelector("#summary-target");
 const summaryStdout = document.querySelector("#summary-stdout");
 const summaryFile = document.querySelector("#summary-file");
 let streamedAnalysisText = false;
+let activeController = null;
 
 function setStatus(text, tone = "idle") {
   statusEl.textContent = text;
   statusEl.dataset.tone = tone;
+}
+
+function setRunning(running) {
+  submitBtn.disabled = running;
+  stopBtn.disabled = !running;
+  resolveBtn.disabled = running;
+  resetBtn.disabled = running;
 }
 
 function formPayload() {
@@ -31,6 +41,7 @@ function formPayload() {
   return {
     env: String(data.get("env") || "").trim(),
     service: String(data.get("service") || "").trim(),
+    code_repo_path: String(data.get("code_repo_path") || "").trim(),
     pod: String(data.get("pod") || "").trim(),
     deployment: String(data.get("deployment") || "").trim(),
     question: String(data.get("question") || "").trim(),
@@ -319,6 +330,9 @@ async function refreshResources() {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (activeController) return;
+  activeController = new AbortController();
+  setRunning(true);
   setStatus("running", "running");
   prettyOutput.textContent = "等待后端响应...";
   rawOutput.textContent = "";
@@ -331,6 +345,7 @@ form.addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(formPayload()),
+      signal: activeController.signal,
     });
     if (!res.ok) {
       const body = await res.json();
@@ -342,11 +357,26 @@ form.addEventListener("submit", async (event) => {
     if (statusEl.dataset.tone !== "error") setStatus("ready", "ready");
     if (analysisStatus.textContent === "running") analysisStatus.textContent = "ready";
   } catch (err) {
+    if (err.name === "AbortError") {
+      appendOutputLine(prettyOutput, "已停止本次查询。");
+      appendOutputLine(analysisOutput, "已停止本次分析。");
+      analysisStatus.textContent = "stopped";
+      setStatus("stopped", "idle");
+      return;
+    }
     prettyOutput.textContent = String(err.message || err);
     analysisStatus.textContent = "error";
     analysisOutput.textContent = "";
     setStatus("error", "error");
+  } finally {
+    activeController = null;
+    setRunning(false);
   }
+});
+
+stopBtn.addEventListener("click", () => {
+  if (!activeController) return;
+  activeController.abort();
 });
 
 resolveBtn.addEventListener("click", async () => {
@@ -361,6 +391,7 @@ resolveBtn.addEventListener("click", async () => {
 resetBtn.addEventListener("click", () => {
   form.reset();
   document.querySelector("#backend-url").value = "http://localhost:9108";
+  document.querySelector("#code-repo-path").value = "/Users/work_project/360/member";
   setOptions(deploymentSelect, [], "全部 Deployment");
   setOptions(podSelect, [], "全部 Pod");
   summaryTarget.textContent = "-";

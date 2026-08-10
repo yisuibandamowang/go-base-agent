@@ -59,9 +59,10 @@ func (r *AnalyzingLogReader) SearchStream(ctx context.Context, req LogSearchRequ
 		return resp, nil
 	}
 
+	codeRepoPath := codeRepoPathForRequest(req, r.conf.CodeRepoPath)
 	emit(LogStreamEvent{Type: "analysis_progress", TraceID: req.TraceID, Message: "开始检索会员代码链路线索"})
-	slog.Info("code evidence search started", "trace_id", req.TraceID, "repo", r.conf.CodeRepoPath)
-	codeEvidence := searchCodeEvidence(ctx, r.conf.CodeRepoPath, req.Service, req, resp.Raw, r.conf.CodeMaxLines)
+	slog.Info("code evidence search started", "trace_id", req.TraceID, "repo", codeRepoPath)
+	codeEvidence := searchCodeEvidence(ctx, codeRepoPath, req.Service, req, resp.Raw, r.conf.CodeMaxLines)
 	emit(LogStreamEvent{Type: "code_evidence", TraceID: req.TraceID, Message: fmt.Sprintf("代码线索检索完成，共 %d 条", len(codeEvidence)), CodeEvidence: codeEvidence})
 	slog.Info("code evidence search completed", "trace_id", req.TraceID, "count", len(codeEvidence))
 

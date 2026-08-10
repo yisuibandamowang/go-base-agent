@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,6 +44,7 @@ type LogSearchRequest struct {
 	MaxLines        int      `json:"max_lines"`
 	MaxStdoutLines  int      `json:"max_stdout_lines"`
 	MaxLineChars    int      `json:"max_line_chars"`
+	CodeRepoPath    string   `json:"code_repo_path"`
 }
 
 type LogSearchResponse struct {
@@ -88,35 +91,73 @@ func (r *ScriptLogReader) Search(ctx context.Context, req LogSearchRequest) (*Lo
 }
 
 func (r *ScriptLogReader) searchBatch(ctx context.Context, traceID string, jobs []LogSearchRequest) (*LogSearchResponse, error) {
-	results := make([]interface{}, 0, len(jobs))
+	return runSearchBatch(ctx, traceID, jobs, r.conf.MaxConcurrency, r.searchOne)
+}
+
+func runSearchBatch(ctx context.Context, traceID string, jobs []LogSearchRequest, maxConcurrency int, search func(context.Context, LogSearchRequest) (*LogSearchResponse, error)) (*LogSearchResponse, error) {
+	if maxConcurrency <= 0 {
+		maxConcurrency = 4
+	}
+	if maxConcurrency > len(jobs) && len(jobs) > 0 {
+		maxConcurrency = len(jobs)
+	}
+	results := make([]interface{}, len(jobs))
+	responses := make([]*LogSearchResponse, len(jobs))
+	errors := make([]error, len(jobs))
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	for i, job := range jobs {
+		i, job := i, job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				errors[i] = ctx.Err()
+				return
+			case sem <- struct{}{}:
+			}
+			defer func() { <-sem }()
+			slog.Info("log search batch job started", "trace_id", traceID, "service", job.Service, "env", job.Env)
+			resp, err := search(ctx, job)
+			if err != nil {
+				slog.Error("log search batch job failed", "trace_id", traceID, "service", job.Service, "env", job.Env, "err", err)
+				errors[i] = err
+				return
+			}
+			slog.Info("log search batch job completed", "trace_id", traceID, "service", job.Service, "env", job.Env, "stdout_lines", resp.Summary.StdoutLines, "file_log_lines", resp.Summary.FileLogLines)
+			responses[i] = resp
+		}()
+	}
+	wg.Wait()
 	summary := LogSearchSummary{Target: "batch", JobCount: len(jobs)}
 	commands := make([]string, 0, len(jobs))
-	for _, job := range jobs {
-		slog.Info("log search batch job started", "trace_id", traceID, "service", job.Service, "env", job.Env)
-		resp, err := r.searchOne(ctx, job)
-		if err != nil {
-			errText := err.Error()
-			slog.Error("log search batch job failed", "trace_id", traceID, "service", job.Service, "env", job.Env, "err", err)
+	for i, job := range jobs {
+		if errors[i] != nil {
+			errText := errors[i].Error()
 			summary.Errors = append(summary.Errors, job.Env+"/"+job.Service+": "+errText)
-			results = append(results, map[string]interface{}{
+			results[i] = map[string]interface{}{
 				"env":     job.Env,
 				"service": job.Service,
 				"error":   errText,
-			})
+			}
 			continue
 		}
-		slog.Info("log search batch job completed", "trace_id", traceID, "service", job.Service, "env", job.Env, "stdout_lines", resp.Summary.StdoutLines, "file_log_lines", resp.Summary.FileLogLines)
+		resp := responses[i]
+		if resp == nil {
+			continue
+		}
 		summary.StdoutLines += resp.Summary.StdoutLines
 		summary.FileLogLines += resp.Summary.FileLogLines
 		summary.LogFiles = appendUniqueStrings(summary.LogFiles, resp.Summary.LogFiles...)
 		summary.Errors = append(summary.Errors, resp.Summary.Errors...)
 		commands = append(commands, strings.Join(resp.Command, " "))
-		results = append(results, map[string]interface{}{
+		results[i] = map[string]interface{}{
 			"env":     job.Env,
 			"service": job.Service,
 			"summary": resp.Summary,
 			"raw":     resp.Raw,
-		})
+		}
 	}
 	slog.Info("log search batch completed", "trace_id", traceID, "job_count", len(jobs), "stdout_lines", summary.StdoutLines, "file_log_lines", summary.FileLogLines, "error_count", len(summary.Errors))
 	return &LogSearchResponse{
@@ -148,9 +189,13 @@ func (r *ScriptLogReader) searchOne(ctx context.Context, req LogSearchRequest) (
 	}
 	cmd := exec.CommandContext(runCtx, nodePath, args...)
 	cmd.Env = os.Environ()
-	slog.Info("log helper started", "trace_id", req.TraceID, "service", req.Service, "env", req.Env, "timeout", timeout.String())
+	slog.Info("log helper started", "trace_id", req.TraceID, "service", req.Service, "env", req.Env, "max_duration", timeout.String())
 	output, err := cmd.CombinedOutput()
 	if runCtx.Err() != nil {
+		if errors.Is(runCtx.Err(), context.Canceled) {
+			slog.Info("log helper canceled", "trace_id", req.TraceID, "service", req.Service, "env", req.Env)
+			return nil, fmt.Errorf("failed to read k8s logs: %w", runCtx.Err())
+		}
 		slog.Error("log helper timeout", "trace_id", req.TraceID, "service", req.Service, "env", req.Env, "err", runCtx.Err())
 		return nil, fmt.Errorf("failed to read k8s logs: %w", runCtx.Err())
 	}
@@ -305,6 +350,7 @@ func (r *ScriptLogReader) validate(req LogSearchRequest) error {
 
 func (r *LogSearchRequest) normalize() {
 	r.Question = strings.TrimSpace(r.Question)
+	r.CodeRepoPath = strings.TrimSpace(r.CodeRepoPath)
 	r.Service = strings.TrimSpace(r.Service)
 	r.Env = strings.ToLower(strings.TrimSpace(r.Env))
 	r.Pod = strings.TrimSpace(r.Pod)

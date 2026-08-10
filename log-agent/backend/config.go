@@ -29,6 +29,7 @@ type LogReaderConfig struct {
 	MaxLines       int
 	MaxStdoutLines int
 	MaxLineChars   int
+	MaxConcurrency int
 }
 
 type AnalyzerConfig struct {
@@ -60,6 +61,7 @@ func loadConfig() AppConfig {
 	v.SetDefault("log_reader.max_lines", 120)
 	v.SetDefault("log_reader.max_stdout_lines", 80)
 	v.SetDefault("log_reader.max_line_chars", 1200)
+	v.SetDefault("log_reader.max_concurrency", 4)
 	v.SetDefault("analyzer.enable", true)
 	v.SetDefault("analyzer.base_url", "https://api.360.cn/v1")
 	v.SetDefault("analyzer.bailian_base_url", "https://dashscope.aliyuncs.com")
@@ -80,6 +82,7 @@ func loadConfig() AppConfig {
 			MaxLines:       v.GetInt("log_reader.max_lines"),
 			MaxStdoutLines: v.GetInt("log_reader.max_stdout_lines"),
 			MaxLineChars:   v.GetInt("log_reader.max_line_chars"),
+			MaxConcurrency: v.GetInt("log_reader.max_concurrency"),
 		},
 		Analyzer: AnalyzerConfig{
 			Enable:         v.GetBool("analyzer.enable"),

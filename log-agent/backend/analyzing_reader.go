@@ -17,6 +17,13 @@ func NewAnalyzingLogReader(base LogReader, analyzer Analyzer, conf AnalyzerConfi
 	return &AnalyzingLogReader{base: base, analyzer: analyzer, conf: conf}
 }
 
+func codeRepoPathForRequest(req LogSearchRequest, fallback string) string {
+	if strings.TrimSpace(req.CodeRepoPath) != "" {
+		return strings.TrimSpace(req.CodeRepoPath)
+	}
+	return strings.TrimSpace(fallback)
+}
+
 func (r *AnalyzingLogReader) Search(ctx context.Context, req LogSearchRequest) (*LogSearchResponse, error) {
 	resp, err := r.base.Search(ctx, req)
 	if err != nil {
@@ -25,8 +32,9 @@ func (r *AnalyzingLogReader) Search(ctx context.Context, req LogSearchRequest) (
 	if r == nil || r.analyzer == nil || req.ResolveOnly {
 		return resp, nil
 	}
-	slog.Info("code evidence search started", "trace_id", req.TraceID, "repo", r.conf.CodeRepoPath)
-	codeEvidence := searchCodeEvidence(ctx, r.conf.CodeRepoPath, req.Service, req, resp.Raw, r.conf.CodeMaxLines)
+	codeRepoPath := codeRepoPathForRequest(req, r.conf.CodeRepoPath)
+	slog.Info("code evidence search started", "trace_id", req.TraceID, "repo", codeRepoPath)
+	codeEvidence := searchCodeEvidence(ctx, codeRepoPath, req.Service, req, resp.Raw, r.conf.CodeMaxLines)
 	slog.Info("code evidence search completed", "trace_id", req.TraceID, "count", len(codeEvidence))
 	slog.Info("analyzer started", "trace_id", req.TraceID, "model_route", strings.Join(qihoo360ModelFallbacks, ","), "bailian_model", r.conf.BailianModel)
 	analysis, err := r.analyzer.Analyze(ctx, AnalysisInput{

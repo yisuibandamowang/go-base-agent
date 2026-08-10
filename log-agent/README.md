@@ -35,6 +35,7 @@ http://localhost:9108
 | `LOG_AGENT_LOG_READER_SCRIPT_PATH` | `/Users/mima0000/.codex/skills/member-k8s-pod-log-read/scripts/read_pod_logs.mjs` | 日志 helper 脚本 |
 | `LOG_AGENT_LOG_READER_TIMEOUT_MS` | `15000` | 单次查询超时 |
 | `LOG_AGENT_LOG_READER_ALLOWED_ENVS` | `test,test2,test3,test4,regress,online` | 允许读取的环境 |
+| `LOG_AGENT_LOG_READER_MAX_CONCURRENCY` | `4` | 全环境、全服务等批量查询时的并发 job 数 |
 | `QIHOO360_API_KEY` | 空 | 360 智脑 OpenAI 兼容接口 API Key |
 | `LOG_AGENT_ANALYZER_BASE_URL` | `https://api.360.cn/v1` | 360 智脑 OpenAI 兼容接口地址 |
 | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` | 空 | 阿里云百炼 OpenAI 兼容接口兜底 API Key |
@@ -93,6 +94,7 @@ curl -X POST http://localhost:9108/api/log-agent/logs/search \
     "after_minutes": 1,
     "keywords": ["PayCenterFailed"],
     "question": "订单支付成功但会员未到账，帮我定位可能原因",
+    "code_repo_path": "/Users/work_project/360/member",
     "include_critical": true
   }'
 ```
@@ -106,6 +108,8 @@ POST /api/log-agent/logs/search/stream
 ```
 
 后端使用 Gin `c.Stream()` 输出 SSE 事件，先返回日志查询进度和日志结果，再继续输出代码线索与模型分析增量。关键阶段会输出 `trace_id` 日志，便于定位请求卡在日志 helper、代码检索还是模型调用。
+
+前端“停止”按钮会取消当前这一次流式请求；后端收到请求取消后会终止对应的日志 helper 子进程，日志中会出现 `log helper canceled`。`log helper started` 中的 `max_duration` 只是本次 helper 的最大允许执行时长，不代表已经超时；真正超时会打印 `log helper timeout`。
 
 全环境、全服务、全 Pod 查询：
 
@@ -136,7 +140,7 @@ qihoo_id=3523031789
 
 这类写法默认不会自动附加纯值宽搜，避免返回其他字段里包含同一数字的日志。如果需要跨服务按纯值串链路，可以另起一行显式输入 `3523031789`。
 
-智能分析会在日志查询后结合 `/Users/work_project/360/member` 中的代码线索调用模型服务。当前模型路由为代码内硬编码降级策略：
+智能分析会在日志查询后结合代码线索调用模型服务。代码目录可在前端“代码目录”输入框按请求覆盖；未填写时使用后端配置的 `LOG_AGENT_ANALYZER_CODE_REPO_PATH`。当前模型路由为代码内硬编码降级策略：
 
 ```text
 360 智脑 codex-ccmax/gpt-5.5
