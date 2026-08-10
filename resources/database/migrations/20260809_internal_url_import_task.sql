@@ -3,7 +3,9 @@ CREATE TABLE IF NOT EXISTS t_knowledge_internal_url_import_task (
     kb_id VARCHAR(20) NOT NULL,
     source_location VARCHAR(1024) NOT NULL,
     status VARCHAR(16) NOT NULL,
+    phase VARCHAR(32),
     total INTEGER DEFAULT 0,
+    fetched INTEGER DEFAULT 0,
     success INTEGER DEFAULT 0,
     failed INTEGER DEFAULT 0,
     existing_unchanged INTEGER DEFAULT 0,
@@ -16,6 +18,7 @@ CREATE TABLE IF NOT EXISTS t_knowledge_internal_url_import_task (
     skipped_chunked INTEGER DEFAULT 0,
     result_json JSONB,
     error_message VARCHAR(1024),
+    current_doc_name VARCHAR(512),
     created_by VARCHAR(20) NOT NULL,
     updated_by VARCHAR(20),
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -30,5 +33,8 @@ COMMENT ON TABLE t_knowledge_internal_url_import_task IS '内部URL文档导入�
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.kb_id IS '知识库ID';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.source_location IS '内部文档来源地址';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.status IS '任务状态：running/success/failed';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.phase IS '任务阶段：queued/fetching/success/failed';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.fetched IS '已遍历拉取的内部文档数';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.result_json IS '导入完成后的结果摘要JSON';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.error_message IS '失败原因';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.current_doc_name IS '当前正在拉取的内部文档名称';

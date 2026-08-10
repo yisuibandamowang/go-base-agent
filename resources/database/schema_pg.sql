@@ -279,7 +279,9 @@ CREATE TABLE t_knowledge_internal_url_import_task (
     kb_id                       VARCHAR(20)       NOT NULL,
     source_location             VARCHAR(1024)     NOT NULL,
     status                      VARCHAR(16)       NOT NULL,
+    phase                       VARCHAR(32),
     total                       INTEGER      DEFAULT 0,
+    fetched                     INTEGER      DEFAULT 0,
     success                     INTEGER      DEFAULT 0,
     failed                      INTEGER      DEFAULT 0,
     existing_unchanged          INTEGER      DEFAULT 0,
@@ -292,6 +294,7 @@ CREATE TABLE t_knowledge_internal_url_import_task (
     skipped_chunked             INTEGER      DEFAULT 0,
     result_json                 JSONB,
     error_message               VARCHAR(1024),
+    current_doc_name            VARCHAR(512),
     created_by                  VARCHAR(20)       NOT NULL,
     updated_by                  VARCHAR(20),
     create_time                 TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -667,7 +670,9 @@ COMMENT ON COLUMN t_knowledge_internal_url_import_task.id IS 'ID';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.kb_id IS '知识库ID';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.source_location IS '内部文档来源地址';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.status IS '任务状态：running/success/failed';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.phase IS '任务阶段：queued/fetching/success/failed';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.total IS '拉取到的内部文档总数';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.fetched IS '已遍历拉取的内部文档数';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.success IS '导入成功文档数';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.failed IS '导入失败文档数';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.existing_unchanged IS '已存在且内容未变化文档数';
@@ -680,6 +685,7 @@ COMMENT ON COLUMN t_knowledge_internal_url_import_task.chunkable IS '本次可�
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.skipped_chunked IS '已跳过的已分块未变化文档数';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.result_json IS '导入完成后的结果摘要JSON';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.error_message IS '失败原因';
+COMMENT ON COLUMN t_knowledge_internal_url_import_task.current_doc_name IS '当前正在拉取的内部文档名称';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.created_by IS '创建人';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.updated_by IS '修改人';
 COMMENT ON COLUMN t_knowledge_internal_url_import_task.create_time IS '创建时间';

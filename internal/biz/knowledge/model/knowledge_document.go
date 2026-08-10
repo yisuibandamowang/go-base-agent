@@ -42,7 +42,9 @@ type KnowledgeInternalURLImportTask struct {
 	KbID              string  `gorm:"column:kb_id;type:varchar(20);not null;index:idx_internal_url_import_kb" json:"kbId"`
 	SourceLocation    string  `gorm:"column:source_location;type:varchar(1024);not null" json:"sourceLocation"`
 	Status            string  `gorm:"column:status;type:varchar(16);not null;index:idx_internal_url_import_status" json:"status"`
+	Phase             string  `gorm:"column:phase;type:varchar(32)" json:"phase"`
 	Total             int     `gorm:"column:total;default:0" json:"total"`
+	Fetched           int     `gorm:"column:fetched;default:0" json:"fetched"`
 	Success           int     `gorm:"column:success;default:0" json:"success"`
 	Failed            int     `gorm:"column:failed;default:0" json:"failed"`
 	ExistingUnchanged int     `gorm:"column:existing_unchanged;default:0" json:"existingUnchanged"`
@@ -55,6 +57,7 @@ type KnowledgeInternalURLImportTask struct {
 	SkippedChunked    int     `gorm:"column:skipped_chunked;default:0" json:"skippedChunked"`
 	ResultJSON        *string `gorm:"column:result_json;type:jsonb" json:"resultJson"`
 	ErrorMessage      string  `gorm:"column:error_message;type:varchar(1024)" json:"errorMessage"`
+	CurrentDocName    string  `gorm:"column:current_doc_name;type:varchar(512)" json:"currentDocName"`
 	CreatedBy         string  `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
 	UpdatedBy         string  `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`
 }

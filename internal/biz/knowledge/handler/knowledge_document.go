@@ -49,6 +49,10 @@ type internalURLFetcher interface {
 	FetchDocuments(ctx context.Context, rawURL string) ([]crawler.Document, error)
 }
 
+type internalURLDocumentWalker interface {
+	WalkDocuments(ctx context.Context, rawURL string, onTree func(total int) error, onDocument func(index, total int, doc crawler.Document, skipped bool) error) error
+}
+
 // NewDocumentHandler 创建 DocumentHandler。
 func NewDocumentHandler(svc *service.DocumentService, fs *FileStore) *DocumentHandler {
 	return &DocumentHandler{svc: svc, fileStore: fs}
@@ -259,6 +263,8 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 
 type internalURLUploadResp struct {
 	Total                 int                 `json:"total"`
+	TreeTotal             int                 `json:"treeTotal,omitempty"`
+	Fetched               int                 `json:"fetched,omitempty"`
 	Success               int                 `json:"success"`
 	Failed                int                 `json:"failed"`
 	ExistingUnchanged     int                 `json:"existingUnchanged"`
@@ -283,8 +289,11 @@ type internalURLUploadItem struct {
 type internalURLImportTaskResp struct {
 	TaskID                string              `json:"taskId"`
 	Status                string              `json:"status"`
+	Phase                 string              `json:"phase,omitempty"`
 	ErrorMessage          string              `json:"errorMessage,omitempty"`
 	Total                 int                 `json:"total"`
+	ImportedTotal         int                 `json:"importedTotal,omitempty"`
+	Fetched               int                 `json:"fetched"`
 	Success               int                 `json:"success"`
 	Failed                int                 `json:"failed"`
 	ExistingUnchanged     int                 `json:"existingUnchanged"`
@@ -295,6 +304,7 @@ type internalURLImportTaskResp struct {
 	StrategyChanged       int                 `json:"strategyChangedDocuments"`
 	Chunkable             int                 `json:"chunkable"`
 	SkippedChunked        int                 `json:"skippedChunked"`
+	CurrentDocName        string              `json:"currentDocName,omitempty"`
 	Documents             []*dto.DocumentResp `json:"documents,omitempty"`
 	ChunkableDocuments    []*dto.DocumentResp `json:"chunkableDocuments,omitempty"`
 	SkippedChunkDocuments []*dto.DocumentResp `json:"skippedChunkDocuments,omitempty"`
@@ -317,7 +327,7 @@ func (h *DocumentHandler) uploadInternalURLDocuments(c *gin.Context, kbID string
 			return
 		}
 		h.startInternalURLImportTask(task.ID, kbID, req, operator)
-		c.JSON(http.StatusOK, convention.Success(internalURLImportTaskResp{TaskID: task.ID, Status: task.Status}))
+		c.JSON(http.StatusOK, convention.Success(internalURLImportTaskResp{TaskID: task.ID, Status: task.Status, Phase: task.Phase}))
 		return
 	}
 	resp, err := h.runInternalURLImport(c.Request.Context(), kbID, req, operator)
@@ -357,31 +367,13 @@ func (h *DocumentHandler) runInternalURLImport(ctx context.Context, kbID string,
 	canonicalKeys := make([]string, 0, len(docs))
 	fileURLs := make([]string, 0, len(docs))
 	for idx, doc := range docs {
-		docReq := req
-		docReq.SourceType = "internal_url"
-		docReq.SourceLocation = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
-		if req.ScheduleEnabled == 1 {
-			docReq.SourceLocation = firstNonEmpty(parentURL, doc.Meta.URL)
-		}
-		docReq.DocName = firstNonEmpty(doc.Meta.Title, doc.Meta.ID)
-		docReq.FileURL = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
-		docReq.FileType = internalURLFileType(doc.Meta.MimeType, docReq.DocName)
-		docReq.FileSize = int64(len(doc.Content))
-		docReq.CanonicalSourceKey = service.InternalURLCanonicalSourceKey(docReq.FileURL)
-		docReq.SourceRootKey = rootKey
-		docReq.SourceParentKey = service.InternalURLCanonicalSourceKey(doc.Meta.Extra["parent_url"])
-		docReq.SourceContentHash = internalURLContentHash(doc.Content)
-		docReq.SourceNodeType = service.InternalURLNodeType(doc.Content, doc.Meta.Extra)
-		if err := h.svc.NormalizeCreateDocumentProcessingConfig(ctx, &docReq); err != nil {
+		item, err := h.buildInternalURLUploadItem(ctx, req, parentURL, rootKey, idx, doc)
+		if err != nil {
 			return nil, err
 		}
-		if req.ScheduleEnabled == 1 && idx > 0 {
-			docReq.ScheduleEnabled = 0
-			docReq.ScheduleCron = ""
-		}
-		items = append(items, internalURLUploadItem{doc: doc, req: docReq})
-		canonicalKeys = append(canonicalKeys, docReq.CanonicalSourceKey)
-		fileURLs = append(fileURLs, docReq.FileURL)
+		items = append(items, item)
+		canonicalKeys = append(canonicalKeys, item.req.CanonicalSourceKey)
+		fileURLs = append(fileURLs, item.req.FileURL)
 	}
 	existingDocs, err := h.svc.ListInternalURLDocumentsBySourceKeys(ctx, kbID, canonicalKeys, fileURLs)
 	if err != nil {
@@ -477,11 +469,187 @@ func (h *DocumentHandler) runInternalURLImport(ctx context.Context, kbID string,
 	return &resp, nil
 }
 
+func (h *DocumentHandler) buildInternalURLUploadItem(ctx context.Context, req dto.CreateDocumentReq, parentURL, rootKey string, idx int, doc crawler.Document) (internalURLUploadItem, error) {
+	docReq := req
+	docReq.SourceType = "internal_url"
+	docReq.SourceLocation = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
+	if req.ScheduleEnabled == 1 {
+		docReq.SourceLocation = firstNonEmpty(parentURL, doc.Meta.URL)
+	}
+	docReq.DocName = firstNonEmpty(doc.Meta.Title, doc.Meta.ID)
+	docReq.FileURL = firstNonEmpty(doc.Meta.URL, req.SourceLocation)
+	docReq.FileType = internalURLFileType(doc.Meta.MimeType, docReq.DocName)
+	docReq.FileSize = int64(len(doc.Content))
+	docReq.CanonicalSourceKey = service.InternalURLCanonicalSourceKey(docReq.FileURL)
+	docReq.SourceRootKey = rootKey
+	docReq.SourceParentKey = service.InternalURLCanonicalSourceKey(doc.Meta.Extra["parent_url"])
+	docReq.SourceContentHash = internalURLContentHash(doc.Content)
+	docReq.SourceNodeType = service.InternalURLNodeType(doc.Content, doc.Meta.Extra)
+	if err := h.svc.NormalizeCreateDocumentProcessingConfig(ctx, &docReq); err != nil {
+		return internalURLUploadItem{}, err
+	}
+	if req.ScheduleEnabled == 1 && idx > 0 {
+		docReq.ScheduleEnabled = 0
+		docReq.ScheduleCron = ""
+	}
+	return internalURLUploadItem{doc: doc, req: docReq}, nil
+}
+
+func (h *DocumentHandler) processInternalURLUploadItem(ctx context.Context, kb *dto.KnowledgeBaseResp, kbID string, item internalURLUploadItem, operator string, resp *internalURLUploadResp) error {
+	docReq := item.req
+	doc := item.doc
+	existingDocs, err := h.svc.ListInternalURLDocumentsBySourceKeys(ctx, kbID, []string{docReq.CanonicalSourceKey}, []string{docReq.FileURL})
+	if err != nil {
+		return err
+	}
+	var existing *dto.DocumentResp
+	for i := range existingDocs {
+		current := &existingDocs[i]
+		if strings.TrimSpace(current.CanonicalSourceKey) != "" && current.CanonicalSourceKey == strings.TrimSpace(docReq.CanonicalSourceKey) {
+			existing = current
+			break
+		}
+		if strings.TrimSpace(current.FileURL) != "" && current.FileURL == strings.TrimSpace(docReq.FileURL) {
+			existing = current
+		}
+	}
+	existingUnchanged := existing != nil &&
+		strings.TrimSpace(existing.SourceContentHash) != "" &&
+		existing.SourceContentHash == docReq.SourceContentHash
+	strategyChanged := existing != nil && internalURLHasProcessingConfig(docReq) && internalURLProcessingChanged(existing, docReq)
+	if existingUnchanged {
+		resp.ExistingUnchanged++
+		if existing.ChunkCount > 0 {
+			resp.ExistingChunked++
+		}
+		if existing.Enabled {
+			resp.ExistingEnabled++
+		}
+	} else if existing == nil {
+		resp.NewDocuments++
+	} else {
+		resp.ChangedDocuments++
+	}
+	if strategyChanged {
+		resp.StrategyChanged++
+	}
+	var created *dto.DocumentResp
+	if existingUnchanged && strategyChanged {
+		pending := *existing
+		pending.DocName = docReq.DocName
+		pending.FileURL = docReq.FileURL
+		pending.FileType = docReq.FileType
+		pending.FileSize = docReq.FileSize
+		pending.SourceType = "internal_url"
+		pending.SourceLocation = docReq.SourceLocation
+		pending.CanonicalSourceKey = docReq.CanonicalSourceKey
+		pending.SourceRootKey = docReq.SourceRootKey
+		pending.SourceParentKey = docReq.SourceParentKey
+		pending.SourceContentHash = docReq.SourceContentHash
+		pending.SourceNodeType = docReq.SourceNodeType
+		pending.ProcessMode = docReq.ProcessMode
+		pending.ChunkStrategy = docReq.ChunkStrategy
+		pending.ChunkConfig = docReq.ChunkConfig
+		pending.PipelineID = docReq.PipelineID
+		created = &pending
+	} else {
+		created, err = h.svc.UpsertInternalURLDocument(ctx, kbID, docReq, operator)
+		if err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
+			return nil
+		}
+	}
+	skipSourceUpload := existingUnchanged && existing != nil
+	if docReq.SourceNodeType != "folder" && !skipSourceUpload {
+		if err := h.fileStore.PutWithCollection(ctx, kb.CollectionName, created.ID, docReq.DocName, doc.Content); err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, "保存内部文档失败: "+err.Error())
+			return nil
+		}
+	}
+	resp.Success++
+	resp.Documents = append(resp.Documents, created)
+	if docReq.SourceNodeType == "folder" {
+		return nil
+	}
+	if existingUnchanged && existing != nil && existing.ChunkCount > 0 && !strategyChanged {
+		resp.SkippedChunked++
+		resp.SkippedChunkDocuments = append(resp.SkippedChunkDocuments, created)
+		return nil
+	}
+	resp.Chunkable++
+	resp.ChunkableDocuments = append(resp.ChunkableDocuments, created)
+	return nil
+}
+
+func (h *DocumentHandler) runInternalURLImportStreaming(ctx context.Context, taskID, kbID string, req dto.CreateDocumentReq, operator string, walker internalURLDocumentWalker) (*internalURLUploadResp, error) {
+	if walker == nil {
+		return nil, fmt.Errorf("内部URL拉取器未配置")
+	}
+	kb, err := h.svc.GetKnowledgeBase(ctx, kbID)
+	if err != nil {
+		return nil, fmt.Errorf("查询知识库失败: %w", err)
+	}
+	if h.fileStore == nil {
+		return nil, fmt.Errorf("文件存储未配置")
+	}
+	resp := internalURLUploadResp{
+		ChunkableDocuments:    []*dto.DocumentResp{},
+		SkippedChunkDocuments: []*dto.DocumentResp{},
+	}
+	parentURL := strings.TrimSpace(req.SourceLocation)
+	rootKey := service.InternalURLCanonicalSourceKey(parentURL)
+	err = walker.WalkDocuments(ctx, req.SourceLocation, func(total int) error {
+		resp.TreeTotal = total
+		return h.updateInternalURLImportTaskProgress(ctx, taskID, map[string]any{
+			"phase":            "fetching",
+			"total":            total,
+			"fetched":          0,
+			"current_doc_name": "",
+			"updated_by":       operator,
+		})
+	}, func(index, total int, doc crawler.Document, skipped bool) error {
+		docName := firstNonEmpty(doc.Meta.Title, doc.Meta.ID)
+		if err := h.updateInternalURLImportTaskProgress(ctx, taskID, map[string]any{
+			"phase":            "fetching",
+			"total":            total,
+			"fetched":          index + 1,
+			"current_doc_name": docName,
+			"updated_by":       operator,
+		}); err != nil {
+			return err
+		}
+		if skipped {
+			resp.Fetched = index + 1
+			return nil
+		}
+		resp.Fetched = index + 1
+		resp.Total++
+		item, err := h.buildInternalURLUploadItem(ctx, req, parentURL, rootKey, index, doc)
+		if err != nil {
+			return err
+		}
+		return h.processInternalURLUploadItem(ctx, kb, kbID, item, operator, &resp)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Success == 0 {
+		if resp.Failed > 0 && len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("%s", strings.Join(resp.Errors, "; "))
+		}
+		return nil, fmt.Errorf("未读取到内部文档内容")
+	}
+	return &resp, nil
+}
+
 func (h *DocumentHandler) createInternalURLImportTask(ctx context.Context, kbID, sourceLocation, operator string) (*model.KnowledgeInternalURLImportTask, error) {
 	task := &model.KnowledgeInternalURLImportTask{
 		KbID:           kbID,
 		SourceLocation: strings.TrimSpace(sourceLocation),
 		Status:         "running",
+		Phase:          "queued",
 		CreatedBy:      operator,
 		UpdatedBy:      operator,
 	}
@@ -499,7 +667,17 @@ func (h *DocumentHandler) startInternalURLImportTask(taskID, kbID string, req dt
 	go func() {
 		runCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		resp, err := h.runInternalURLImport(runCtx, kbID, req, operator)
+		var resp *internalURLUploadResp
+		var err error
+		if walker, ok := h.internalURLFetcher.(internalURLDocumentWalker); ok {
+			resp, err = h.runInternalURLImportStreaming(runCtx, taskID, kbID, req, operator, walker)
+		} else {
+			_ = h.updateInternalURLImportTaskProgress(runCtx, taskID, map[string]any{
+				"phase":      "fetching",
+				"updated_by": operator,
+			})
+			resp, err = h.runInternalURLImport(runCtx, kbID, req, operator)
+		}
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer updateCancel()
 		if err != nil {
@@ -514,12 +692,20 @@ func (h *DocumentHandler) startInternalURLImportTask(taskID, kbID string, req dt
 	}()
 }
 
+func (h *DocumentHandler) updateInternalURLImportTaskProgress(ctx context.Context, taskID string, updates map[string]any) error {
+	if h.internalURLTaskDB == nil || taskID == "" {
+		return nil
+	}
+	return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
+}
+
 func (h *DocumentHandler) finishInternalURLImportTask(ctx context.Context, taskID string, resp *internalURLUploadResp, cause error, operator string) error {
 	updates := map[string]any{
 		"updated_by": operator,
 	}
 	if cause != nil {
 		updates["status"] = "failed"
+		updates["phase"] = "failed"
 		updates["error_message"] = cause.Error()
 		return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
 	}
@@ -528,8 +714,18 @@ func (h *DocumentHandler) finishInternalURLImportTask(ctx context.Context, taskI
 		return fmt.Errorf("marshal internal url import result: %w", err)
 	}
 	updates["status"] = "success"
+	updates["phase"] = "success"
 	updates["result_json"] = string(resultJSON)
-	updates["total"] = resp.Total
+	if resp.TreeTotal > 0 {
+		updates["total"] = resp.TreeTotal
+	} else {
+		updates["total"] = resp.Total
+	}
+	if resp.Fetched > 0 {
+		updates["fetched"] = resp.Fetched
+	} else {
+		updates["fetched"] = updates["total"]
+	}
 	updates["success"] = resp.Success
 	updates["failed"] = resp.Failed
 	updates["existing_unchanged"] = resp.ExistingUnchanged
@@ -540,6 +736,7 @@ func (h *DocumentHandler) finishInternalURLImportTask(ctx context.Context, taskI
 	updates["strategy_changed_documents"] = resp.StrategyChanged
 	updates["chunkable"] = resp.Chunkable
 	updates["skipped_chunked"] = resp.SkippedChunked
+	updates["current_doc_name"] = ""
 	return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
 }
 
@@ -560,8 +757,10 @@ func (h *DocumentHandler) GetInternalURLImportTask(c *gin.Context) {
 	resp := internalURLImportTaskResp{
 		TaskID:            task.ID,
 		Status:            task.Status,
+		Phase:             task.Phase,
 		ErrorMessage:      task.ErrorMessage,
 		Total:             task.Total,
+		Fetched:           task.Fetched,
 		Success:           task.Success,
 		Failed:            task.Failed,
 		ExistingUnchanged: task.ExistingUnchanged,
@@ -572,6 +771,7 @@ func (h *DocumentHandler) GetInternalURLImportTask(c *gin.Context) {
 		StrategyChanged:   task.StrategyChanged,
 		Chunkable:         task.Chunkable,
 		SkippedChunked:    task.SkippedChunked,
+		CurrentDocName:    task.CurrentDocName,
 	}
 	if strings.EqualFold(task.Status, "success") && task.ResultJSON != nil && strings.TrimSpace(*task.ResultJSON) != "" {
 		var result internalURLUploadResp
@@ -580,6 +780,10 @@ func (h *DocumentHandler) GetInternalURLImportTask(c *gin.Context) {
 			return
 		}
 		resp.Total = result.Total
+		resp.ImportedTotal = result.Total
+		if task.Total > 0 {
+			resp.Total = task.Total
+		}
 		resp.Success = result.Success
 		resp.Failed = result.Failed
 		resp.ExistingUnchanged = result.ExistingUnchanged

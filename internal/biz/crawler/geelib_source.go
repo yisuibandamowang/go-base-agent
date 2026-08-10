@@ -76,17 +76,33 @@ func (s *GeelibSource) WatchChanges(ctx context.Context, since time.Time) (<-cha
 
 // FetchDocuments 根据内部 URL 递归拉取目录树中有正文内容的文档。
 func (s *GeelibSource) FetchDocuments(ctx context.Context, rawURL string) ([]Document, error) {
-	ref, err := parseGeelibURL(rawURL, s.cfg.Domains)
+	docs := make([]Document, 0)
+	err := s.WalkDocuments(ctx, rawURL, nil, func(_ int, _ int, doc Document, skipped bool) error {
+		if skipped {
+			return nil
+		}
+		docs = append(docs, doc)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	return docs, nil
+}
+
+// WalkDocuments 根据内部 URL 遍历目录树，逐篇读取文档内容并回调处理。
+func (s *GeelibSource) WalkDocuments(ctx context.Context, rawURL string, onTree func(total int) error, onDocument func(index, total int, doc Document, skipped bool) error) error {
+	ref, err := parseGeelibURL(rawURL, s.cfg.Domains)
+	if err != nil {
+		return err
+	}
 	treePayload, err := s.runJSON(ctx, "tree", "-s", ref.spaceID, "-p", ref.docID, "--deep", "--json")
 	if err != nil {
-		return nil, fmt.Errorf("读取内部文档树失败: %w", err)
+		return fmt.Errorf("读取内部文档树失败: %w", err)
 	}
 	nodes, err := parseGeelibTreeNodes(treePayload)
 	if err != nil {
-		return nil, fmt.Errorf("解析内部文档树失败: %w", err)
+		return fmt.Errorf("解析内部文档树失败: %w", err)
 	}
 	if len(nodes) == 0 {
 		nodes = []geelibTreeNode{{DocID: ref.docID, Title: ref.docID}}
@@ -95,18 +111,25 @@ func (s *GeelibSource) FetchDocuments(ctx context.Context, rawURL string) ([]Doc
 	if len(flat) == 0 {
 		flat = []geelibTreeNode{{DocID: ref.docID, Title: ref.docID}}
 	}
-	docs := make([]Document, 0, len(flat))
-	for _, node := range flat {
+	if onTree != nil {
+		if err := onTree(len(flat)); err != nil {
+			return err
+		}
+	}
+	for idx, node := range flat {
 		doc, err := s.fetchDocument(ctx, ref, node)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if isGeelibEmptyContentPlaceholder(doc.Content) {
+		skipped := isGeelibEmptyContentPlaceholder(doc.Content)
+		if onDocument == nil {
 			continue
 		}
-		docs = append(docs, *doc)
+		if err := onDocument(idx, len(flat), *doc, skipped); err != nil {
+			return err
+		}
 	}
-	return docs, nil
+	return nil
 }
 
 func (s *GeelibSource) fetchDocument(ctx context.Context, ref geelibURLRef, node geelibTreeNode) (*Document, error) {
