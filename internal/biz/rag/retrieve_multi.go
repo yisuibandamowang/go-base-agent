@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -130,6 +131,7 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 				results[idx].err = err
 				return
 			}
+			slog.Debug("rag search channel completed", "channel", channel.Name(), "chunks", len(r.Chunks))
 			r.LatencyMs = time.Since(start).Milliseconds()
 			results[idx].result = r
 		}(i, ch)
@@ -148,6 +150,7 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 	for _, pp := range e.postProcessors {
 		allChunks = pp.Process(allChunks, allResults)
 	}
+	slog.Debug("rag search fusion completed", "chunks", len(allChunks), "channels", len(allResults))
 
 	return allChunks, nil
 }

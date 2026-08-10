@@ -50,6 +50,7 @@ type recordingSearchBackend struct {
 	intentQueries      []string
 	intentLimits       []int
 	keywordChunks      []RetrievedChunk
+	keywordChunksByKB  map[string][]RetrievedChunk
 	recentChunks       []RetrievedChunk
 	intentCollections  []string
 }
@@ -62,6 +63,9 @@ func (b *recordingSearchBackend) SearchKeywordChunks(_ context.Context, kb knowl
 	b.keywordCollections = append(b.keywordCollections, kb.CollectionName)
 	b.keywordQueries = append(b.keywordQueries, query)
 	b.keywordTopKs = append(b.keywordTopKs, topK)
+	if b.keywordChunksByKB != nil {
+		return b.keywordChunksByKB[kb.CollectionName], nil
+	}
 	return b.keywordChunks, nil
 }
 
@@ -75,6 +79,22 @@ func (b *recordingSearchBackend) MatchIntentCollections(_ context.Context, query
 	b.intentQueries = append(b.intentQueries, query)
 	b.intentLimits = append(b.intentLimits, limit)
 	return b.intentCollections, nil
+}
+
+func TestKeywordSearchTermsExtractsMixedChineseAndEnglishSignal(t *testing.T) {
+	terms := keywordSearchTerms("扶摇线上Tag去重问题是什么导致的?")
+	termSet := make(map[string]bool, len(terms))
+	for _, term := range terms {
+		termSet[term] = true
+	}
+	for _, want := range []string{"扶摇", "线上", "tag", "去重", "问题"} {
+		if !termSet[want] {
+			t.Fatalf("expected term %q in %v", want, terms)
+		}
+	}
+	if termSet["什么"] || termSet["是什"] {
+		t.Fatalf("expected generic question terms to be filtered, got %v", terms)
+	}
 }
 
 func TestIntentDirectedTargetsFromContextUsesKbIntents(t *testing.T) {
@@ -127,17 +147,56 @@ func TestBackendKeywordSearchChannelUsesSearchBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if got, want := backend.keywordCollections, []string{"collection_b"}; !reflect.DeepEqual(got, want) {
+	if got, want := backend.keywordCollections, []string{"collection_b", "collection_a"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("collections mismatch: got %v, want %v", got, want)
 	}
-	if got, want := backend.keywordQueries, []string{"会员等级规则"}; !reflect.DeepEqual(got, want) {
+	if got, want := backend.keywordQueries, []string{"会员等级规则", "会员等级规则"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("queries mismatch: got %v, want %v", got, want)
 	}
-	if got, want := backend.keywordTopKs, []int{10}; !reflect.DeepEqual(got, want) {
+	if got, want := backend.keywordTopKs, []int{10, 10}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("topK mismatch: got %v, want %v", got, want)
 	}
-	if len(result.Chunks) != 1 || result.Chunks[0].ID != "kw-1" {
+	if len(result.Chunks) != 2 || result.Chunks[0].ID != "kw-1" || result.Chunks[1].ID != "kw-1" {
 		t.Fatalf("unexpected chunks: %+v", result.Chunks)
+	}
+}
+
+func TestBackendKeywordSearchChannelSortsResultsAcrossKnowledgeBasesByScore(t *testing.T) {
+	backend := &recordingSearchBackend{
+		kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "错误知识库", CollectionName: "wrong_collection"},
+			{Name: "会员知识库", CollectionName: "member"},
+		},
+		keywordChunksByKB: map[string][]RetrievedChunk{
+			"wrong_collection": {
+				{ID: "wrong-1", Text: "线上问题泛匹配", Score: 1},
+			},
+			"member": {
+				{ID: "right-1", Text: "扶摇 tag 去重线上修复", Score: 17},
+			},
+		},
+	}
+	channel := NewBackendKeywordSearchChannel(backend, 5)
+	channel.SetKeywordOptions("both", 1)
+
+	result, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "扶摇线上tag去重问题是什么导致的?",
+		TopK:             10,
+		Intents: []SubQuestionIntent{{
+			NodeScores: []NodeScore{{
+				Node:  IntentNode{ID: "wrong", CollectionName: "wrong_collection", Kind: IntentKindKB},
+				Score: 0.8,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(result.Chunks) != 2 {
+		t.Fatalf("expected two keyword chunks, got %+v", result.Chunks)
+	}
+	if result.Chunks[0].ID != "right-1" {
+		t.Fatalf("expected highest scoring keyword result first, got %+v", result.Chunks)
 	}
 }
 
@@ -248,7 +307,7 @@ func TestRetrieverSearchChannelVectorGlobalUsesCandidateBudgetForGlobalRetriever
 	}
 }
 
-func TestBackendIntentDirectedSearchChannelUsesSearchBackendFallback(t *testing.T) {
+func TestBackendIntentDirectedSearchChannelDoesNotUseRecentChunksFallback(t *testing.T) {
 	backend := &recordingSearchBackend{
 		recentChunks: []RetrievedChunk{{ID: "recent-1", Text: "最新会员规则", Score: 0.7}},
 	}
@@ -267,14 +326,14 @@ func TestBackendIntentDirectedSearchChannelUsesSearchBackendFallback(t *testing.
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if got, want := backend.recentCollections, []string{"collection_a"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("recent collections mismatch: got %v, want %v", got, want)
+	if len(backend.recentCollections) != 0 {
+		t.Fatalf("expected intent channel not to use recent chunks as semantic fallback, got %v", backend.recentCollections)
 	}
-	if got, want := backend.recentTopKs, []int{3}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("recent topK mismatch: got %v, want %v", got, want)
+	if len(backend.recentTopKs) != 0 {
+		t.Fatalf("expected no recent topK calls, got %v", backend.recentTopKs)
 	}
-	if len(result.Chunks) != 1 || result.Chunks[0].ID != "recent-1" {
-		t.Fatalf("unexpected chunks: %+v", result.Chunks)
+	if len(result.Chunks) != 0 {
+		t.Fatalf("expected no chunks when intent vector search is unavailable, got %+v", result.Chunks)
 	}
 }
 
@@ -297,8 +356,10 @@ func TestPgKeywordSearchChannelResolvesModeAndTopKMultiplier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve knowledge bases: %v", err)
 	}
-	if len(intentKbs) != 1 || intentKbs[0].CollectionName != "collection_b" {
-		t.Fatalf("expected both mode to prefer intent collection, got %+v", intentKbs)
+	if len(intentKbs) != 2 ||
+		intentKbs[0].CollectionName != "collection_b" ||
+		intentKbs[1].CollectionName != "collection_a" {
+		t.Fatalf("expected both mode to search intent collection first then global collections, got %+v", intentKbs)
 	}
 	if got, want := channel.resolveTopK(5), 10; got != want {
 		t.Fatalf("topK mismatch: got %d, want %d", got, want)

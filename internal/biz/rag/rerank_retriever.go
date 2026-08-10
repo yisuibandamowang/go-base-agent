@@ -2,6 +2,9 @@ package rag
 
 import (
 	"context"
+	"sort"
+	"strconv"
+	"strings"
 
 	"go-base-agent/internal/infra/rerank"
 )
@@ -46,7 +49,7 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, question string, topK in
 		chunk.Score = item.Score
 		result = append(result, chunk)
 	}
-	return result, nil
+	return restoreStrongKeywordAnchors(result, chunks, topK), nil
 }
 
 // RetrieveWithContext runs retrieval with the richer search context when supported.
@@ -93,5 +96,85 @@ func (r *RerankRetriever) RetrieveWithContext(ctx context.Context, sc SearchCont
 		chunk.Score = item.Score
 		result = append(result, chunk)
 	}
-	return result, nil
+	return restoreStrongKeywordAnchors(result, chunks, sc.TopK), nil
+}
+
+func restoreStrongKeywordAnchors(reranked, candidates []RetrievedChunk, topK int) []RetrievedChunk {
+	if len(reranked) == 0 || len(candidates) == 0 {
+		return reranked
+	}
+	if topK <= 0 {
+		topK = len(reranked)
+	}
+	present := make(map[string]bool, len(reranked))
+	for _, chunk := range reranked {
+		present[chunk.ID] = true
+	}
+	anchors := make([]RetrievedChunk, 0)
+	for _, chunk := range candidates {
+		if present[chunk.ID] || !isStrongKeywordAnchor(chunk) {
+			continue
+		}
+		anchors = append(anchors, chunk)
+	}
+	if len(anchors) == 0 {
+		return truncateRerankResult(reranked, topK)
+	}
+	sort.SliceStable(anchors, func(i, j int) bool {
+		return keywordAnchorScore(anchors[i]) > keywordAnchorScore(anchors[j])
+	})
+	anchorLimit := topK / 5
+	if anchorLimit < 1 {
+		anchorLimit = 1
+	}
+	if anchorLimit > 3 {
+		anchorLimit = 3
+	}
+	if len(anchors) > anchorLimit {
+		anchors = anchors[:anchorLimit]
+	}
+	result := make([]RetrievedChunk, 0, topK)
+	result = append(result, anchors...)
+	used := make(map[string]bool, len(result))
+	for _, chunk := range result {
+		used[chunk.ID] = true
+	}
+	for _, chunk := range reranked {
+		if used[chunk.ID] {
+			continue
+		}
+		result = append(result, chunk)
+		if len(result) >= topK {
+			break
+		}
+	}
+	return truncateRerankResult(result, topK)
+}
+
+func isStrongKeywordAnchor(chunk RetrievedChunk) bool {
+	if len(chunk.Metadata) == 0 {
+		return false
+	}
+	if strings.TrimSpace(chunk.Metadata["retrieval_channel"]) != "keyword" {
+		return false
+	}
+	return keywordAnchorScore(chunk) >= 4
+}
+
+func keywordAnchorScore(chunk RetrievedChunk) float64 {
+	if len(chunk.Metadata) == 0 {
+		return 0
+	}
+	score, err := strconv.ParseFloat(strings.TrimSpace(chunk.Metadata["keyword_score"]), 64)
+	if err != nil {
+		return 0
+	}
+	return score
+}
+
+func truncateRerankResult(chunks []RetrievedChunk, topK int) []RetrievedChunk {
+	if topK > 0 && len(chunks) > topK {
+		return chunks[:topK]
+	}
+	return chunks
 }

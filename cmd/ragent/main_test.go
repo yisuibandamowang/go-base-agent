@@ -99,6 +99,16 @@ func TestMaybeWrapRerankRetrieverEnabled(t *testing.T) {
 	}
 }
 
+func TestKeywordSearchChannelDefaultsEnabled(t *testing.T) {
+	if !keywordSearchChannelEnabled(config.RAGSearchChannelConfig{}) {
+		t.Fatal("expected keyword search channel to default enabled")
+	}
+	disabled := false
+	if keywordSearchChannelEnabled(config.RAGSearchChannelConfig{Enabled: &disabled}) {
+		t.Fatal("expected explicit keyword disabled config to be honored")
+	}
+}
+
 func TestRagEvalHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

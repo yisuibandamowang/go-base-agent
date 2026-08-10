@@ -332,7 +332,7 @@ func main() {
 		)
 		searchChannels = append(searchChannels, intentChannel)
 	}
-	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefaultWith(false) {
+	if keywordSearchChannelEnabled(cfg.RAG.Search.Channels.Keyword) {
 		keywordChannel := rag.NewBackendKeywordSearchChannel(searchBackend, 5)
 		keywordChannel.SetKeywordOptions(
 			cfg.RAG.Search.Channels.Keyword.Mode,
@@ -359,6 +359,7 @@ func main() {
 		webSearchCfg.TimeoutSeconds,
 		webSearchCfg.Enabled,
 	))
+	slog.Info("rag search channels wired", "channels", searchChannelNames(searchChannels))
 	postProcessors := []rag.SearchResultPostProcessor{&rag.DedupPostProcessor{}}
 	fusionStrategy := strings.TrimSpace(cfg.RAG.Search.Fusion.Strategy)
 	if fusionStrategy == "" || strings.EqualFold(fusionStrategy, "rrf") {
@@ -1150,6 +1151,21 @@ func maybeWrapRerankRetriever(base rag.Retriever, rerankSvc rerank.Service, enab
 		return base
 	}
 	return rag.NewRerankRetriever(base, rerankSvc)
+}
+
+func keywordSearchChannelEnabled(cfg config.RAGSearchChannelConfig) bool {
+	return cfg.IsEnabledByDefault()
+}
+
+func searchChannelNames(channels []rag.SearchChannel) []string {
+	names := make([]string, 0, len(channels))
+	for _, channel := range channels {
+		if channel == nil {
+			continue
+		}
+		names = append(names, channel.Name())
+	}
+	return names
 }
 
 func evalRetrieve(ctx context.Context, retriever rag.Retriever, sc rag.SearchContext) ([]rag.RetrievedChunk, error) {

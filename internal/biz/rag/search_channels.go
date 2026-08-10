@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -195,15 +197,27 @@ func (c *BackendKeywordSearchChannel) Search(ctx context.Context, sc SearchConte
 		return SearchChannelResult{}, fmt.Errorf("list knowledge bases: %w", err)
 	}
 	topK := c.resolveTopK(sc.TopK)
+	slog.Debug("keyword search started", "query", query, "mode", c.mode, "kb_count", len(kbs), "topK", topK)
 
 	chunks := make([]RetrievedChunk, 0)
 	for _, kb := range kbs {
 		result, err := c.backend.SearchKeywordChunks(ctx, kb, query, topK)
 		if err != nil {
+			slog.Warn("keyword search failed", "kb", kb.Name, "collection", kb.CollectionName, "err", err)
 			continue
+		}
+		for i := range result {
+			if result[i].Metadata == nil {
+				result[i].Metadata = make(map[string]string)
+			}
+			result[i].Metadata["retrieval_channel"] = "keyword"
+			result[i].Metadata["keyword_score"] = fmt.Sprintf("%.6f", result[i].Score)
 		}
 		chunks = append(chunks, result...)
 	}
+	sort.SliceStable(chunks, func(i, j int) bool {
+		return chunks[i].Score > chunks[j].Score
+	})
 	return SearchChannelResult{
 		ChannelType: ChannelKeyword,
 		ChannelName: c.Name(),
@@ -234,7 +248,7 @@ func (c *BackendKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context,
 	default:
 		filtered := filterKnowledgeBasesByCollections(kbs, intentCollections)
 		if len(filtered) > 0 {
-			return filtered, nil
+			return appendKnowledgeBasesExcludingCollections(filtered, kbs, intentCollections), nil
 		}
 		return kbs, nil
 	}
@@ -325,19 +339,7 @@ func (c *BackendIntentDirectedSearchChannel) Search(ctx context.Context, sc Sear
 			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
 		}
 	}
-	chunks := make([]RetrievedChunk, 0)
-	for _, target := range targets {
-		topK := target.topK
-		if topK <= 0 {
-			topK = 10
-		}
-		result, err := c.backend.SearchRecentChunks(ctx, target.collectionName, topK)
-		if err != nil {
-			continue
-		}
-		chunks = append(chunks, result...)
-	}
-	return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
+	return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
 }
 
 func (c *BackendIntentDirectedSearchChannel) canVectorSearch() bool {
@@ -502,6 +504,32 @@ func filterKnowledgeBasesByCollections(kbs []knowledgeModel.KnowledgeBase, colle
 		}
 	}
 	return filtered
+}
+
+func appendKnowledgeBasesExcludingCollections(head, all []knowledgeModel.KnowledgeBase, excluded []string) []knowledgeModel.KnowledgeBase {
+	seen := make(map[string]bool, len(excluded)+len(head))
+	for _, collection := range excluded {
+		collection = strings.TrimSpace(collection)
+		if collection != "" {
+			seen[collection] = true
+		}
+	}
+	for _, kb := range head {
+		collection := strings.TrimSpace(kb.CollectionName)
+		if collection != "" {
+			seen[collection] = true
+		}
+	}
+	result := append([]knowledgeModel.KnowledgeBase(nil), head...)
+	for _, kb := range all {
+		collection := strings.TrimSpace(kb.CollectionName)
+		if collection == "" || seen[collection] {
+			continue
+		}
+		seen[collection] = true
+		result = append(result, kb)
+	}
+	return result
 }
 
 func firstSearchText(values ...string) string {

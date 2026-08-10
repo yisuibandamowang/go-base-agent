@@ -308,8 +308,8 @@ rag:
 	if !cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
 		t.Fatal("expected vector global channel to default enabled like Java")
 	}
-	if cfg.RAG.Search.Channels.Keyword.IsEnabledByDefaultWith(false) {
-		t.Fatal("expected keyword channel to default disabled like Java")
+	if !cfg.RAG.Search.Channels.Keyword.IsEnabledByDefault() {
+		t.Fatal("expected keyword channel to default enabled for recall safety")
 	}
 }
 
