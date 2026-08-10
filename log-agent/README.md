@@ -32,17 +32,19 @@ http://localhost:9108
 |------|--------|------|
 | `LOG_AGENT_ADDRESS` | `:9108` | 后端监听地址 |
 | `LOG_AGENT_LOG_READER_NODE_PATH` | `node` | Node.js 可执行文件 |
-| `LOG_AGENT_LOG_READER_SCRIPT_PATH` | `/Users/mima0000/.codex/skills/member-k8s-pod-log-read/scripts/read_pod_logs.mjs` | 日志 helper 脚本 |
-| `LOG_AGENT_LOG_READER_TIMEOUT_MS` | `15000` | 单次查询超时 |
+| `LOG_AGENT_LOG_READER_SCRIPT_PATH` | `/Users/mima0000/.codex/skills/member-k8s-pod-log-read/scripts/read_pod_logs.mjs` | 会员日志 helper 脚本 |
+| `LOG_AGENT_LOG_READER_FUYAO_SCRIPT_PATH` | `/Users/work_project/360/ad-platform-bot/.codex/skills/ad-platform-runtime-readonly/scripts/k8s_pod_logs.mjs` | 扶摇日志 helper 脚本 |
+| `LOG_AGENT_LOG_READER_FUYAO_WORK_DIR` | `/Users/work_project/360/ad-platform-bot` | 扶摇日志 helper 工作目录 |
+| `LOG_AGENT_LOG_READER_TIMEOUT_MS` | `120000` | 单次查询超时；扶摇按 Deployment 扫多 Pod 时需要更长 websocket 等待时间 |
 | `LOG_AGENT_LOG_READER_ALLOWED_ENVS` | `test,test2,test3,test4,regress,online` | 允许读取的环境 |
 | `LOG_AGENT_LOG_READER_MAX_CONCURRENCY` | `4` | 全环境、全服务等批量查询时的并发 job 数 |
 | `QIHOO360_API_KEY` | 空 | 360 智脑 OpenAI 兼容接口 API Key |
 | `LOG_AGENT_ANALYZER_BASE_URL` | `https://api.360.cn/v1` | 360 智脑 OpenAI 兼容接口地址 |
 | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` | 空 | 阿里云百炼 OpenAI 兼容接口兜底 API Key |
 | `LOG_AGENT_ANALYZER_BAILIAN_BASE_URL` | `https://dashscope.aliyuncs.com` | 阿里云百炼接口地址 |
-| `LOG_AGENT_ANALYZER_CODE_REPO_PATH` | `/Users/work_project/360/member` | 会员微服务代码仓库路径 |
+| `LOG_AGENT_ANALYZER_CODE_REPO_PATH` | `/Users/work_project/360/member` | 会员微服务代码仓库路径；扶摇项目未填写代码目录时默认使用 `/Users/work_project/360/ad-platform-bot` |
 
-K8S OpenAPI 凭据仍沿用现有 skill 的约定：
+会员 K8S OpenAPI 凭据仍沿用现有 skill 的约定：
 
 ```text
 MEMBER_K8S_TEST_AK / MEMBER_K8S_TEST_SK
@@ -52,6 +54,18 @@ MEMBER_K8S_TEST_AK / MEMBER_K8S_TEST_SK
 
 ```text
 ~/.codex/credentials/member_k8s_test_deploy.env
+```
+
+扶摇项目优先使用 `/Users/work_project/360/ad-platform-bot/.codex/skills/ad-platform-runtime-readonly` 下的只读日志 helper，凭据沿用该 skill 的约定：
+
+```text
+AD_PLATFORM_K8S_AK / AD_PLATFORM_K8S_SK
+```
+
+或本机凭据文件：
+
+```text
+~/.codex/credentials/ad_platform_k8s.env
 ```
 
 ## 前端启动
@@ -87,6 +101,7 @@ curl http://localhost:9108/api/log-agent/health
 curl -X POST http://localhost:9108/api/log-agent/logs/search \
   -H 'Content-Type: application/json' \
   -d '{
+    "project": "member",
     "service": "pay",
     "env": "test2",
     "at": "2026-08-10 15:30:00",
@@ -99,6 +114,21 @@ curl -X POST http://localhost:9108/api/log-agent/logs/search \
   }'
 ```
 
+`project` 不传时默认使用 `member`，也就是 K8S AppID `1586` 的会员项目。查询扶摇项目时，在前端“项目”下拉选择 `5658 扶摇项目`，代码目录会默认切换到 `/Users/work_project/360/ad-platform-bot`，也可以在输入框里手动覆盖。
+
+扶摇默认按 webmember 的日志链路查询，也就是在 `ad-platform-test`、`ad-platform-regress`、`ad-platform-online` 中读取 `/home/log/webmember/webmember.log`。例如：
+
+```json
+{
+  "project": "fuyao",
+  "deployment": "ad-platform-online",
+  "keywords": ["order_123"],
+  "all_pods": true
+}
+```
+
+扶摇项目如果不选具体 Deployment，后端会按环境自动映射到 webmember Deployment，避免底层 helper 在 `regress/online` 上无法通过 `service+env` 自动推导 Deployment。`env=all` 时会依次查询 `ad-platform-test`、`ad-platform-regress`、`ad-platform-online`。
+
 ### 流式日志查询
 
 前端查询默认调用流式接口：
@@ -109,7 +139,9 @@ POST /api/log-agent/logs/search/stream
 
 后端使用 Gin `c.Stream()` 输出 SSE 事件，先返回日志查询进度和日志结果，再继续输出代码线索与模型分析增量。关键阶段会输出 `trace_id` 日志，便于定位请求卡在日志 helper、代码检索还是模型调用。
 
-前端“停止”按钮会取消当前这一次流式请求；后端收到请求取消后会终止对应的日志 helper 子进程，日志中会出现 `log helper canceled`。`log helper started` 中的 `max_duration` 只是本次 helper 的最大允许执行时长，不代表已经超时；真正超时会打印 `log helper timeout`。
+前端“停止”按钮会取消当前这一次流式请求；后端收到请求取消后会终止对应的日志 helper 子进程，日志中会出现 `log helper canceled`。`log helper started` 中的 `max_duration` 只是本次 helper 的最大允许执行时长，不代表已经超时；真正超时会打印 `log helper timeout`。扶摇 webmember 未指定具体 Pod 时会默认使用 `--all-pods`，避免只抽中一个 Pod 导致漏掉线上实例日志；后端会汇总 helper 返回的每个 Pod 结果并展示实际命中的 Pod。
+
+后端托管的前端静态资源会返回 `Cache-Control: no-store`，`index.html` 也会给 `app.js` 带版本号，避免浏览器继续使用旧展示逻辑。
 
 全环境、全服务、全 Pod 查询：
 
@@ -135,12 +167,12 @@ qihoo_id=3523031789
 
 后端会同时查询：
 
-- 原始 `qihoo_id=3523031789`
-- 兼容 JSON/URL 参数形式的字段值正则
+- 远端 helper 用字段值 `3523031789` 召回候选日志
+- 后端再按 `qihoo_id` 字段做严格匹配，兼容普通 JSON 和转义 JSON
 
-这类写法默认不会自动附加纯值宽搜，避免返回其他字段里包含同一数字的日志。如果需要跨服务按纯值串链路，可以另起一行显式输入 `3523031789`。
+多行 `field=value` 会在后端做 AND 过滤，避免把只命中其中一个字段的日志展示出来。如果需要跨服务按纯值串链路，可以另起一行显式输入 `3523031789`。
 
-智能分析会在日志查询后结合代码线索调用模型服务。代码目录可在前端“代码目录”输入框按请求覆盖；未填写时使用后端配置的 `LOG_AGENT_ANALYZER_CODE_REPO_PATH`。当前模型路由为代码内硬编码降级策略：
+智能分析会在日志查询后结合代码线索调用模型服务。代码目录可在前端“代码目录”输入框按请求覆盖；未填写时 member 使用后端配置的 `LOG_AGENT_ANALYZER_CODE_REPO_PATH`，fuyao 使用 `/Users/work_project/360/ad-platform-bot`。当前模型路由为代码内硬编码降级策略：
 
 ```text
 360 智脑 codex-ccmax/gpt-5.5

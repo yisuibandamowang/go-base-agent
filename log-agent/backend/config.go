@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	defaultAddress    = ":9108"
-	defaultScriptPath = "/Users/mima0000/.codex/skills/member-k8s-pod-log-read/scripts/read_pod_logs.mjs"
+	defaultAddress         = ":9108"
+	defaultScriptPath      = "/Users/mima0000/.codex/skills/member-k8s-pod-log-read/scripts/read_pod_logs.mjs"
+	defaultFuyaoScriptPath = "/Users/work_project/360/ad-platform-bot/.codex/skills/ad-platform-runtime-readonly/scripts/k8s_pod_logs.mjs"
+	defaultFuyaoWorkDir    = "/Users/work_project/360/ad-platform-bot"
 )
 
 type AppConfig struct {
@@ -21,15 +23,17 @@ type AppConfig struct {
 }
 
 type LogReaderConfig struct {
-	NodePath       string
-	ScriptPath     string
-	Timeout        time.Duration
-	AllowedEnvs    []string
-	Services       []string
-	MaxLines       int
-	MaxStdoutLines int
-	MaxLineChars   int
-	MaxConcurrency int
+	NodePath        string
+	ScriptPath      string
+	FuyaoScriptPath string
+	FuyaoWorkDir    string
+	Timeout         time.Duration
+	AllowedEnvs     []string
+	Services        []string
+	MaxLines        int
+	MaxStdoutLines  int
+	MaxLineChars    int
+	MaxConcurrency  int
 }
 
 type AnalyzerConfig struct {
@@ -55,7 +59,9 @@ func loadConfig() AppConfig {
 	v.SetDefault("frontend_dir", "log-agent/frontend")
 	v.SetDefault("log_reader.node_path", "node")
 	v.SetDefault("log_reader.script_path", defaultScriptPath)
-	v.SetDefault("log_reader.timeout_ms", 15000)
+	v.SetDefault("log_reader.fuyao_script_path", defaultFuyaoScriptPath)
+	v.SetDefault("log_reader.fuyao_work_dir", defaultFuyaoWorkDir)
+	v.SetDefault("log_reader.timeout_ms", 120000)
 	v.SetDefault("log_reader.allowed_envs", "test,test2,test3,test4,regress,online")
 	v.SetDefault("log_reader.services", strings.Join(defaultServices(), ","))
 	v.SetDefault("log_reader.max_lines", 120)
@@ -74,15 +80,17 @@ func loadConfig() AppConfig {
 		Address:     strings.TrimSpace(v.GetString("address")),
 		FrontendDir: strings.TrimSpace(v.GetString("frontend_dir")),
 		LogReader: LogReaderConfig{
-			NodePath:       strings.TrimSpace(v.GetString("log_reader.node_path")),
-			ScriptPath:     strings.TrimSpace(v.GetString("log_reader.script_path")),
-			Timeout:        time.Duration(v.GetInt("log_reader.timeout_ms")) * time.Millisecond,
-			AllowedEnvs:    splitCSV(v.GetString("log_reader.allowed_envs")),
-			Services:       splitCSV(v.GetString("log_reader.services")),
-			MaxLines:       v.GetInt("log_reader.max_lines"),
-			MaxStdoutLines: v.GetInt("log_reader.max_stdout_lines"),
-			MaxLineChars:   v.GetInt("log_reader.max_line_chars"),
-			MaxConcurrency: v.GetInt("log_reader.max_concurrency"),
+			NodePath:        strings.TrimSpace(v.GetString("log_reader.node_path")),
+			ScriptPath:      strings.TrimSpace(v.GetString("log_reader.script_path")),
+			FuyaoScriptPath: strings.TrimSpace(v.GetString("log_reader.fuyao_script_path")),
+			FuyaoWorkDir:    strings.TrimSpace(v.GetString("log_reader.fuyao_work_dir")),
+			Timeout:         time.Duration(v.GetInt("log_reader.timeout_ms")) * time.Millisecond,
+			AllowedEnvs:     splitCSV(v.GetString("log_reader.allowed_envs")),
+			Services:        splitCSV(v.GetString("log_reader.services")),
+			MaxLines:        v.GetInt("log_reader.max_lines"),
+			MaxStdoutLines:  v.GetInt("log_reader.max_stdout_lines"),
+			MaxLineChars:    v.GetInt("log_reader.max_line_chars"),
+			MaxConcurrency:  v.GetInt("log_reader.max_concurrency"),
 		},
 		Analyzer: AnalyzerConfig{
 			Enable:         v.GetBool("analyzer.enable"),

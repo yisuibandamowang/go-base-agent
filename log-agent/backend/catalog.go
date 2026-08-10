@@ -6,8 +6,10 @@ type SelectOption struct {
 }
 
 type OptionsResponse struct {
-	Envs     []SelectOption `json:"envs"`
-	Services []SelectOption `json:"services"`
+	Projects    []SelectOption            `json:"projects"`
+	Envs        []SelectOption            `json:"envs"`
+	Services    []SelectOption            `json:"services"`
+	Deployments map[string][]SelectOption `json:"deployments"`
 }
 
 func defaultServices() []string {
@@ -33,6 +35,10 @@ func defaultServices() []string {
 }
 
 func optionsResponse(conf LogReaderConfig) OptionsResponse {
+	projects := []SelectOption{
+		{Value: logProjectMember, Label: "1586 member项目"},
+		{Value: logProjectFuyao, Label: "5658 扶摇项目"},
+	}
 	envs := []SelectOption{{Value: "all", Label: "全部环境"}}
 	for _, env := range conf.AllowedEnvs {
 		envs = append(envs, SelectOption{Value: env, Label: env})
@@ -41,7 +47,22 @@ func optionsResponse(conf LogReaderConfig) OptionsResponse {
 	for _, service := range servicesFromConfig(conf) {
 		services = append(services, SelectOption{Value: service, Label: service})
 	}
-	return OptionsResponse{Envs: envs, Services: services}
+	return OptionsResponse{
+		Projects: projects,
+		Envs:     envs,
+		Services: services,
+		Deployments: map[string][]SelectOption{
+			logProjectMember: {
+				{Value: "all", Label: "全部 Deployment"},
+			},
+			logProjectFuyao: {
+				{Value: "all", Label: "全部 Deployment"},
+				{Value: "ad-platform-test", Label: "ad-platform-test"},
+				{Value: "ad-platform-regress", Label: "ad-platform-regress"},
+				{Value: "ad-platform-online", Label: "ad-platform-online"},
+			},
+		},
+	}
 }
 
 func servicesFromConfig(conf LogReaderConfig) []string {

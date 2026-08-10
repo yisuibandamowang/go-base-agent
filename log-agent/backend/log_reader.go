@@ -15,9 +15,19 @@ import (
 	"time"
 )
 
+const defaultMemberK8SAppID = "1586"
+const defaultFuyaoK8SAppID = "5658"
+
+const (
+	logProjectMember = "member"
+	logProjectFuyao  = "fuyao"
+)
+
 type LogSearchRequest struct {
 	TraceID         string   `json:"trace_id"`
 	Question        string   `json:"question"`
+	Project         string   `json:"project"`
+	AppID           string   `json:"app_id"`
 	Service         string   `json:"service"`
 	Env             string   `json:"env"`
 	Pod             string   `json:"pod"`
@@ -188,8 +198,9 @@ func (r *ScriptLogReader) searchOne(ctx context.Context, req LogSearchRequest) (
 		nodePath = "node"
 	}
 	cmd := exec.CommandContext(runCtx, nodePath, args...)
-	cmd.Env = os.Environ()
-	slog.Info("log helper started", "trace_id", req.TraceID, "service", req.Service, "env", req.Env, "max_duration", timeout.String())
+	cmd.Env = commandEnv(os.Environ(), req)
+	cmd.Dir = r.commandDir(req)
+	slog.Info("log helper started", "trace_id", req.TraceID, "project", projectForRequest(req), "service", req.Service, "env", req.Env, "app_id", commandAppID(req), "work_dir", cmd.Dir, "max_duration", timeout.String())
 	output, err := cmd.CombinedOutput()
 	if runCtx.Err() != nil {
 		if errors.Is(runCtx.Err(), context.Canceled) {
@@ -208,6 +219,7 @@ func (r *ScriptLogReader) searchOne(ctx context.Context, req LogSearchRequest) (
 		slog.Error("log helper output decode failed", "trace_id", req.TraceID, "service", req.Service, "env", req.Env, "err", err)
 		return nil, fmt.Errorf("failed to decode log helper output: %w", err)
 	}
+	filterLogOutputByRequest(raw, req)
 	summary := summarizeLogOutput(raw)
 	slog.Info("log helper completed", "trace_id", req.TraceID, "service", req.Service, "env", req.Env, "stdout_lines", summary.StdoutLines, "file_log_lines", summary.FileLogLines, "error_count", len(summary.Errors))
 	return &LogSearchResponse{
@@ -230,15 +242,27 @@ func buildSearchJobs(req LogSearchRequest, conf LogReaderConfig) ([]LogSearchReq
 	}
 	envs := []string{req.Env}
 	if isAll(req.Env) {
-		envs = append([]string{}, conf.AllowedEnvs...)
 		req.Env = ""
 		req.AllPods = true
+		if req.Deployment != "" || req.Pod != "" {
+			envs = []string{""}
+		} else if projectForRequest(req) == logProjectFuyao {
+			envs = []string{"test", "regress", "online"}
+		} else {
+			envs = append([]string{}, conf.AllowedEnvs...)
+		}
 	}
 	services := []string{req.Service}
 	if isAll(req.Service) {
-		services = servicesFromConfig(conf)
 		req.Service = ""
 		req.AllPods = true
+		if req.Deployment != "" || req.Pod != "" {
+			services = []string{""}
+		} else if projectForRequest(req) == logProjectFuyao {
+			services = []string{"webmember"}
+		} else {
+			services = servicesFromConfig(conf)
+		}
 	}
 	if len(envs) == 0 || envs[0] == "" {
 		envs = []string{""}
@@ -247,7 +271,7 @@ func buildSearchJobs(req LogSearchRequest, conf LogReaderConfig) ([]LogSearchReq
 		services = []string{""}
 	}
 	broad := len(envs)*len(services) > 1 || req.AllPods
-	if broad && !req.ResolveOnly && len(req.allKeywords()) == 0 && len(req.Regexes) == 0 {
+	if broad && !req.ResolveOnly && len(req.remoteKeywords()) == 0 && len(req.Regexes) == 0 {
 		return nil, fmt.Errorf("failed to build log helper args: broad search requires keyword or regex")
 	}
 	jobs := make([]LogSearchRequest, 0, len(envs)*len(services))
@@ -256,6 +280,7 @@ func buildSearchJobs(req LogSearchRequest, conf LogReaderConfig) ([]LogSearchReq
 			job := req
 			job.Env = env
 			job.Service = service
+			fillDefaultFuyaoDeployment(&job)
 			if err := NewScriptLogReader(conf).validate(job); err != nil {
 				return nil, err
 			}
@@ -266,11 +291,12 @@ func buildSearchJobs(req LogSearchRequest, conf LogReaderConfig) ([]LogSearchReq
 }
 
 func (r *ScriptLogReader) buildCommandArgs(req LogSearchRequest) ([]string, error) {
-	scriptPath := strings.TrimSpace(r.conf.ScriptPath)
+	scriptPath := r.scriptPath(req)
 	if scriptPath == "" {
 		return nil, fmt.Errorf("failed to build log helper args: script path is empty")
 	}
 	req.normalize()
+	fillDefaultFuyaoDeployment(&req)
 	if err := r.validate(req); err != nil {
 		return nil, err
 	}
@@ -292,18 +318,21 @@ func (r *ScriptLogReader) buildCommandArgs(req LogSearchRequest) ([]string, erro
 	appendPair("--deployment", req.Deployment)
 	appendPair("--service", req.Service)
 	appendPair("--env", req.Env)
+	if projectForRequest(req) == logProjectFuyao {
+		appendPair("--app-id", commandAppID(req))
+	}
 	appendPair("--image-tag", req.ImageTag)
 	appendPair("--image-regex", req.ImageRegex)
 	appendPair("--at", req.At)
 	appendInt("--before-minutes", req.BeforeMinutes)
 	appendInt("--after-minutes", req.AfterMinutes)
-	for _, keyword := range req.allKeywords() {
+	for _, keyword := range req.remoteKeywords() {
 		appendPair("--keyword", keyword)
 	}
 	for _, regex := range req.allRegexes() {
 		appendPair("--regex", regex)
 	}
-	for _, logFile := range req.LogFiles {
+	for _, logFile := range logFilesForRequest(req) {
 		appendPair("--log-file", logFile)
 	}
 	if req.IncludeCritical {
@@ -332,14 +361,108 @@ func (r *ScriptLogReader) buildCommandArgs(req LogSearchRequest) ([]string, erro
 	return args, nil
 }
 
+func (r *ScriptLogReader) scriptPath(req LogSearchRequest) string {
+	if projectForRequest(req) == logProjectFuyao {
+		return strings.TrimSpace(r.conf.FuyaoScriptPath)
+	}
+	return strings.TrimSpace(r.conf.ScriptPath)
+}
+
+func (r *ScriptLogReader) commandDir(req LogSearchRequest) string {
+	if projectForRequest(req) == logProjectFuyao {
+		return strings.TrimSpace(r.conf.FuyaoWorkDir)
+	}
+	return ""
+}
+
+func fillDefaultFuyaoDeployment(req *LogSearchRequest) {
+	if req == nil || projectForRequest(*req) != logProjectFuyao {
+		return
+	}
+	if strings.TrimSpace(req.Service) == "" {
+		req.Service = fuyaoServiceForDeployment(req.Deployment)
+	}
+	if strings.TrimSpace(req.Deployment) == "" {
+		req.Deployment = fuyaoDeploymentForServiceEnv(req.Service, req.Env)
+	}
+	if fuyaoServiceForRequest(*req) == "webmember" && strings.TrimSpace(req.Pod) == "" {
+		req.AllPods = true
+	}
+}
+
+func fuyaoServiceForDeployment(deployment string) string {
+	deployment = strings.TrimSpace(deployment)
+	if deployment == "ad-platform-test" || deployment == "ad-platform-regress" || deployment == "ad-platform-online" {
+		return "webmember"
+	}
+	if strings.HasPrefix(deployment, "ad-platform-fuyao-agent-backend-") {
+		return "fuyao-agent-backend"
+	}
+	return ""
+}
+
+func fuyaoDeploymentForServiceEnv(service string, env string) string {
+	service = strings.TrimSpace(service)
+	switch strings.ToLower(strings.TrimSpace(env)) {
+	case "test":
+		if service == "webmember" {
+			return "ad-platform-test"
+		}
+		if service == "fuyao-agent-backend" {
+			return "ad-platform-fuyao-agent-backend-test"
+		}
+	case "regress", "regression":
+		if service == "webmember" {
+			return "ad-platform-regress"
+		}
+		if service == "fuyao-agent-backend" {
+			return "ad-platform-fuyao-agent-backend-regress"
+		}
+	case "online":
+		if service == "webmember" {
+			return "ad-platform-online"
+		}
+		if service == "fuyao-agent-backend" {
+			return "ad-platform-fuyao-agent-backend-online"
+		}
+	}
+	return ""
+}
+
+func logFilesForRequest(req LogSearchRequest) []string {
+	if len(req.LogFiles) > 0 {
+		return req.LogFiles
+	}
+	if projectForRequest(req) == logProjectFuyao && fuyaoServiceForRequest(req) == "webmember" {
+		return []string{"/home/log/webmember/webmember.log"}
+	}
+	return nil
+}
+
+func fuyaoServiceForRequest(req LogSearchRequest) string {
+	if strings.TrimSpace(req.Service) != "" {
+		return strings.TrimSpace(req.Service)
+	}
+	return fuyaoServiceForDeployment(req.Deployment)
+}
+
 func (r *ScriptLogReader) validate(req LogSearchRequest) error {
+	if projectForRequest(req) == "" {
+		return fmt.Errorf("failed to build log helper args: unsupported project %q", req.Project)
+	}
+	if req.AppID != "" && !regexp.MustCompile(`^[0-9]+$`).MatchString(req.AppID) {
+		return fmt.Errorf("failed to build log helper args: app_id must be numeric")
+	}
 	if req.Pod == "" && req.Deployment == "" && (req.Service == "" || req.Env == "") {
 		return fmt.Errorf("failed to build log helper args: provide pod, deployment, or service+env")
 	}
 	if req.Service != "" && req.Env == "" && req.Pod == "" && req.Deployment == "" {
 		return fmt.Errorf("failed to build log helper args: env is required when service is provided")
 	}
-	if req.Env != "" && !containsFold(r.conf.AllowedEnvs, req.Env) {
+	if req.Env != "" && projectForRequest(req) == logProjectFuyao && !containsFold([]string{"test", "regress", "regression", "online"}, req.Env) {
+		return fmt.Errorf("failed to build log helper args: unsupported fuyao env %q", req.Env)
+	}
+	if req.Env != "" && projectForRequest(req) != logProjectFuyao && !containsFold(r.conf.AllowedEnvs, req.Env) {
 		return fmt.Errorf("failed to build log helper args: unsupported env %q", req.Env)
 	}
 	if req.StdoutOnly && req.FileOnly {
@@ -351,6 +474,8 @@ func (r *ScriptLogReader) validate(req LogSearchRequest) error {
 func (r *LogSearchRequest) normalize() {
 	r.Question = strings.TrimSpace(r.Question)
 	r.CodeRepoPath = strings.TrimSpace(r.CodeRepoPath)
+	r.Project = strings.TrimSpace(strings.ToLower(r.Project))
+	r.AppID = strings.TrimSpace(r.AppID)
 	r.Service = strings.TrimSpace(r.Service)
 	r.Env = strings.ToLower(strings.TrimSpace(r.Env))
 	r.Pod = strings.TrimSpace(r.Pod)
@@ -369,6 +494,56 @@ func (r *LogSearchRequest) normalize() {
 	if r.AfterMinutes <= 0 {
 		r.AfterMinutes = 1
 	}
+}
+
+func projectForRequest(req LogSearchRequest) string {
+	project := strings.TrimSpace(strings.ToLower(req.Project))
+	if project == "" {
+		return logProjectMember
+	}
+	if project == logProjectMember || project == logProjectFuyao {
+		return project
+	}
+	return ""
+}
+
+func commandEnv(base []string, req LogSearchRequest) []string {
+	if projectForRequest(req) == logProjectFuyao {
+		return upsertEnv(base, "AD_PLATFORM_K8S_APP_ID", commandAppID(req))
+	}
+	return upsertEnv(base, "MEMBER_K8S_TEST_APP_ID", commandAppID(req))
+}
+
+func commandAppID(req LogSearchRequest) string {
+	req.normalize()
+	if req.AppID == "" {
+		if projectForRequest(req) == logProjectFuyao {
+			return defaultFuyaoK8SAppID
+		}
+		return defaultMemberK8SAppID
+	}
+	return req.AppID
+}
+
+func upsertEnv(base []string, key string, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(base)+1)
+	replaced := false
+	for _, item := range base {
+		if strings.HasPrefix(item, prefix) {
+			if replaced {
+				continue
+			}
+			out = append(out, prefix+value)
+			replaced = true
+			continue
+		}
+		out = append(out, item)
+	}
+	if !replaced {
+		out = append(out, prefix+value)
+	}
+	return out
 }
 
 func isAll(value string) bool {
@@ -393,8 +568,26 @@ func (r LogSearchRequest) allKeywords() []string {
 	return out
 }
 
+func (r LogSearchRequest) remoteKeywords() []string {
+	keywords := r.allKeywords()
+	fieldValues := make([]string, 0, len(keywords))
+	plainKeywords := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		_, value, ok := parseFieldValueKeyword(keyword)
+		if ok {
+			fieldValues = append(fieldValues, value)
+			continue
+		}
+		plainKeywords = append(plainKeywords, keyword)
+	}
+	out := make([]string, 0, len(plainKeywords)+1)
+	out = append(out, fieldValues...)
+	out = append(out, plainKeywords...)
+	return uniqueNonEmptyStrings(out)
+}
+
 func (r LogSearchRequest) allRegexes() []string {
-	out := make([]string, 0, len(r.Regexes)+len(r.Keywords)+1)
+	out := make([]string, 0, len(r.Regexes))
 	seen := map[string]struct{}{}
 	for _, regexText := range r.Regexes {
 		regexText = strings.TrimSpace(regexText)
@@ -404,17 +597,104 @@ func (r LogSearchRequest) allRegexes() []string {
 		seen[regexText] = struct{}{}
 		out = append(out, regexText)
 	}
+	return out
+}
+
+func (r LogSearchRequest) requiredFieldRegexes() []string {
+	out := make([]string, 0, len(r.Keywords)+1)
+	seen := map[string]struct{}{}
 	for _, keyword := range append([]string{r.Keyword}, r.Keywords...) {
 		field, value, ok := parseFieldValueKeyword(keyword)
 		if !ok {
 			continue
 		}
-		regexText := regexp.QuoteMeta(field) + `["']?\s*[:=]\s*["']?` + regexp.QuoteMeta(value)
+		regexText := regexp.QuoteMeta(field) + `\\?["']?\s*[:=]\s*\\?["']?` + regexp.QuoteMeta(value)
 		if _, exists := seen[regexText]; exists {
 			continue
 		}
 		seen[regexText] = struct{}{}
 		out = append(out, regexText)
+	}
+	return out
+}
+
+func filterLogOutputByRequest(raw map[string]interface{}, req LogSearchRequest) {
+	regexes := req.requiredFieldRegexes()
+	if len(regexes) == 0 {
+		return
+	}
+	compiled := make([]*regexp.Regexp, 0, len(regexes))
+	for _, regexText := range regexes {
+		regex, err := regexp.Compile(regexText)
+		if err != nil {
+			continue
+		}
+		compiled = append(compiled, regex)
+	}
+	if len(compiled) == 0 {
+		return
+	}
+	if stdout, ok := raw["stdout"].(map[string]interface{}); ok {
+		lines := filterLinesByRegexes(interfaceSlice(stdout["lines"]), compiled)
+		stdout["lines"] = lines
+		stdout["totalMatches"] = len(lines)
+		stdout["truncated"] = false
+	}
+	for _, item := range interfaceSlice(raw["fileLogs"]) {
+		fileLog, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		lines := filterLinesByRegexes(interfaceSlice(fileLog["lines"]), compiled)
+		fileLog["lines"] = lines
+		fileLog["lineCount"] = len(lines)
+		fileLog["truncated"] = false
+	}
+	for _, item := range interfaceSlice(raw["results"]) {
+		result, ok := item.(map[string]interface{})
+		if ok {
+			filterLogOutputByRequest(result, req)
+		}
+	}
+	if nestedRaw, ok := raw["raw"].(map[string]interface{}); ok {
+		filterLogOutputByRequest(nestedRaw, req)
+	}
+}
+
+func filterLinesByRegexes(lines []interface{}, regexes []*regexp.Regexp) []interface{} {
+	out := make([]interface{}, 0, len(lines))
+	for _, item := range lines {
+		line, ok := item.(string)
+		if !ok {
+			continue
+		}
+		matchedAll := true
+		for _, regex := range regexes {
+			if !regex.MatchString(line) {
+				matchedAll = false
+				break
+			}
+		}
+		if matchedAll {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }
@@ -462,6 +742,30 @@ func summarizeLogOutput(raw map[string]interface{}) LogSearchSummary {
 			summary.Errors = append(summary.Errors, errText)
 		}
 		summary.FileLogLines += len(interfaceSlice(fileLog["lines"]))
+	}
+	for _, item := range interfaceSlice(raw["results"]) {
+		result, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		nested := summarizeLogOutput(result)
+		summary.StdoutLines += nested.StdoutLines
+		summary.FileLogLines += nested.FileLogLines
+		summary.LogFiles = appendUniqueStrings(summary.LogFiles, nested.LogFiles...)
+		summary.Errors = append(summary.Errors, nested.Errors...)
+		if summary.Target == "" || ((nested.StdoutLines > 0 || nested.FileLogLines > 0) && summary.StdoutLines+summary.FileLogLines == nested.StdoutLines+nested.FileLogLines) {
+			summary.Target = nested.Target
+		}
+	}
+	if nestedRaw, ok := raw["raw"].(map[string]interface{}); ok {
+		nested := summarizeLogOutput(nestedRaw)
+		summary.StdoutLines += nested.StdoutLines
+		summary.FileLogLines += nested.FileLogLines
+		summary.LogFiles = appendUniqueStrings(summary.LogFiles, nested.LogFiles...)
+		summary.Errors = append(summary.Errors, nested.Errors...)
+		if summary.Target == "" {
+			summary.Target = nested.Target
+		}
 	}
 	return summary
 }

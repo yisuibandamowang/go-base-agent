@@ -7,6 +7,7 @@ const submitBtn = form.querySelector('button[type="submit"]');
 const prettyOutput = document.querySelector("#pretty-output");
 const rawOutput = document.querySelector("#raw-output");
 const commandOutput = document.querySelector("#command-output");
+const projectSelect = document.querySelector("#project-select");
 const envSelect = document.querySelector("#env-select");
 const serviceSelect = document.querySelector("#service-select");
 const deploymentSelect = document.querySelector("#deployment-select");
@@ -19,6 +20,12 @@ const summaryStdout = document.querySelector("#summary-stdout");
 const summaryFile = document.querySelector("#summary-file");
 let streamedAnalysisText = false;
 let activeController = null;
+let deploymentsByProject = {};
+let envOptions = [];
+const defaultCodeRepoPaths = {
+  member: "/Users/work_project/360/member",
+  fuyao: "/Users/work_project/360/ad-platform-bot",
+};
 
 function setStatus(text, tone = "idle") {
   statusEl.textContent = text;
@@ -38,7 +45,8 @@ function formPayload() {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter(Boolean);
-  return {
+  const payload = {
+    project: String(data.get("project") || "member").trim(),
     env: String(data.get("env") || "").trim(),
     service: String(data.get("service") || "").trim(),
     code_repo_path: String(data.get("code_repo_path") || "").trim(),
@@ -54,6 +62,18 @@ function formPayload() {
     include_gz: Boolean(data.get("include_gz")),
     resolve_only: Boolean(data.get("resolve_only")),
   };
+  if (payload.deployment === "all") payload.deployment = "";
+  if (payload.pod === "all") payload.pod = "";
+  if (payload.deployment && payload.deployment !== "all") {
+    if (payload.env === "all") payload.env = "";
+    if (payload.service === "all") payload.service = "";
+  }
+  if (payload.pod && payload.pod !== "all") {
+    if (payload.env === "all") payload.env = "";
+    if (payload.service === "all") payload.service = "";
+    if (payload.deployment === "all") payload.deployment = "";
+  }
+  return payload;
 }
 
 function backendBase() {
@@ -80,6 +100,50 @@ function setOptions(select, items, allLabel) {
   }
   if ([...select.options].some((item) => item.value === current)) {
     select.value = current;
+  }
+}
+
+function refreshDeploymentOptions() {
+  const project = projectSelect.value || "member";
+  const items = deploymentsByProject[project] || [];
+  setOptions(deploymentSelect, items, "全部 Deployment");
+  if (project === "fuyao") {
+    deploymentSelect.value = "all";
+    syncFuyaoDeploymentWithEnv();
+  }
+}
+
+function refreshEnvOptions() {
+  const project = projectSelect.value || "member";
+  const items = project === "fuyao"
+    ? envOptions.filter((item) => ["all", "test", "regress", "online"].includes(item.value))
+    : envOptions;
+  setOptions(envSelect, items, "全部环境");
+}
+
+function syncCodeRepoPathWithProject() {
+  const project = projectSelect.value || "member";
+  const codeRepoPath = document.querySelector("#code-repo-path");
+  codeRepoPath.value = defaultCodeRepoPaths[project] || defaultCodeRepoPaths.member;
+}
+
+function fuyaoDeploymentForEnv(env) {
+  if (env === "test") return "ad-platform-test";
+  if (env === "regress") return "ad-platform-regress";
+  if (env === "online") return "ad-platform-online";
+  return "";
+}
+
+function syncFuyaoDeploymentWithEnv() {
+  if ((projectSelect.value || "member") !== "fuyao") return;
+  if (deploymentSelect.value && deploymentSelect.value !== "all") return;
+  const deployment = fuyaoDeploymentForEnv(envSelect.value);
+  if (!deployment) {
+    deploymentSelect.value = "all";
+    return;
+  }
+  if ([...deploymentSelect.options].some((option) => option.value === deployment)) {
+    deploymentSelect.value = deployment;
   }
 }
 
@@ -117,17 +181,21 @@ function formatPretty(result) {
   }
   const batchResults = raw.results || [];
   for (const result of batchResults) {
+    const nestedRaw = result.raw || result;
+    const target = nestedRaw.target || {};
+    const nestedStdout = nestedRaw.stdout?.lines || [];
+    const nestedFileLogs = (nestedRaw.fileLogs || []).filter((fileLog) => (fileLog.lines || []).length || fileLog.error);
+    if (!result.error && !nestedStdout.length && !nestedFileLogs.length) continue;
     lines.push("");
-    lines.push(`[${result.env || "-"} / ${result.service || "-"}]`);
+    lines.push(`[${result.env || target.env || "-"} / ${result.service || target.service || "-"} / ${target.pod || "-"}]`);
     if (result.error) {
       lines.push(`error: ${result.error}`);
       continue;
     }
-    const nestedRaw = result.raw || {};
-    const nestedStdout = nestedRaw.stdout?.lines || [];
     for (const item of nestedStdout.slice(0, 20)) lines.push(String(item));
-    for (const fileLog of nestedRaw.fileLogs || []) {
+    for (const fileLog of nestedFileLogs) {
       const fileLines = fileLog.lines || [];
+      if (fileLog.error) lines.push(`error: ${fileLog.error}`);
       if (!fileLines.length) continue;
       lines.push(`file: ${fileLog.file || "-"}`);
       for (const item of fileLines.slice(0, 40)) lines.push(String(item));
@@ -292,8 +360,11 @@ async function loadOptions() {
   try {
     const res = await fetch(backendURL("/api/log-agent/options"));
     const body = await res.json();
-    setOptions(envSelect, body.envs, "全部环境");
+    envOptions = body.envs || [];
+    refreshEnvOptions();
     setOptions(serviceSelect, body.services, "全部服务");
+    deploymentsByProject = body.deployments || {};
+    refreshDeploymentOptions();
   } catch (err) {
     console.warn("load options failed", err);
   }
@@ -307,8 +378,7 @@ function targetItemsFromResolve(raw) {
 
 async function refreshResources() {
   const payload = formPayload();
-  if (payload.env === "all" || payload.service === "all") {
-    setOptions(deploymentSelect, [], "全部 Deployment");
+  if (!payload.deployment && (payload.env === "all" || payload.service === "all")) {
     setOptions(podSelect, [], "全部 Pod");
     return;
   }
@@ -316,12 +386,18 @@ async function refreshResources() {
   const res = await fetch(backendURL("/api/log-agent/logs/search"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...payload, deployment: "", pod: "", resolve_only: true, all_pods: true, keywords: [] }),
+    body: JSON.stringify({ ...payload, pod: "", resolve_only: true, all_pods: true, keywords: [] }),
   });
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
   const deployment = body.raw?.resolution?.deployment;
-  setOptions(deploymentSelect, deployment ? [{ value: deployment, label: deployment }] : [], "全部 Deployment");
+  if (deployment && ![...deploymentSelect.options].some((option) => option.value === deployment)) {
+    const option = document.createElement("option");
+    option.value = deployment;
+    option.textContent = deployment;
+    deploymentSelect.appendChild(option);
+  }
+  if (deployment) deploymentSelect.value = deployment;
   const pods = targetItemsFromResolve(body.raw).map((item) => ({ value: item.pod, label: item.pod }));
   setOptions(podSelect, pods, "全部 Pod");
   renderResult(body);
@@ -391,8 +467,10 @@ resolveBtn.addEventListener("click", async () => {
 resetBtn.addEventListener("click", () => {
   form.reset();
   document.querySelector("#backend-url").value = "http://localhost:9108";
-  document.querySelector("#code-repo-path").value = "/Users/work_project/360/member";
-  setOptions(deploymentSelect, [], "全部 Deployment");
+  projectSelect.value = "member";
+  syncCodeRepoPathWithProject();
+  refreshEnvOptions();
+  refreshDeploymentOptions();
   setOptions(podSelect, [], "全部 Pod");
   summaryTarget.textContent = "-";
   summaryStdout.textContent = "0";
@@ -403,6 +481,18 @@ resetBtn.addEventListener("click", () => {
   analysisStatus.textContent = "idle";
   analysisOutput.textContent = "";
   setStatus("idle");
+});
+
+projectSelect.addEventListener("change", () => {
+  syncCodeRepoPathWithProject();
+  refreshEnvOptions();
+  refreshDeploymentOptions();
+  setOptions(podSelect, [], "全部 Pod");
+});
+
+envSelect.addEventListener("change", () => {
+  syncFuyaoDeploymentWithEnv();
+  setOptions(podSelect, [], "全部 Pod");
 });
 
 document.querySelectorAll(".tab").forEach((tab) => {

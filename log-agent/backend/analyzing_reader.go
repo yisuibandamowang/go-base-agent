@@ -21,6 +21,9 @@ func codeRepoPathForRequest(req LogSearchRequest, fallback string) string {
 	if strings.TrimSpace(req.CodeRepoPath) != "" {
 		return strings.TrimSpace(req.CodeRepoPath)
 	}
+	if projectForRequest(req) == logProjectFuyao {
+		return defaultFuyaoWorkDir
+	}
 	return strings.TrimSpace(fallback)
 }
 

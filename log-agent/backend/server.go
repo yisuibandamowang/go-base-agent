@@ -79,10 +79,22 @@ func newRouter(cfg AppConfig, reader LogReader) *gin.Engine {
 		})
 	})
 	if cfg.FrontendDir != "" {
-		router.StaticFile("/", cfg.FrontendDir+"/index.html")
-		router.Static("/assets", cfg.FrontendDir+"/assets")
+		router.GET("/", func(c *gin.Context) {
+			c.Header("Cache-Control", "no-store")
+			c.File(cfg.FrontendDir + "/index.html")
+		})
+		assets := router.Group("/assets")
+		assets.Use(noStoreMiddleware())
+		assets.Static("/", cfg.FrontendDir+"/assets")
 	}
 	return router
+}
+
+func noStoreMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Next()
+	}
 }
 
 func traceMiddleware() gin.HandlerFunc {
