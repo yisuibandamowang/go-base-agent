@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -35,11 +36,7 @@ func searchCodeEvidence(ctx context.Context, repoPath string, service string, re
 			break
 		}
 		args := []string{"-n", "--fixed-strings", "--max-count", "20", "-g", "*.go", "-g", "*.java", "-g", "*.yaml", "-g", "*.yml", term}
-		if service != "" && service != "all" {
-			args = append(args, repoPath+"/"+service)
-		} else {
-			args = append(args, repoPath)
-		}
+		args = append(args, codeSearchRootForRequest(repoPath, service, req))
 		result, err := exec.CommandContext(searchCtx, "rg", args...).CombinedOutput()
 		if err != nil && len(result) == 0 {
 			continue
@@ -68,6 +65,10 @@ func codeSearchTerms(req LogSearchRequest, raw map[string]interface{}) []string 
 		seen[term] = struct{}{}
 		out = append(out, term)
 	}
+	logLines := extractLogLines(raw)
+	for _, line := range logLines {
+		addStructuredLogTerms(line, add)
+	}
 	for _, keyword := range req.allKeywords() {
 		field, _, ok := parseFieldValueKeyword(keyword)
 		if ok {
@@ -79,18 +80,52 @@ func codeSearchTerms(req LogSearchRequest, raw map[string]interface{}) []string 
 	for _, regexText := range req.Regexes {
 		add(regexText)
 	}
-	for _, line := range extractLogLines(raw) {
+	for _, line := range logLines {
 		for _, token := range regexp.MustCompile(`[A-Za-z][A-Za-z0-9_./:-]{5,}`).FindAllString(line, 8) {
+			token = strings.Trim(token, `",`)
 			if strings.Contains(token, "/home/log") || strings.Contains(token, "http") {
 				continue
 			}
-			add(strings.Trim(token, `",`))
+			if isGenericCodeSearchToken(token) {
+				continue
+			}
+			add(token)
 			if len(out) >= 8 {
 				return out
 			}
 		}
 	}
 	return out
+}
+
+func codeSearchRootForRequest(repoPath string, service string, req LogSearchRequest) string {
+	if projectForRequest(req) == logProjectFuyao && (service == "" || service == "all" || service == "webmember") {
+		return strings.TrimRight(repoPath, "/") + "/backend/ad_platform_go/webmember"
+	}
+	if service != "" && service != "all" {
+		return strings.TrimRight(repoPath, "/") + "/" + service
+	}
+	return repoPath
+}
+
+func addStructuredLogTerms(line string, add func(string)) {
+	fields := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(line), &fields); err != nil {
+		return
+	}
+	add(stringFromAny(fields["error"]))
+	if msg := stringFromAny(fields["msg"]); strings.Contains(msg, "HandleConversionEventQbusMessage") {
+		add("HandleConversionEventQbusMessage")
+	}
+}
+
+func isGenericCodeSearchToken(token string) bool {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "caller", "level", "msg", "error", "status", "topic", "event_id", "event_name", "aivip_extjson", "service/conversion_event.go:138":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractLogLines(raw map[string]interface{}) []string {

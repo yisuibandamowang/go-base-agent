@@ -184,6 +184,8 @@ qihoo_id=3523031789
 
 未配置 `QIHOO360_API_KEY` 时会直接尝试阿里云百炼兜底；未配置 `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` 时则无法使用百炼兜底。每个路由尝试都会输出 provider、model 和失败原因，便于定位模型渠道问题。
 
+分析前会先做确定性日志解析，再把结论放入模型 prompt。当前已覆盖扶摇 webmember 百度转化事件场景：当日志出现 `conversion event baidu bd_vid or logidurl is empty` 时，后端会解析原始消息里的 `aivip_extjson`，明确输出 `bd_vid_present` 和 `logidurl_present`，用于判断到底缺少 `bd_vid` 还是 `logidurl`。当只返回 `[HandleConversionEventQbusMessage] handle failed` 时，分析也会结合代码顺序确认消费已经进入 handler，避免误判为“消费进入未检索到”。代码线索检索会优先使用日志里的明确错误信息和 handler 名，减少被 `caller`、`msg` 等通用日志字段带偏。
+
 ### 下拉选项
 
 ```bash

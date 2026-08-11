@@ -22,3 +22,11 @@ func TestCodeRepoPathForRequestDefaultsFuyaoProject(t *testing.T) {
 		t.Fatalf("codeRepoPathForRequest() = %q", got)
 	}
 }
+
+func TestCodeSearchRootNarrowsFuyaoAllServiceToWebmember(t *testing.T) {
+	got := codeSearchRootForRequest("/Users/work_project/360/ad-platform-bot", "all", LogSearchRequest{Project: "fuyao"})
+	want := "/Users/work_project/360/ad-platform-bot/backend/ad_platform_go/webmember"
+	if got != want {
+		t.Fatalf("codeSearchRootForRequest() = %q, want %q", got, want)
+	}
+}

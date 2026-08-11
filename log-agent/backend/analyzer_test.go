@@ -193,3 +193,85 @@ func TestBuildAnalysisPromptIncludesQuestionLogsAndCode(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildAnalysisPromptIdentifiesMissingBaiduBdVid(t *testing.T) {
+	logLine := `{"level":"error","ts":"2026-08-11T11:05:32.921+0800","caller":"service/conversion_event.go:138","msg":"[HandleConversionEventQbusMessage] handle failed","topic":"mkt_conversion_event","msg_len":486,"status":"skipped","event_id":"d9cf1dd4-c7c9-430d-a847-795b98b68da3","event_name":"login","medium":"baidu","error":"conversion event baidu bd_vid or logidurl is empty","msg":"{\"event_id\":\"d9cf1dd4-c7c9-430d-a847-795b98b68da3\",\"busi_type\":\"namiwork\",\"product\":\"纳米Work\",\"event_name\":\"login\",\"event_time\":\"2026-08-11 11:05:32\",\"qid\":\"3649704594\",\"mid\":\"21279144214783757452967613001786\",\"aivip_extjson\":\"{\\\"360ocpc\\\":{\\\"accountid\\\":\\\"86479891\\\"},\\\"pcsem\\\":{\\\"medium\\\":\\\"baidu\\\",\\\"logidurl\\\":\\\"https://work.n.cn/launcher\\\"}}\"}"}`
+
+	prompt := buildAnalysisPrompt(AnalysisInput{
+		Question: "查看是否有这个qid的kafka消费进入和消费成功的消息",
+		LogText:  logLine,
+	})
+
+	for _, want := range []string{
+		"确定性日志解析",
+		"直接结论：百度渠道字段校验失败，缺少 bd_vid；logidurl 已存在",
+		"bd_vid_present=false",
+		"logidurl_present=true",
+		"https://work.n.cn/launcher",
+		"消费进入已确认",
+		"handle failed 日志只能在消费进入日志之后出现",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt does not contain %q\n%s", want, prompt)
+		}
+	}
+}
+
+func TestCodeSearchTermsPreferActionableLogFields(t *testing.T) {
+	raw := map[string]interface{}{
+		"fileLogs": []interface{}{
+			map[string]interface{}{
+				"lines": []interface{}{
+					`{"level":"error","caller":"service/conversion_event.go:138","msg":"[HandleConversionEventQbusMessage] handle failed","error":"conversion event baidu bd_vid or logidurl is empty"}`,
+				},
+			},
+		},
+	}
+
+	terms := codeSearchTerms(LogSearchRequest{}, raw)
+	joined := strings.Join(terms, "\n")
+
+	for _, want := range []string{"conversion event baidu bd_vid or logidurl is empty", "HandleConversionEventQbusMessage"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("terms do not contain %q: %#v", want, terms)
+		}
+	}
+	for _, unwanted := range []string{"caller", "level", "msg"} {
+		if containsString(terms, unwanted) {
+			t.Fatalf("terms contain generic token %q: %#v", unwanted, terms)
+		}
+	}
+}
+
+func TestCodeSearchTermsPrioritizeStructuredErrorOverRequestFields(t *testing.T) {
+	raw := map[string]interface{}{
+		"fileLogs": []interface{}{
+			map[string]interface{}{
+				"lines": []interface{}{
+					`{"level":"error","caller":"service/conversion_event.go:138","msg":"[HandleConversionEventQbusMessage] handle failed","error":"conversion event baidu bd_vid or logidurl is empty"}`,
+				},
+			},
+		},
+	}
+
+	terms := codeSearchTerms(LogSearchRequest{Keywords: []string{"qid=3649704594", "product=纳米Work"}}, raw)
+
+	if len(terms) < 2 {
+		t.Fatalf("terms too short: %#v", terms)
+	}
+	if terms[0] != "conversion event baidu bd_vid or logidurl is empty" {
+		t.Fatalf("first term = %q, want structured error first; all terms: %#v", terms[0], terms)
+	}
+	if terms[1] != "HandleConversionEventQbusMessage" {
+		t.Fatalf("second term = %q, want handler second; all terms: %#v", terms[1], terms)
+	}
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}

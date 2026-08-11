@@ -263,13 +263,22 @@ func decodeAnalysisStream(body io.Reader, codeEvidence []CodeEvidence, onDelta f
 
 func buildAnalysisPrompt(input AnalysisInput) string {
 	var b strings.Builder
-	b.WriteString("请结合用户问题、日志证据和代码链路进行故障定位。\n")
+	b.WriteString("请结合用户问题、日志证据和代码链路进行故障定位。若“确定性日志解析”已经给出直接结论，必须优先采用该结论，不要退回到模糊判断。\n")
 	b.WriteString("输出格式：\n")
 	b.WriteString("1. 初步结论：说明最可能的问题点。\n")
 	b.WriteString("2. 日志证据：引用关键日志字段或错误信息。\n")
 	b.WriteString("3. 代码链路：结合提供的代码位置说明可能经过的函数、接口或模块。\n")
 	b.WriteString("4. 下一步排查：给出 2-4 个可执行动作。\n")
 	b.WriteString("若证据不足，明确说明缺少哪些日志、时间范围、服务或代码线索。\n\n")
+	if findings := deterministicLogFindings(input.LogText); len(findings) > 0 {
+		b.WriteString("确定性日志解析：\n")
+		for _, finding := range findings {
+			b.WriteString("- ")
+			b.WriteString(finding)
+			b.WriteByte('\n')
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("用户问题：\n")
 	b.WriteString(emptyFallback(input.Question, "用户未填写具体问题，请根据日志做通用故障分析。"))
 	b.WriteString("\n\n日志证据：\n")
