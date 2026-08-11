@@ -217,6 +217,35 @@ func TestBuildAnalysisPromptIdentifiesMissingBaiduBdVid(t *testing.T) {
 	}
 }
 
+func TestBuildAnalysisPromptIncludesGenericStructuredLogFacts(t *testing.T) {
+	logLine := `{"level":"error","ts":"2026-08-11T12:00:01.123+0800","caller":"service/order_pay.go:88","msg":"PayCenterFailed","status":"failed","order_id":"order_123","qihoo_id":"3523031789","error":"balance is not enough","msg":"{\"qid\":\"3523031789\",\"product\":\"超级会员\",\"pay_channel\":\"alipay\",\"detail\":{\"trade_no\":\"trade_456\"}}"}`
+
+	prompt := buildAnalysisPrompt(AnalysisInput{
+		Question: "订单为什么支付失败",
+		LogText:  logLine,
+	})
+
+	for _, want := range []string{
+		"确定性日志解析",
+		"结构化日志事实",
+		"level=error",
+		"caller=service/order_pay.go:88",
+		"msg=PayCenterFailed",
+		"error=balance is not enough",
+		"status=failed",
+		"order_id=order_123",
+		"qihoo_id=3523031789",
+		"qid=3523031789",
+		"product=超级会员",
+		"pay_channel=alipay",
+		"trade_no=trade_456",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt does not contain %q\n%s", want, prompt)
+		}
+	}
+}
+
 func TestCodeSearchTermsPreferActionableLogFields(t *testing.T) {
 	raw := map[string]interface{}{
 		"fileLogs": []interface{}{
@@ -264,6 +293,30 @@ func TestCodeSearchTermsPrioritizeStructuredErrorOverRequestFields(t *testing.T)
 	}
 	if terms[1] != "HandleConversionEventQbusMessage" {
 		t.Fatalf("second term = %q, want handler second; all terms: %#v", terms[1], terms)
+	}
+}
+
+func TestCodeSearchTermsUseGenericStructuredLogFacts(t *testing.T) {
+	raw := map[string]interface{}{
+		"fileLogs": []interface{}{
+			map[string]interface{}{
+				"lines": []interface{}{
+					`{"level":"error","caller":"service/order_pay.go:88","msg":"PayCenterFailed","status":"failed","order_id":"order_123","qid":"3523031789","error":"balance is not enough"}`,
+				},
+			},
+		},
+	}
+
+	terms := codeSearchTerms(LogSearchRequest{Keywords: []string{"order_id=order_123"}}, raw)
+
+	if len(terms) < 2 {
+		t.Fatalf("terms too short: %#v", terms)
+	}
+	if terms[0] != "balance is not enough" {
+		t.Fatalf("first term = %q, want generic error first; all terms: %#v", terms[0], terms)
+	}
+	if terms[1] != "PayCenterFailed" {
+		t.Fatalf("second term = %q, want log message second; all terms: %#v", terms[1], terms)
 	}
 }
 

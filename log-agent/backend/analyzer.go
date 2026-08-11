@@ -263,7 +263,7 @@ func decodeAnalysisStream(body io.Reader, codeEvidence []CodeEvidence, onDelta f
 
 func buildAnalysisPrompt(input AnalysisInput) string {
 	var b strings.Builder
-	b.WriteString("请结合用户问题、日志证据和代码链路进行故障定位。若“确定性日志解析”已经给出直接结论，必须优先采用该结论，不要退回到模糊判断。\n")
+	b.WriteString("请结合用户问题、日志证据和代码链路进行故障定位。必须先使用“确定性日志解析”中的结构化日志事实，再结合代码解释原因；若已经给出直接结论，必须优先采用该结论，不要退回到模糊判断。\n")
 	b.WriteString("输出格式：\n")
 	b.WriteString("1. 初步结论：说明最可能的问题点。\n")
 	b.WriteString("2. 日志证据：引用关键日志字段或错误信息。\n")

@@ -2,6 +2,7 @@ const form = document.querySelector("#query-form");
 const statusEl = document.querySelector("#status");
 const resetBtn = document.querySelector("#reset-btn");
 const resolveBtn = document.querySelector("#resolve-btn");
+const diagnosisBtn = document.querySelector("#diagnosis-btn");
 const stopBtn = document.querySelector("#stop-btn");
 const submitBtn = form.querySelector('button[type="submit"]');
 const prettyOutput = document.querySelector("#pretty-output");
@@ -34,6 +35,7 @@ function setStatus(text, tone = "idle") {
 
 function setRunning(running) {
   submitBtn.disabled = running;
+  diagnosisBtn.disabled = running;
   stopBtn.disabled = !running;
   resolveBtn.disabled = running;
   resetBtn.disabled = running;
@@ -242,6 +244,18 @@ function renderAnalysis(analysis) {
   analysisOutput.textContent = lines.join("\n") || "未返回分析内容。";
 }
 
+function formatDBResult(result) {
+  if (!result) return "数据库未返回结果。";
+  const lines = [];
+  lines.push(`SQL: ${result.sql || "-"}`);
+  lines.push(`rows: ${result.row_count || 0}`);
+  const rows = result.rows || [];
+  for (const row of rows.slice(0, 20)) {
+    lines.push(JSON.stringify(row));
+  }
+  return lines.join("\n");
+}
+
 function appendOutput(target, text) {
   if (!text) return;
   target.textContent += text;
@@ -343,6 +357,22 @@ function handleStreamEvent(eventName, data) {
     }
     return;
   }
+  if (type === "db_schema_progress") {
+    appendOutputLine(analysisOutput, data.message || "开始数据库查询");
+    return;
+  }
+  if (type === "db_query_result") {
+    appendOutputLine(analysisOutput, "");
+    appendOutputLine(analysisOutput, "数据库查询:");
+    if (data.error) {
+      appendOutputLine(analysisOutput, data.error);
+    } else if (data.db_result) {
+      appendOutputLine(analysisOutput, formatDBResult(data.db_result));
+    } else {
+      appendOutputLine(analysisOutput, data.message || "数据库查询完成");
+    }
+    return;
+  }
   if (type === "error") {
     setStatus("error", "error");
     analysisStatus.textContent = "error";
@@ -404,8 +434,7 @@ async function refreshResources() {
   setStatus("ready", "ready");
 }
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+async function runStreamSearch(path, payload) {
   if (activeController) return;
   activeController = new AbortController();
   setRunning(true);
@@ -417,10 +446,10 @@ form.addEventListener("submit", async (event) => {
   analysisOutput.textContent = "等待日志结果...";
   streamedAnalysisText = false;
   try {
-    const res = await fetch(backendURL("/api/log-agent/logs/search/stream"), {
+    const res = await fetch(backendURL(path), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(formPayload()),
+      body: JSON.stringify(payload),
       signal: activeController.signal,
     });
     if (!res.ok) {
@@ -447,6 +476,29 @@ form.addEventListener("submit", async (event) => {
   } finally {
     activeController = null;
     setRunning(false);
+  }
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await runStreamSearch("/api/log-agent/logs/search/stream", formPayload());
+  } catch (err) {
+    prettyOutput.textContent = String(err.message || err);
+    analysisStatus.textContent = "error";
+    analysisOutput.textContent = "";
+    setStatus("error", "error");
+  }
+});
+
+diagnosisBtn.addEventListener("click", async () => {
+  try {
+    await runStreamSearch("/api/log-agent/diagnosis/search/stream", formPayload());
+  } catch (err) {
+    prettyOutput.textContent = String(err.message || err);
+    analysisStatus.textContent = "error";
+    analysisOutput.textContent = "";
+    setStatus("error", "error");
   }
 });
 

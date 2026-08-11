@@ -12,7 +12,12 @@ func main() {
 	cfg := loadConfig()
 	reader := LogReader(NewScriptLogReader(cfg.LogReader))
 	reader = NewAnalyzingLogReader(reader, NewZhinuoAnalyzer(cfg.Analyzer, nil), cfg.Analyzer)
-	router := newRouter(cfg, reader)
+	sqlExecutor, err := NewSQLExecutorFromConfig(cfg.SQL)
+	if err != nil {
+		slog.Error("failed to initialize sql assistant", "err", err)
+		os.Exit(1)
+	}
+	router := newRouterWithSQL(cfg, reader, sqlExecutor)
 
 	slog.Info("log-agent backend starting", "addr", cfg.Address, "script_path", cfg.LogReader.ScriptPath)
 	if err := router.Run(cfg.Address); err != nil {

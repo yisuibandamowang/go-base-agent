@@ -28,8 +28,11 @@ http://localhost:9108
 
 环境变量：
 
+后端会先加载默认值，再读取可选 YAML 配置文件，最后允许环境变量覆盖。默认配置文件路径是 `log-agent/config.yaml`；也可以用 `LOG_AGENT_CONFIG_FILE=/path/to/config.yaml` 指定。真实 `log-agent/config.yaml` 不提交，示例见 `log-agent/config.example.yaml`。
+
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
+| `LOG_AGENT_CONFIG_FILE` | 空 | 指定 log-agent YAML 配置文件路径 |
 | `LOG_AGENT_ADDRESS` | `:9108` | 后端监听地址 |
 | `LOG_AGENT_LOG_READER_NODE_PATH` | `node` | Node.js 可执行文件 |
 | `LOG_AGENT_LOG_READER_SCRIPT_PATH` | `/Users/mima0000/.codex/skills/member-k8s-pod-log-read/scripts/read_pod_logs.mjs` | 会员日志 helper 脚本 |
@@ -43,6 +46,26 @@ http://localhost:9108
 | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` | 空 | 阿里云百炼 OpenAI 兼容接口兜底 API Key |
 | `LOG_AGENT_ANALYZER_BAILIAN_BASE_URL` | `https://dashscope.aliyuncs.com` | 阿里云百炼接口地址 |
 | `LOG_AGENT_ANALYZER_CODE_REPO_PATH` | `/Users/work_project/360/member` | 会员微服务代码仓库路径；扶摇项目未填写代码目录时默认使用 `/Users/work_project/360/ad-platform-bot` |
+| `LOG_AGENT_SQL_ENABLE` | `false` | 是否启用诊断链路内部 SQL 辅助查询；默认关闭，不影响现有日志链路 |
+| `LOG_AGENT_SQL_DIALECT` | `postgres` | SQL 方言，当前支持 `postgres` / `sqlite` |
+| `LOG_AGENT_SQL_DSN` | 空 | 可选固定只读数据库连接串；诊断链路优先从代码仓库解析数据库直连配置 |
+| `LOG_AGENT_SQL_TIMEOUT_MS` | `3000` | 单次 SQL 查询超时 |
+| `LOG_AGENT_SQL_MAX_ROWS` | `50` | SQL 查询最大返回行数，后端会强制补 `LIMIT` |
+SSH 配置建议放在 `log-agent/config.yaml`：
+
+```yaml
+sql:
+  enable: true
+  ssh_profiles:
+    member:
+      enable: true
+      host: chenhongyi
+    fuyao:
+      enable: true
+      host: chenhongyi
+```
+
+这里的 `host` 是本机 `~/.ssh/config` 里的 Host 快捷名。后端会执行类似 `ssh -N -L 本地端口:代码解析出的数据库地址:数据库端口 chenhongyi` 的命令，`HostName`、`User`、`Port`、`IdentityFile` 等全部交给 OpenSSH 配置处理。不要提交真实 `log-agent/config.yaml`。
 
 会员 K8S OpenAPI 凭据仍沿用现有 skill 的约定：
 
@@ -184,7 +207,35 @@ qihoo_id=3523031789
 
 未配置 `QIHOO360_API_KEY` 时会直接尝试阿里云百炼兜底；未配置 `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` 时则无法使用百炼兜底。每个路由尝试都会输出 provider、model 和失败原因，便于定位模型渠道问题。
 
-分析前会先做确定性日志解析，再把结论放入模型 prompt。当前已覆盖扶摇 webmember 百度转化事件场景：当日志出现 `conversion event baidu bd_vid or logidurl is empty` 时，后端会解析原始消息里的 `aivip_extjson`，明确输出 `bd_vid_present` 和 `logidurl_present`，用于判断到底缺少 `bd_vid` 还是 `logidurl`。当只返回 `[HandleConversionEventQbusMessage] handle failed` 时，分析也会结合代码顺序确认消费已经进入 handler，避免误判为“消费进入未检索到”。代码线索检索会优先使用日志里的明确错误信息和 handler 名，减少被 `caller`、`msg` 等通用日志字段带偏。
+分析前会先做通用的确定性日志解析，再把结构化事实放入模型 prompt。后端会解析普通 JSON 日志、嵌套 `msg` JSON 和 `aivip_extjson` 这类二次转义 JSON，优先提取 `level`、`ts`、`caller`、`msg`、`error`、`status`、`topic`、`event_id`、`qid`、`qihoo_id`、`mid`、`order_id`、`product`、`medium`、`logidurl`、`bd_vid` 等字段，并识别 `消费进入`、`处理失败`、`消费成功` 等流程阶段。模型必须先基于这些确定性事实，再结合代码线索解释原因。
+
+当前已覆盖扶摇 webmember 百度转化事件的增强结论：当日志出现 `conversion event baidu bd_vid or logidurl is empty` 时，后端会解析原始消息里的 `aivip_extjson`，明确输出 `bd_vid_present` 和 `logidurl_present`，用于判断到底缺少 `bd_vid` 还是 `logidurl`。当只返回 `[HandleConversionEventQbusMessage] handle failed` 时，分析也会结合代码顺序确认消费已经进入 handler，避免误判为“消费进入未检索到”。代码线索检索会优先使用日志里的明确错误信息、业务 `msg` 和 handler 名，减少被 `caller`、`msg` 等通用日志字段带偏。
+
+### SQL 辅助排查
+
+SQL 是链路排查的内部辅助能力，默认关闭，不会影响现有 `/api/log-agent/logs/search` 和 `/api/log-agent/logs/search/stream` 主链路。前端不传数据库地址、端口、用户名、密码或任意 SQL；后端在诊断过程中根据日志、代码线索和代码仓库里的 datasource 配置决定是否查库。
+
+启用后仍只允许只读 `SELECT`，后端会拒绝多语句和 `INSERT`、`UPDATE`、`DELETE`、`ALTER`、`DROP`、`TRUNCATE` 等非只读操作，并自动追加 `LIMIT`。如果配置了项目级 SSH profile，后端会按需建立临时 tunnel 到代码里解析出的数据库 `host:port`；未配置 SSH profile 时会尝试直连代码中的数据库地址。
+
+### Beta 链路排查
+
+数据库辅助排查走独立 Beta 流式接口，不复用现有日志查询入口：
+
+```text
+POST /api/log-agent/diagnosis/search/stream
+```
+
+这个接口先复用现有日志检索、代码线索和模型分析流程，再追加可选 SQL 查询事件。未启用 SQL 时会输出 `db_query_result` 事件并提示 `SQL 助手未启用`。
+
+当未显式填写 SQL 条件时，Beta 链路会做最小自动推断：
+
+- `Keywords` 中的 `field=value` 会转成 SQL 过滤条件，例如 `order_id=order_123`。
+- 如果只填了普通关键词，问题描述里包含“订单”时会按 `order_id` 查询；包含 `kafka`、`事件` 或 `event_id` 时会按 `event_id` 查询。
+- 如果日志里已经返回结构化字段，后端会优先提取 `order_id`、`event_id`、`qid`、`qihoo_id`、`mid` 等主标识中的一个作为数据库过滤条件。
+- 如果未填写 `SQL Table`，后端会基于代码目录扫描 `TableName()` 和 GORM `column:` 标签，选择匹配过滤字段的候选表。
+- 数据库 `host`、`port`、`database`、`username`、`password` 会从代码仓库中的 `application.yml`、`bootstrap.yml`、`.properties`、Go/Java/XML 等文件扫描 PostgreSQL datasource 配置得到。
+
+前端页面中普通“查询”仍调用现有日志流式接口；“链路排查”按钮调用 Beta 接口，但不会携带数据库连接信息或 SQL 文本。
 
 ### 下拉选项
 
@@ -194,7 +245,7 @@ curl http://localhost:9108/api/log-agent/options
 
 ## 安全边界
 
-- 当前版本只读 K8S 日志，不支持部署、重启、exec 任意命令或数据库写操作。
+- 当前版本只读 K8S 日志，不支持部署、重启、exec 任意命令或数据库写操作；SQL 助手只允许只读查询。
 - 后端只把结构化参数转换为 helper 参数，不接受用户传入 shell 命令。
 - `online` 环境仍走同一套只读限制，建议查询时使用明确时间窗口和关键词。
 - helper 输出已做敏感字段脱敏；后端不会记录 AK/SK、cookie、token 或签名。

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +22,7 @@ type AppConfig struct {
 	FrontendDir string
 	LogReader   LogReaderConfig
 	Analyzer    AnalyzerConfig
+	SQL         SQLConfig
 }
 
 type LogReaderConfig struct {
@@ -49,6 +52,22 @@ type AnalyzerConfig struct {
 	CodeMaxLines   int
 }
 
+// SQLConfig controls the optional read-only SQL assistant.
+type SQLConfig struct {
+	Enable      bool
+	Dialect     string
+	DSN         string
+	Timeout     time.Duration
+	MaxRows     int
+	SSHProfiles map[string]SSHProfileConfig
+}
+
+// SSHProfileConfig controls one project-level SSH tunnel profile.
+type SSHProfileConfig struct {
+	Enable bool
+	Host   string
+}
+
 func loadConfig() AppConfig {
 	v := viper.New()
 	v.SetEnvPrefix("LOG_AGENT")
@@ -75,6 +94,15 @@ func loadConfig() AppConfig {
 	v.SetDefault("analyzer.timeout_ms", 30000)
 	v.SetDefault("analyzer.code_repo_path", "/Users/work_project/360/member")
 	v.SetDefault("analyzer.code_max_lines", 80)
+	v.SetDefault("sql.enable", false)
+	v.SetDefault("sql.dialect", "postgres")
+	v.SetDefault("sql.dsn", "")
+	v.SetDefault("sql.timeout_ms", 3000)
+	v.SetDefault("sql.max_rows", 50)
+	for _, project := range []string{logProjectMember, logProjectFuyao} {
+		v.SetDefault("sql.ssh_profiles."+project+".enable", false)
+	}
+	readConfigFile(v)
 
 	return AppConfig{
 		Address:     strings.TrimSpace(v.GetString("address")),
@@ -104,7 +132,51 @@ func loadConfig() AppConfig {
 			CodeRepoPath:   strings.TrimSpace(v.GetString("analyzer.code_repo_path")),
 			CodeMaxLines:   v.GetInt("analyzer.code_max_lines"),
 		},
+		SQL: SQLConfig{
+			Enable:      v.GetBool("sql.enable"),
+			Dialect:     strings.TrimSpace(v.GetString("sql.dialect")),
+			DSN:         strings.TrimSpace(firstNonEmpty(os.Getenv("LOG_AGENT_SQL_DSN"), v.GetString("sql.dsn"))),
+			Timeout:     time.Duration(v.GetInt("sql.timeout_ms")) * time.Millisecond,
+			MaxRows:     v.GetInt("sql.max_rows"),
+			SSHProfiles: loadSSHProfiles(v),
+		},
 	}
+}
+
+func readConfigFile(v *viper.Viper) {
+	configFile := strings.TrimSpace(os.Getenv("LOG_AGENT_CONFIG_FILE"))
+	if configFile == "" {
+		configFile = strings.TrimSpace(os.Getenv("LOG_AGENT_CONFIG"))
+	}
+	if configFile != "" {
+		v.SetConfigFile(configFile)
+		if err := v.ReadInConfig(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to read log-agent config file %s: %v\n", configFile, err)
+		}
+		return
+	}
+	v.SetConfigName("config")
+	v.SetConfigType("yaml")
+	v.AddConfigPath("log-agent")
+	v.AddConfigPath(".")
+	if err := v.ReadInConfig(); err != nil {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to read optional log-agent config file: %v\n", err)
+		}
+	}
+}
+
+func loadSSHProfiles(v *viper.Viper) map[string]SSHProfileConfig {
+	profiles := make(map[string]SSHProfileConfig, 2)
+	for _, project := range []string{logProjectMember, logProjectFuyao} {
+		prefix := "sql.ssh_profiles." + project + "."
+		profiles[project] = SSHProfileConfig{
+			Enable: v.GetBool(prefix + "enable"),
+			Host:   strings.TrimSpace(v.GetString(prefix + "host")),
+		}
+	}
+	return profiles
 }
 
 func firstNonEmpty(values ...string) string {

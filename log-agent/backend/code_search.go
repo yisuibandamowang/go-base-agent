@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -109,13 +108,18 @@ func codeSearchRootForRequest(repoPath string, service string, req LogSearchRequ
 }
 
 func addStructuredLogTerms(line string, add func(string)) {
-	fields := map[string]interface{}{}
-	if err := json.Unmarshal([]byte(line), &fields); err != nil {
-		return
-	}
-	add(stringFromAny(fields["error"]))
-	if msg := stringFromAny(fields["msg"]); strings.Contains(msg, "HandleConversionEventQbusMessage") {
-		add("HandleConversionEventQbusMessage")
+	for _, fact := range extractLogFacts(line) {
+		add(fact.Fields["error"])
+		add(fact.Fields["err"])
+		if msg := fact.Fields["msg"]; !strings.Contains(msg, "HandleConversionEventQbusMessage") && isActionableCodeSearchTerm(msg) {
+			add(msg)
+		}
+		if strings.Contains(line, "HandleConversionEventQbusMessage") {
+			add("HandleConversionEventQbusMessage")
+		}
+		if caller := fact.Fields["caller"]; strings.Contains(caller, ".go:") || strings.Contains(caller, ".java:") {
+			add(strings.TrimSuffix(caller, regexp.MustCompile(`:\d+$`).FindString(caller)))
+		}
 	}
 }
 
@@ -126,6 +130,17 @@ func isGenericCodeSearchToken(token string) bool {
 	default:
 		return false
 	}
+}
+
+func isActionableCodeSearchTerm(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "{") || strings.HasPrefix(value, "[") {
+		return false
+	}
+	if isGenericCodeSearchToken(value) {
+		return false
+	}
+	return true
 }
 
 func extractLogLines(raw map[string]interface{}) []string {
