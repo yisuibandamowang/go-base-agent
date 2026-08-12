@@ -361,6 +361,46 @@ insert into ad_media_report_monitor_log(kafka_event_id, report_result) values('9
 	}
 }
 
+func TestDiagnosisStreamIncludesDeterministicSQLLocationSummary(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`create table ad_media_report_monitor_log(kafka_event_id text, report_result text, response text);
+insert into ad_media_report_monitor_log(kafka_event_id, report_result, response) values('9017880d-031c-46a0-8fde-e4dace82c38d', 'success', 'reported');`); err != nil {
+		t.Fatalf("seed sqlite: %v", err)
+	}
+	codeRepoPath := writeFuyaoMonitorFixture(t)
+	executor := NewSQLExecutor(SQLConfig{Enable: true, Dialect: "sqlite", MaxRows: 50}, db)
+	router := newRouterWithSQL(AppConfig{SQL: SQLConfig{Enable: true, Dialect: "sqlite", MaxRows: 50}}, fuyaoConversionLogReader{}, executor)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	body := `{"project":"fuyao","service":"webmember","env":"online","question":"查询这个kafka event_id的事件是否出现在日志中并消费成功，在表中的记录是什么","keywords":["9017880d-031c-46a0-8fde-e4dace82c38d"],"code_repo_path":"` + codeRepoPath + `"}`
+	resp, err := http.Post(server.URL+"/api/log-agent/diagnosis/search/stream", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post diagnosis stream: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	response := string(respBody)
+	for _, want := range []string{
+		`"sql_location":`,
+		`"write_point":`,
+		`"table":"ad_media_report_monitor_log"`,
+		`"fields":["kafka_event_id","report_result","response"`,
+	} {
+		if !strings.Contains(response, want) {
+			t.Fatalf("diagnosis stream does not contain %q\n%s", want, response)
+		}
+	}
+}
+
 func TestSearchCodeEvidenceFollowsCallerToWritePoint(t *testing.T) {
 	dir := writeFuyaoMonitorFixture(t)
 	growthModelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql")

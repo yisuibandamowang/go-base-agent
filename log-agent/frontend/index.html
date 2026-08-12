@@ -149,9 +149,23 @@
           </div>
           <span id="analysis-status">idle</span>
         </div>
+        <div id="sql-location-panel" class="sql-location-panel" hidden>
+          <div>
+            <span>已定位到写库点</span>
+            <strong id="sql-location-write">-</strong>
+          </div>
+          <div>
+            <span>已定位到表</span>
+            <strong id="sql-location-table">-</strong>
+          </div>
+          <div>
+            <span>已定位到字段</span>
+            <strong id="sql-location-fields">-</strong>
+          </div>
+        </div>
         <pre id="analysis-output" class="analysis-output"></pre>
       </section>
     </main>
-    <script src="/assets/app.js?v=20260810-results-v2"></script>
+    <script src="/assets/app.js?v=20260812-sql-location-v1"></script>
   </body>
 </html>

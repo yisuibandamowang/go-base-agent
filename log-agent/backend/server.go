@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -146,7 +147,11 @@ func newRouterWithSQL(cfg AppConfig, reader LogReader, sqlExecutor *SQLExecutor)
 			}
 			codeEvidence := runDiagnosisCodeEvidenceStep(reqCtx, req, resp.Raw, cfg.Analyzer, emit)
 			dbResult := runDiagnosisSQLStep(reqCtx, req, resp.Raw, codeEvidence, cfg.Analyzer.CodeRepoPath, cfg.SQL, sqlExecutor, emit)
-			runDiagnosisAnalysisStep(reqCtx, reader, req, resp, codeEvidence, cfg.Analyzer, dbResult, emit)
+			sqlLocation := buildSQLLocationSummary(codeEvidence, dbResult)
+			if sqlLocation != nil {
+				emit(LogStreamEvent{Type: "sql_location", TraceID: req.TraceID, Message: "SQL 定位完成", SQLLocation: sqlLocation})
+			}
+			runDiagnosisAnalysisStep(reqCtx, reader, req, resp, codeEvidence, sqlLocation, cfg.Analyzer, dbResult, emit)
 			emit(LogStreamEvent{Type: "done", TraceID: req.TraceID, Message: "完成"})
 		}()
 		c.Header("Cache-Control", "no-cache")
@@ -210,7 +215,7 @@ func runDiagnosisSQLStep(ctx context.Context, req LogSearchRequest, raw map[stri
 	return result
 }
 
-func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSearchRequest, resp *LogSearchResponse, codeEvidence []CodeEvidence, analyzerConf AnalyzerConfig, dbResult *SQLQueryResponse, emit LogStreamEmitter) {
+func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSearchRequest, resp *LogSearchResponse, codeEvidence []CodeEvidence, sqlLocation *SQLLocation, analyzerConf AnalyzerConfig, dbResult *SQLQueryResponse, emit LogStreamEmitter) {
 	if resp == nil || req.ResolveOnly {
 		return
 	}
@@ -243,12 +248,13 @@ func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSear
 	}
 	if err != nil {
 		slog.Error("diagnosis analyzer stream failed", "trace_id", req.TraceID, "err", err)
-		resp.Analysis = &AnalysisResult{Error: err.Error(), CodeEvidence: codeEvidence}
+		resp.Analysis = &AnalysisResult{Error: err.Error(), CodeEvidence: codeEvidence, SQLLocation: sqlLocation}
 		emit(LogStreamEvent{Type: "analysis_result", TraceID: req.TraceID, Analysis: resp.Analysis})
 		return
 	}
 	if analysis != nil {
 		analysis.CodeEvidence = codeEvidence
+		analysis.SQLLocation = sqlLocation
 	}
 	resp.Analysis = analysis
 	emit(LogStreamEvent{Type: "analysis_result", TraceID: req.TraceID, Message: "智能分析完成", Analysis: analysis})
@@ -282,6 +288,104 @@ func dbResultText(result *SQLQueryResponse) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func buildSQLLocationSummary(codeEvidence []CodeEvidence, dbResult *SQLQueryResponse) *SQLLocation {
+	location := &SQLLocation{}
+	if len(codeEvidence) > 0 {
+		location.WritePoint = firstMatchingEvidenceLine(codeEvidence, []string{"InsertTo", "Create(", "Save(", "Update("})
+		if location.WritePoint == "" {
+			location.WritePoint = firstMatchingEvidenceLine(codeEvidence, []string{"ReportWithMonitorRetry", "HandleConversionEventQbusMessage"})
+		}
+		location.Table = firstSQLLocationTable(codeEvidence)
+		location.Fields = collectSQLLocationFields(codeEvidence, dbResult)
+	}
+	if location.WritePoint == "" && location.Table == "" && len(location.Fields) == 0 {
+		return nil
+	}
+	return location
+}
+
+func firstMatchingEvidenceLine(items []CodeEvidence, markers []string) string {
+	for _, item := range items {
+		content := item.Content
+		for _, marker := range markers {
+			if strings.Contains(content, marker) {
+				text := strings.TrimSpace(content)
+				if item.File != "" {
+					text = item.File + ":" + item.Line + " " + text
+				}
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func collectSQLLocationFields(codeEvidence []CodeEvidence, dbResult *SQLQueryResponse) []string {
+	if dbResult != nil && len(dbResult.Columns) > 0 {
+		seen := map[string]struct{}{}
+		out := make([]string, 0, len(dbResult.Columns))
+		for _, column := range dbResult.Columns {
+			column = strings.TrimSpace(column)
+			if column == "" {
+				continue
+			}
+			if _, ok := seen[column]; ok {
+				continue
+			}
+			seen[column] = struct{}{}
+			out = append(out, column)
+		}
+		return out
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 8)
+	add := func(field string) {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			return
+		}
+		if _, ok := seen[field]; ok {
+			return
+		}
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+	for _, item := range codeEvidence {
+		for _, match := range regexp.MustCompile(`column:([A-Za-z_][A-Za-z0-9_]*)`).FindAllStringSubmatch(item.Content, -1) {
+			add(match[1])
+		}
+		if strings.Contains(item.Content, "kafka_event_id") {
+			add("kafka_event_id")
+		}
+		if strings.Contains(item.Content, "event_id") {
+			add("event_id")
+		}
+		if strings.Contains(item.Content, "order_id") {
+			add("order_id")
+		}
+	}
+	if dbResult != nil {
+		for _, column := range dbResult.Columns {
+			add(column)
+		}
+	}
+	return out
+}
+
+func firstSQLLocationTable(items []CodeEvidence) string {
+	for _, item := range items {
+		for _, match := range regexp.MustCompile(`=\s*"([A-Za-z_][A-Za-z0-9_]*)"`).FindAllStringSubmatch(item.Content, -1) {
+			if strings.Contains(match[1], "_") {
+				return match[1]
+			}
+		}
+		for _, match := range regexp.MustCompile(`(?i)\.Table\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\)`).FindAllStringSubmatch(item.Content, -1) {
+			return match[1]
+		}
+	}
+	return ""
 }
 
 func sqlQueryRequestForDiagnosis(req LogSearchRequest, raw map[string]interface{}, fallbackRepoPath string) SQLQueryRequest {

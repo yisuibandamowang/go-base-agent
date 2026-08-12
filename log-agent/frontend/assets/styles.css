@@ -267,6 +267,38 @@ button:disabled {
   color: var(--muted);
 }
 
+.sql-location-panel {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.sql-location-panel[hidden] {
+  display: none;
+}
+
+.sql-location-panel > div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fbfa;
+  padding: 10px;
+}
+
+.sql-location-panel span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sql-location-panel strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .analysis-output {
   width: 100%;
   min-height: calc(100vh - 118px);
@@ -296,6 +328,7 @@ button:disabled {
   }
 
   .summary-band,
+  .sql-location-panel,
   .actions,
   .grid.two,
   .grid.three {

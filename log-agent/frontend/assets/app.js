@@ -15,6 +15,10 @@ const deploymentSelect = document.querySelector("#deployment-select");
 const podSelect = document.querySelector("#pod-select");
 const analysisStatus = document.querySelector("#analysis-status");
 const analysisOutput = document.querySelector("#analysis-output");
+const sqlLocationPanel = document.querySelector("#sql-location-panel");
+const sqlLocationWrite = document.querySelector("#sql-location-write");
+const sqlLocationTable = document.querySelector("#sql-location-table");
+const sqlLocationFields = document.querySelector("#sql-location-fields");
 
 const summaryTarget = document.querySelector("#summary-target");
 const summaryStdout = document.querySelector("#summary-stdout");
@@ -23,6 +27,7 @@ let streamedAnalysisText = false;
 let activeController = null;
 let deploymentsByProject = {};
 let envOptions = [];
+let currentSQLLocation = null;
 const defaultCodeRepoPaths = {
   member: "/Users/work_project/360/member",
   fuyao: "/Users/work_project/360/ad-platform-bot",
@@ -224,8 +229,10 @@ function renderAnalysis(analysis) {
   if (!analysis) {
     analysisStatus.textContent = "idle";
     analysisOutput.textContent = "";
+    updateSQLLocation(null);
     return;
   }
+  updateSQLLocation(analysis.sql_location || null);
   if (analysis.error) {
     analysisStatus.textContent = "error";
     analysisOutput.textContent = analysis.error;
@@ -242,6 +249,32 @@ function renderAnalysis(analysis) {
     }
   }
   analysisOutput.textContent = lines.join("\n") || "未返回分析内容。";
+}
+
+function formatSQLLocationValue(value, fallback = "-") {
+  if (Array.isArray(value)) {
+    return value.length ? value.join(", ") : fallback;
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  return fallback;
+}
+
+function updateSQLLocation(location) {
+  currentSQLLocation = location || null;
+  if (!sqlLocationPanel || !sqlLocationWrite || !sqlLocationTable || !sqlLocationFields) return;
+  if (!location) {
+    sqlLocationPanel.hidden = true;
+    sqlLocationWrite.textContent = "-";
+    sqlLocationTable.textContent = "-";
+    sqlLocationFields.textContent = "-";
+    return;
+  }
+  sqlLocationPanel.hidden = false;
+  sqlLocationWrite.textContent = formatSQLLocationValue(location.write_point);
+  sqlLocationTable.textContent = formatSQLLocationValue(location.table);
+  sqlLocationFields.textContent = formatSQLLocationValue(location.fields);
 }
 
 function formatDBResult(result) {
@@ -341,6 +374,11 @@ function handleStreamEvent(eventName, data) {
     }
     return;
   }
+  if (type === "sql_location") {
+    updateSQLLocation(data.sql_location || null);
+    appendOutputLine(analysisOutput, data.message || "SQL 定位完成");
+    return;
+  }
   if (type === "analysis_delta") {
     analysisStatus.textContent = "running";
     streamedAnalysisText = true;
@@ -349,6 +387,7 @@ function handleStreamEvent(eventName, data) {
   }
   if (type === "analysis_result") {
     analysisStatus.textContent = data.analysis?.error ? "error" : "ready";
+    updateSQLLocation(data.analysis?.sql_location || currentSQLLocation);
     if (data.analysis?.content && !streamedAnalysisText) {
       appendOutputLine(analysisOutput, data.analysis.content);
     }
@@ -444,6 +483,7 @@ async function runStreamSearch(path, payload) {
   commandOutput.textContent = "";
   analysisStatus.textContent = "running";
   analysisOutput.textContent = "等待日志结果...";
+  updateSQLLocation(null);
   streamedAnalysisText = false;
   try {
     const res = await fetch(backendURL(path), {
@@ -472,6 +512,7 @@ async function runStreamSearch(path, payload) {
     prettyOutput.textContent = String(err.message || err);
     analysisStatus.textContent = "error";
     analysisOutput.textContent = "";
+    updateSQLLocation(null);
     setStatus("error", "error");
   } finally {
     activeController = null;
@@ -532,6 +573,7 @@ resetBtn.addEventListener("click", () => {
   commandOutput.textContent = "";
   analysisStatus.textContent = "idle";
   analysisOutput.textContent = "";
+  updateSQLLocation(null);
   setStatus("idle");
 });
 

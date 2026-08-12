@@ -219,6 +219,8 @@ SQL 是链路排查的内部辅助能力，默认关闭，不会影响现有 `/a
 
 诊断链路会先从日志事实检索代码链路和写库点，再用这些代码证据推断表名与过滤字段，而不是要求前端手动填表。比如扶摇 `HandleConversionEventQbusMessage` 这类 Kafka 事件，后端会结合 `service/conversion_event.go`、`ReportWithMonitorRetry`、`ad_media_report_monitor_log` 的代码线索推断目标表；如果表结构里只有 `kafka_event_id` 而日志里提到的是 `event_id`, 后端会自动把条件映射到 `kafka_event_id` 再查库。
 
+Beta 链路会在智能分析区顶部优先展示确定性 SQL 定位摘要，固定分为“已定位到写库点 / 已定位到表 / 已定位到字段”三段；这些内容来自代码证据和实际 SQL 查询结果，不依赖模型自由生成。
+
 ### Beta 链路排查
 
 数据库辅助排查走独立 Beta 流式接口，不复用现有日志查询入口：

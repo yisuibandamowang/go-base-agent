@@ -16,6 +16,7 @@ type LogStreamEvent struct {
 	Analysis     *AnalysisResult    `json:"analysis,omitempty"`
 	CodeEvidence []CodeEvidence     `json:"code_evidence,omitempty"`
 	DBResult     *SQLQueryResponse  `json:"db_result,omitempty"`
+	SQLLocation  *SQLLocation       `json:"sql_location,omitempty"`
 	Error        string             `json:"error,omitempty"`
 }
 

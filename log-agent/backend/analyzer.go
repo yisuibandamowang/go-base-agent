@@ -40,7 +40,14 @@ type AnalysisInput struct {
 type AnalysisResult struct {
 	Content      string         `json:"content"`
 	CodeEvidence []CodeEvidence `json:"code_evidence,omitempty"`
+	SQLLocation  *SQLLocation   `json:"sql_location,omitempty"`
 	Error        string         `json:"error,omitempty"`
+}
+
+type SQLLocation struct {
+	WritePoint string   `json:"write_point,omitempty"`
+	Table      string   `json:"table,omitempty"`
+	Fields     []string `json:"fields,omitempty"`
 }
 
 type Analyzer interface {
