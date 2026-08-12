@@ -65,6 +65,7 @@ func datasourceTargetsFromText(path string, text string, service string) []Datas
 	username := resolveConfigValue(firstConfigValue(text, []string{"username", "user"}))
 	password := resolveConfigValue(firstConfigValue(text, []string{"password", "passwd"}))
 	targets := make([]DatasourceTarget, 0)
+	targets = append(targets, mysqlDatasourceTargetsFromText(path, text, service)...)
 	for _, match := range regexp.MustCompile(`jdbc:postgresql://([^/\s"'\\:]+)(?::([0-9]+))?/([^?\s"'\\]+)`).FindAllStringSubmatch(text, -1) {
 		target := DatasourceTarget{
 			Dialect:  "postgres",
@@ -87,6 +88,40 @@ func datasourceTargetsFromText(path string, text string, service string) []Datas
 		}
 	}
 	return uniqueDatasourceTargets(targets)
+}
+
+func mysqlDatasourceTargetsFromText(path string, text string, service string) []DatasourceTarget {
+	targets := make([]DatasourceTarget, 0)
+	blockPattern := regexp.MustCompile(`(?ms)^\s*(mySQL_[A-Za-z0-9_]+|mysql_[A-Za-z0-9_]+):\s*\n(.*?)(?:\n\S|\z)`)
+	for _, match := range blockPattern.FindAllStringSubmatch(text, -1) {
+		block := match[2]
+		target := DatasourceTarget{
+			Dialect:  "mysql",
+			Host:     resolveConfigValue(firstConfigValue(block, []string{"host_name", "host"})),
+			Port:     parsePort(firstConfigValue(block, []string{"port"}), 3306),
+			Database: trimDatabaseName(resolveConfigValue(firstConfigValue(block, []string{"db_name", "database", "dbname"}))),
+			Username: resolveConfigValue(firstConfigValue(block, []string{"user_name", "username", "user"})),
+			Password: resolveConfigValue(firstConfigValue(block, []string{"password", "passwd"})),
+			Source:   path,
+			Score:    datasourceScore(path, service) + mysqlDatasourceScore(match[1]),
+		}
+		if target.Host != "" && target.Database != "" {
+			targets = append(targets, target)
+		}
+	}
+	return targets
+}
+
+func mysqlDatasourceScore(name string) int {
+	name = strings.ToLower(strings.TrimSpace(name))
+	score := 0
+	if strings.Contains(name, "ad_platform") {
+		score += 8
+	}
+	if strings.Contains(name, "online") {
+		score += 2
+	}
+	return score
 }
 
 func datasourceTargetFromURL(path string, rawURL string, fallbackUser string, fallbackPassword string, service string) (DatasourceTarget, bool) {

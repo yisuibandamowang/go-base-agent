@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,6 +66,66 @@ func TestSQLQueryEndpointExecutesReadonlySQLiteQuery(t *testing.T) {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("body does not contain %q\n%s", want, string(body))
 		}
+	}
+}
+
+func TestSQLDriverNameSupportsMySQL(t *testing.T) {
+	driver, err := sqlDriverName("mysql")
+	if err != nil {
+		t.Fatalf("sqlDriverName(mysql): %v", err)
+	}
+	if driver != "mysql" {
+		t.Fatalf("driver = %q, want mysql", driver)
+	}
+}
+
+func TestDatasourceTargetDSNFromMySQLConfig(t *testing.T) {
+	target := DatasourceTarget{
+		Dialect:  "mysql",
+		Host:     "10.228.132.196",
+		Port:     20810,
+		Database: "ad_platform",
+		Username: "ad_platform_wr",
+		Password: "secret",
+	}
+	got, err := dsnFromDatasourceTarget(target)
+	if err != nil {
+		t.Fatalf("dsnFromDatasourceTarget: %v", err)
+	}
+	want := "ad_platform_wr:secret@tcp(10.228.132.196:20810)/ad_platform?charset=utf8mb4&parseTime=true&readTimeout=3s&timeout=3s&writeTimeout=3s"
+	if got != want {
+		t.Fatalf("dsn = %q, want %q", got, want)
+	}
+}
+
+func TestScanDatasourceTargetsFromFuyaoMySQLConfig(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	config := `
+mySQL_ad_platform:
+  host_name: "10.228.132.196"
+  db_name: "ad_platform"
+  user_name: "ad_platform_wr"
+  password: "secret"
+  port: 20810
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	targets := scanDatasourceTargetsFromCode(dir, "webmember")
+	if len(targets) == 0 {
+		t.Fatal("targets empty")
+	}
+	target := targets[0]
+	if target.Dialect != "mysql" || target.Host != "10.228.132.196" || target.Port != 20810 || target.Database != "ad_platform" {
+		t.Fatalf("target = %#v", target)
+	}
+	if target.Username != "ad_platform_wr" || target.Password != "secret" {
+		t.Fatalf("target credentials = %#v", target)
 	}
 }
 
@@ -214,4 +277,109 @@ func TestDiagnosisStreamInfersSQLTableWhenEnabled(t *testing.T) {
 			t.Fatalf("diagnosis stream does not contain %q\n%s", want, response)
 		}
 	}
+}
+
+func TestDiagnosisStreamInfersFuyaoMonitorTableFromLogsAndCode(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`create table ad_media_report_monitor_log(kafka_event_id text, report_result text, response text);
+insert into ad_media_report_monitor_log(kafka_event_id, report_result, response) values('9017880d-031c-46a0-8fde-e4dace82c38d', 'success', 'reported');`); err != nil {
+		t.Fatalf("seed sqlite: %v", err)
+	}
+	codeRepoPath := writeFuyaoMonitorFixture(t)
+	executor := NewSQLExecutor(SQLConfig{Enable: true, Dialect: "sqlite", MaxRows: 50}, db)
+	router := newRouterWithSQL(AppConfig{SQL: SQLConfig{Enable: true, Dialect: "sqlite", MaxRows: 50}}, fuyaoConversionLogReader{}, executor)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	body := `{"project":"fuyao","service":"webmember","env":"online","question":"查询这个kafka event_id的事件是否出现在日志中并消费成功，在表中的记录是什么","keywords":["9017880d-031c-46a0-8fde-e4dace82c38d"],"code_repo_path":"` + codeRepoPath + `"}`
+	resp, err := http.Post(server.URL+"/api/log-agent/diagnosis/search/stream", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post diagnosis stream: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	response := string(respBody)
+	for _, want := range []string{
+		`event:db_schema_progress`,
+		`"sql":"select * from ad_media_report_monitor_log where kafka_event_id = ? limit 50"`,
+		`"kafka_event_id":"9017880d-031c-46a0-8fde-e4dace82c38d"`,
+		`"report_result":"success"`,
+	} {
+		if !strings.Contains(response, want) {
+			t.Fatalf("diagnosis stream does not contain %q\n%s", want, response)
+		}
+	}
+}
+
+type fuyaoConversionLogReader struct{}
+
+func (fuyaoConversionLogReader) Search(ctx context.Context, req LogSearchRequest) (*LogSearchResponse, error) {
+	return &LogSearchResponse{
+		TraceID: req.TraceID,
+		Command: []string{"node", "k8s_pod_logs.mjs"},
+		Summary: LogSearchSummary{
+			Target:       "webmember / online",
+			FileLogLines: 2,
+		},
+		Raw: map[string]interface{}{
+			"fileLogs": []interface{}{
+				map[string]interface{}{
+					"file": "/home/log/webmember/webmember.log",
+					"lines": []interface{}{
+						`{"level":"info","ts":"2026-08-12T10:56:47.711+0800","caller":"service/conversion_event.go:122","msg":"[HandleConversionEventQbusMessage] 消费进入","topic":"mkt_conversion_event","event_id":"9017880d-031c-46a0-8fde-e4dace82c38d","event_name":"download","medium":"baidu"}`,
+						`{"level":"info","ts":"2026-08-12T10:56:47.885+0800","caller":"service/conversion_event.go:141","msg":"[HandleConversionEventQbusMessage] handled","status":"reported","event_id":"9017880d-031c-46a0-8fde-e4dace82c38d","event_name":"download","medium":"baidu"}`,
+					},
+				},
+			},
+		},
+	}, nil
+}
+
+func writeFuyaoMonitorFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	serviceDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "service")
+	modelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql", "medium_mysql")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatalf("mkdir service dir: %v", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir model dir: %v", err)
+	}
+	service := `package service
+func HandleConversionEventQbusMessage(topic, msg string, msgLen int64) {
+	result := HandleConversionEventMessage(msg)
+	_ = result
+}
+func reportBaiduConversionEvent() {
+	monitorCtx := BuildConversionEventMonitorContext()
+	ReportWithMonitorRetry(monitorCtx)
+}
+`
+	if err := os.WriteFile(filepath.Join(serviceDir, "conversion_event.go"), []byte(service), 0o644); err != nil {
+		t.Fatalf("write service: %v", err)
+	}
+	model := `package medium_mysql
+const AdMediaReportMonitorLogTable = "ad_media_report_monitor_log"
+type AdMediaReportMonitorLog struct {
+	KafkaEventID string ` + "`gorm:\"column:kafka_event_id\"`" + `
+	ReportResult string ` + "`gorm:\"column:report_result\"`" + `
+	Response string ` + "`gorm:\"column:response\"`" + `
+}
+func InsertToAdMediaReportMonitorLog(data AdMediaReportMonitorLog) error {
+	return db.Table(AdMediaReportMonitorLogTable).Create(&data).Error
+}
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "ad_media_report_monitor_log.go"), []byte(model), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	return dir
 }

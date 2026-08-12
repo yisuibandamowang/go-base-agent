@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -137,12 +138,14 @@ func newRouterWithSQL(cfg AppConfig, reader LogReader, sqlExecutor *SQLExecutor)
 		}
 		go func() {
 			defer close(events)
-			resp, err := streamSearchWithReader(reqCtx, reader, req, emit)
+			searchReader := diagnosisLogReader(reader)
+			resp, err := streamSearchWithReader(reqCtx, searchReader, req, emit)
 			if err != nil {
 				emit(LogStreamEvent{Type: "error", TraceID: req.TraceID, Error: err.Error()})
 				return
 			}
-			runDiagnosisSQLStep(reqCtx, req, resp.Raw, cfg.Analyzer.CodeRepoPath, cfg.SQL, sqlExecutor, emit)
+			dbResult := runDiagnosisSQLStep(reqCtx, req, resp.Raw, cfg.Analyzer.CodeRepoPath, cfg.SQL, sqlExecutor, emit)
+			runDiagnosisAnalysisStep(reqCtx, reader, req, resp, cfg.Analyzer, dbResult, emit)
 			emit(LogStreamEvent{Type: "done", TraceID: req.TraceID, Message: "完成"})
 		}()
 		c.Header("Cache-Control", "no-cache")
@@ -169,23 +172,111 @@ func newRouterWithSQL(cfg AppConfig, reader LogReader, sqlExecutor *SQLExecutor)
 	return router
 }
 
-func runDiagnosisSQLStep(ctx context.Context, req LogSearchRequest, raw map[string]interface{}, fallbackRepoPath string, sqlConf SQLConfig, sqlExecutor *SQLExecutor, emit LogStreamEmitter) {
+func diagnosisLogReader(reader LogReader) LogReader {
+	if analyzing, ok := reader.(*AnalyzingLogReader); ok && analyzing != nil && analyzing.base != nil {
+		return analyzing.base
+	}
+	return reader
+}
+
+func runDiagnosisSQLStep(ctx context.Context, req LogSearchRequest, raw map[string]interface{}, fallbackRepoPath string, sqlConf SQLConfig, sqlExecutor *SQLExecutor, emit LogStreamEmitter) *SQLQueryResponse {
 	if !sqlConf.Enable {
 		emit(LogStreamEvent{Type: "db_query_result", TraceID: req.TraceID, Message: "SQL 助手未启用", Error: "SQL 助手未启用"})
-		return
+		return nil
 	}
 	queryReq := sqlQueryRequestForDiagnosis(req, raw, fallbackRepoPath)
 	if strings.TrimSpace(queryReq.SQL) == "" && strings.TrimSpace(queryReq.Table) == "" && strings.TrimSpace(queryReq.CodeRepoPath) == "" {
 		emit(LogStreamEvent{Type: "db_query_result", TraceID: req.TraceID, Message: "未提供 SQL、sql_table 或代码目录，跳过数据库查询"})
-		return
+		return nil
 	}
 	emit(LogStreamEvent{Type: "db_schema_progress", TraceID: req.TraceID, Message: "开始执行只读 SQL 查询"})
 	result, err := queryDiagnosisSQL(ctx, projectForRequest(req), req.Service, sqlConf, sqlExecutor, queryReq)
 	if err != nil {
 		emit(LogStreamEvent{Type: "db_query_result", TraceID: req.TraceID, Error: err.Error()})
-		return
+		return nil
 	}
 	emit(LogStreamEvent{Type: "db_query_result", TraceID: req.TraceID, Message: "数据库查询完成", DBResult: result})
+	return result
+}
+
+func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSearchRequest, resp *LogSearchResponse, analyzerConf AnalyzerConfig, dbResult *SQLQueryResponse, emit LogStreamEmitter) {
+	if resp == nil || req.ResolveOnly {
+		return
+	}
+	analyzing, ok := reader.(*AnalyzingLogReader)
+	if !ok || analyzing == nil || analyzing.analyzer == nil {
+		return
+	}
+	codeRepoPath := codeRepoPathForRequest(req, analyzerConf.CodeRepoPath)
+	emit(LogStreamEvent{Type: "analysis_progress", TraceID: req.TraceID, Message: "开始检索会员代码链路线索"})
+	slog.Info("diagnosis code evidence search started", "trace_id", req.TraceID, "repo", codeRepoPath)
+	codeEvidence := searchCodeEvidence(ctx, codeRepoPath, req.Service, req, resp.Raw, analyzerConf.CodeMaxLines)
+	emit(LogStreamEvent{Type: "code_evidence", TraceID: req.TraceID, Message: fmt.Sprintf("代码线索检索完成，共 %d 条", len(codeEvidence)), CodeEvidence: codeEvidence})
+	slog.Info("diagnosis code evidence search completed", "trace_id", req.TraceID, "count", len(codeEvidence))
+
+	input := AnalysisInput{
+		Question:     req.Question,
+		LogText:      logTextForAnalysis(resp),
+		CodeEvidence: codeEvidence,
+		DBText:       dbResultText(dbResult),
+	}
+	emit(LogStreamEvent{Type: "analysis_progress", TraceID: req.TraceID, Message: "开始结合日志、代码和数据库结果生成定位结论"})
+	slog.Info("diagnosis analyzer stream started", "trace_id", req.TraceID, "db_result", dbResult != nil)
+	var (
+		analysis *AnalysisResult
+		err      error
+	)
+	if streaming, ok := analyzing.analyzer.(StreamingAnalyzer); ok {
+		analysis, err = streaming.AnalyzeStream(ctx, input, func(delta string) {
+			if strings.TrimSpace(delta) == "" {
+				return
+			}
+			emit(LogStreamEvent{Type: "analysis_delta", TraceID: req.TraceID, Delta: delta})
+		})
+	} else {
+		analysis, err = analyzing.analyzer.Analyze(ctx, input)
+	}
+	if err != nil {
+		slog.Error("diagnosis analyzer stream failed", "trace_id", req.TraceID, "err", err)
+		resp.Analysis = &AnalysisResult{Error: err.Error(), CodeEvidence: codeEvidence}
+		emit(LogStreamEvent{Type: "analysis_result", TraceID: req.TraceID, Analysis: resp.Analysis})
+		return
+	}
+	if analysis != nil {
+		analysis.CodeEvidence = codeEvidence
+	}
+	resp.Analysis = analysis
+	emit(LogStreamEvent{Type: "analysis_result", TraceID: req.TraceID, Message: "智能分析完成", Analysis: analysis})
+	slog.Info("diagnosis analyzer stream completed", "trace_id", req.TraceID)
+}
+
+func dbResultText(result *SQLQueryResponse) string {
+	if result == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("sql: ")
+	b.WriteString(result.SQL)
+	b.WriteByte('\n')
+	b.WriteString(fmt.Sprintf("row_count: %d\n", result.RowCount))
+	if len(result.Columns) > 0 {
+		b.WriteString("columns: ")
+		b.WriteString(strings.Join(result.Columns, ", "))
+		b.WriteByte('\n')
+	}
+	for i, row := range result.Rows {
+		if i >= 10 {
+			break
+		}
+		b.WriteString(fmt.Sprintf("row %d: ", i+1))
+		parts := make([]string, 0, len(row))
+		for _, column := range result.Columns {
+			parts = append(parts, fmt.Sprintf("%s=%v", column, row[column]))
+		}
+		b.WriteString(strings.Join(parts, " "))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 func sqlQueryRequestForDiagnosis(req LogSearchRequest, raw map[string]interface{}, fallbackRepoPath string) SQLQueryRequest {
@@ -218,12 +309,23 @@ func sqlQueryRequestForDiagnosis(req LogSearchRequest, raw map[string]interface{
 		TraceID:      req.TraceID,
 		SQL:          req.SQL,
 		Table:        req.SQLTable,
-		Description:  req.Question,
+		Description:  diagnosisSQLDescription(req.Question, raw),
 		CodeRepoPath: codeRepoPathForRequest(req, fallbackRepoPath),
 		Columns:      req.SQLColumns,
 		Filters:      filters,
 		Limit:        req.SQLLimit,
 	}
+}
+
+func diagnosisSQLDescription(question string, raw map[string]interface{}) string {
+	parts := []string{strings.TrimSpace(question)}
+	if raw != nil {
+		lines := strings.Join(extractLogLines(raw), "\n")
+		for _, finding := range deterministicLogFindings(lines) {
+			parts = append(parts, finding)
+		}
+	}
+	return strings.Join(uniqueNonEmptyStrings(parts), "\n")
 }
 
 func addDiagnosisSQLFilterFromLogs(filters map[string]interface{}, raw map[string]interface{}, req LogSearchRequest) {

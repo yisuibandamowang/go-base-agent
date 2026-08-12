@@ -34,6 +34,7 @@ type AnalysisInput struct {
 	Question     string
 	LogText      string
 	CodeEvidence []CodeEvidence
+	DBText       string
 }
 
 type AnalysisResult struct {
@@ -283,6 +284,10 @@ func buildAnalysisPrompt(input AnalysisInput) string {
 	b.WriteString(emptyFallback(input.Question, "用户未填写具体问题，请根据日志做通用故障分析。"))
 	b.WriteString("\n\n日志证据：\n")
 	b.WriteString(compactText(input.LogText, 12000))
+	if strings.TrimSpace(input.DBText) != "" {
+		b.WriteString("\n\n数据库查询结果：\n")
+		b.WriteString(compactText(input.DBText, 6000))
+	}
 	b.WriteString("\n\n代码链路线索：\n")
 	if len(input.CodeEvidence) == 0 {
 		b.WriteString("未检索到代码线索。\n")

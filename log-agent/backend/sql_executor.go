@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -75,6 +76,8 @@ func sqlDriverName(dialect string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(dialect)) {
 	case "postgres", "postgresql", "pg":
 		return "pgx", nil
+	case "mysql":
+		return "mysql", nil
 	case "sqlite", "sqlite3":
 		return "sqlite3", nil
 	default:
@@ -157,7 +160,10 @@ func queryDatasourceTarget(ctx context.Context, conf SQLConfig, target Datasourc
 	if err != nil {
 		return nil, err
 	}
-	dsn := postgresDSNFromDatasourceTarget(target)
+	dsn, err := dsnFromDatasourceTarget(target)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sql database: %w", err)
@@ -200,6 +206,31 @@ func postgresDSNFromDatasourceTarget(target DatasourceTarget) string {
 	values.Set("sslmode", "disable")
 	u.RawQuery = values.Encode()
 	return u.String()
+}
+
+func dsnFromDatasourceTarget(target DatasourceTarget) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(target.Dialect)) {
+	case "mysql":
+		return mysqlDSNFromDatasourceTarget(target), nil
+	case "postgres", "postgresql", "pg", "":
+		return postgresDSNFromDatasourceTarget(target), nil
+	default:
+		return "", fmt.Errorf("不支持的 SQL 方言: %s", target.Dialect)
+	}
+}
+
+func mysqlDSNFromDatasourceTarget(target DatasourceTarget) string {
+	values := url.Values{}
+	values.Set("charset", "utf8mb4")
+	values.Set("parseTime", "true")
+	values.Set("timeout", "3s")
+	values.Set("readTimeout", "3s")
+	values.Set("writeTimeout", "3s")
+	userInfo := target.Username
+	if target.Password != "" {
+		userInfo = target.Username + ":" + target.Password
+	}
+	return fmt.Sprintf("%s@tcp(%s)/%s?%s", userInfo, net.JoinHostPort(target.Host, strconv.Itoa(target.Port)), target.Database, values.Encode())
 }
 
 func sqlValueForJSON(value interface{}) interface{} {

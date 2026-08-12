@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -114,6 +115,111 @@ func TestDiagnosisSQLRequestUsesStructuredLogFacts(t *testing.T) {
 	}
 	if len(plan.Args) != 1 || plan.Args[0] != "event_123" {
 		t.Fatalf("args = %#v", plan.Args)
+	}
+}
+
+func TestPlanSQLInfersFuyaoMonitorTableAndKafkaEventIDAlias(t *testing.T) {
+	dir := t.TempDir()
+	serviceDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "service")
+	modelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql", "medium_mysql")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatalf("mkdir service dir: %v", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir model dir: %v", err)
+	}
+	service := `package service
+func HandleConversionEventQbusMessage(topic, msg string, msgLen int64) {
+	result := HandleConversionEventMessage(msg)
+	_ = result
+}
+func reportBaiduConversionEvent() {
+	monitorCtx := BuildConversionEventMonitorContext()
+	ReportWithMonitorRetry(monitorCtx)
+}
+`
+	if err := os.WriteFile(filepath.Join(serviceDir, "conversion_event.go"), []byte(service), 0o644); err != nil {
+		t.Fatalf("write service: %v", err)
+	}
+	model := `package medium_mysql
+const AdMediaReportMonitorLogTable = "ad_media_report_monitor_log"
+type AdMediaReportMonitorLog struct {
+	KafkaEventID string ` + "`gorm:\"column:kafka_event_id\"`" + `
+	ReportResult string ` + "`gorm:\"column:report_result\"`" + `
+}
+func InsertToAdMediaReportMonitorLog(data AdMediaReportMonitorLog) error {
+	return db.Table(AdMediaReportMonitorLogTable).Create(&data).Error
+}
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "ad_media_report_monitor_log.go"), []byte(model), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	plan, err := planSQL(SQLQueryRequest{
+		Description:  "查询这个 kafka event_id 的事件是否出现在日志中并消费成功，在表中的记录是什么 HandleConversionEventQbusMessage ReportWithMonitorRetry",
+		CodeRepoPath: dir,
+		Filters: map[string]interface{}{
+			"event_id": "9017880d-031c-46a0-8fde-e4dace82c38d",
+		},
+	}, SQLConfig{MaxRows: 50})
+	if err != nil {
+		t.Fatalf("planSQL: %v", err)
+	}
+	want := "select * from ad_media_report_monitor_log where kafka_event_id = ? limit 50"
+	if plan.SQL != want {
+		t.Fatalf("sql = %q, want %q", plan.SQL, want)
+	}
+	if len(plan.Args) != 1 || plan.Args[0] != "9017880d-031c-46a0-8fde-e4dace82c38d" {
+		t.Fatalf("args = %#v", plan.Args)
+	}
+	if len(plan.TableCandidates) == 0 || plan.TableCandidates[0].Table != "ad_media_report_monitor_log" {
+		t.Fatalf("table candidates = %#v", plan.TableCandidates)
+	}
+}
+
+func TestPlanSQLIgnoresGoParameterNamedFromString(t *testing.T) {
+	dir := t.TempDir()
+	serviceDir := filepath.Join(dir, "service")
+	modelDir := filepath.Join(dir, "model")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatalf("mkdir service dir: %v", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir model dir: %v", err)
+	}
+	service := `package service
+func invalidateBusinessInfoCache(from string) {}
+func HandleConversionEventQbusMessage(topic, msg string, msgLen int64) {}
+`
+	if err := os.WriteFile(filepath.Join(serviceDir, "business_manage.go"), []byte(service), 0o644); err != nil {
+		t.Fatalf("write service: %v", err)
+	}
+	model := `package model
+const AdMediaReportMonitorLogTable = "ad_media_report_monitor_log"
+type AdMediaReportMonitorLog struct {
+	KafkaEventID string ` + "`gorm:\"column:kafka_event_id\"`" + `
+}
+func InsertToAdMediaReportMonitorLog(data AdMediaReportMonitorLog) error {
+	return db.Table(AdMediaReportMonitorLogTable).Create(&data).Error
+}
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "monitor.go"), []byte(model), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	plan, err := planSQL(SQLQueryRequest{
+		Description:  "HandleConversionEventQbusMessage kafka event_id report monitor",
+		CodeRepoPath: dir,
+		Filters:      map[string]interface{}{"event_id": "event-1"},
+	}, SQLConfig{MaxRows: 50})
+	if err != nil {
+		t.Fatalf("planSQL: %v", err)
+	}
+	if strings.Contains(plan.SQL, " from string ") {
+		t.Fatalf("sql should not use Go parameter type as table: %s", plan.SQL)
+	}
+	if plan.SQL != "select * from ad_media_report_monitor_log where kafka_event_id = ? limit 50" {
+		t.Fatalf("sql = %q", plan.SQL)
 	}
 }
 

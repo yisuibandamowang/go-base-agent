@@ -104,10 +104,14 @@ func planSQL(req SQLQueryRequest, conf SQLConfig) (*SQLPlan, error) {
 		}
 		columnSQL = append(columnSQL, column)
 	}
-	args := make([]interface{}, 0, len(req.Filters))
-	where := make([]string, 0, len(req.Filters))
-	keys := make([]string, 0, len(req.Filters))
-	for key := range req.Filters {
+	filters := req.Filters
+	if len(candidates) > 0 && table == candidates[0].Table {
+		filters = alignFiltersWithTableFields(filters, candidates[0].Fields)
+	}
+	args := make([]interface{}, 0, len(filters))
+	where := make([]string, 0, len(filters))
+	keys := make([]string, 0, len(filters))
+	for key := range filters {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -116,7 +120,7 @@ func planSQL(req SQLQueryRequest, conf SQLConfig) (*SQLPlan, error) {
 			return nil, fmt.Errorf("过滤字段不合法: %s", key)
 		}
 		where = append(where, key+" = ?")
-		args = append(args, req.Filters[key])
+		args = append(args, filters[key])
 	}
 	sqlText := fmt.Sprintf("select %s from %s", strings.Join(columnSQL, ", "), table)
 	if len(where) > 0 {
@@ -150,8 +154,9 @@ func inferTableCandidatesFromCode(repoPath string, description string, filters m
 	for key := range filters {
 		filterKeys = append(filterKeys, strings.ToLower(key))
 	}
-	desc := strings.ToLower(description)
-	candidates := make([]TableCandidate, 0)
+	contextText := strings.ToLower(description)
+	codeContext := collectCodeContext(repoPath, contextText)
+	candidatesByTable := map[string]TableCandidate{}
 	_ = filepath.WalkDir(repoPath, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			if entry != nil && entry.IsDir() && strings.HasPrefix(entry.Name(), ".") && path != repoPath {
@@ -159,7 +164,7 @@ func inferTableCandidatesFromCode(repoPath string, description string, filters m
 			}
 			return nil
 		}
-		if !strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), ".java") && !strings.HasSuffix(entry.Name(), ".xml") {
+		if !isSQLInferenceFile(entry.Name()) {
 			return nil
 		}
 		content, err := os.ReadFile(path)
@@ -167,16 +172,19 @@ func inferTableCandidatesFromCode(repoPath string, description string, filters m
 			return nil
 		}
 		text := string(content)
-		for _, match := range regexp.MustCompile(`(?s)TableName\(\)\s+string\s*\{[^}]*return\s+"([A-Za-z_][A-Za-z0-9_]*)"`).FindAllStringSubmatch(text, -1) {
-			table := match[1]
+		for _, table := range codeTableNames(path, text) {
 			fields := codeColumnNames(text)
-			score := tableCandidateScore(table, fields, desc, filterKeys)
+			score := tableCandidateScore(table, fields, contextText, codeContext, strings.ToLower(path), strings.ToLower(text), filterKeys)
 			if score > 0 {
-				candidates = append(candidates, TableCandidate{Table: table, File: path, Fields: fields, Score: score})
+				mergeTableCandidate(candidatesByTable, TableCandidate{Table: table, File: path, Fields: fields, Score: score})
 			}
 		}
 		return nil
 	})
+	candidates := make([]TableCandidate, 0, len(candidatesByTable))
+	for _, candidate := range candidatesByTable {
+		candidates = append(candidates, candidate)
+	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].Score == candidates[j].Score {
 			return candidates[i].Table < candidates[j].Table
@@ -189,35 +197,239 @@ func inferTableCandidatesFromCode(repoPath string, description string, filters m
 	return candidates
 }
 
+func isSQLInferenceFile(name string) bool {
+	return strings.HasSuffix(name, ".go") ||
+		strings.HasSuffix(name, ".java") ||
+		strings.HasSuffix(name, ".xml") ||
+		strings.HasSuffix(name, ".sql")
+}
+
+func codeTableNames(path string, text string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	add := func(table string) {
+		table = strings.TrimSpace(table)
+		if table == "" {
+			return
+		}
+		if isIgnoredTableCandidate(table) {
+			return
+		}
+		if _, ok := seen[table]; ok {
+			return
+		}
+		seen[table] = struct{}{}
+		out = append(out, table)
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?s)TableName\(\)\s+string\s*\{[^}]*return\s+"([A-Za-z_][A-Za-z0-9_]*)"`),
+		regexp.MustCompile(`(?i)\.Table\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\)`),
+		regexp.MustCompile(`(?m)\b[A-Za-z_][A-Za-z0-9_]*Table\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"`),
+	}
+	if shouldInferSQLKeywordTables(path) {
+		patterns = append(patterns, regexp.MustCompile(`(?i)\b(?:CREATE\s+TABLE|ALTER\s+TABLE|FROM|JOIN|INTO|UPDATE)\s+`+"`?"+`([A-Za-z_][A-Za-z0-9_]*)`+"`?"))
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			add(match[1])
+		}
+	}
+	constTables := map[string]string{}
+	for _, match := range regexp.MustCompile(`(?m)\b([A-Za-z_][A-Za-z0-9_]*Table)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"`).FindAllStringSubmatch(text, -1) {
+		constTables[match[1]] = match[2]
+	}
+	for _, match := range regexp.MustCompile(`(?m)\.Table\(\s*([A-Za-z_][A-Za-z0-9_]*Table)\s*\)`).FindAllStringSubmatch(text, -1) {
+		if table := constTables[match[1]]; table != "" {
+			add(table)
+		}
+	}
+	return out
+}
+
+func isIgnoredTableCandidate(table string) bool {
+	switch strings.ToLower(strings.TrimSpace(table)) {
+	case "current_timestamp", "null", "default", "primary", "key", "unique", "constraint", "index", "values", "set", "where", "select", "string", "int", "int64", "time":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldInferSQLKeywordTables(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".sql") ||
+		strings.HasSuffix(lower, ".xml") ||
+		strings.HasSuffix(lower, ".java") ||
+		strings.HasSuffix(lower, ".properties")
+}
+
 func codeColumnNames(text string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0)
-	for _, match := range regexp.MustCompile(`column:([A-Za-z_][A-Za-z0-9_]*)`).FindAllStringSubmatch(text, -1) {
-		if _, ok := seen[match[1]]; ok {
-			continue
+	add := func(field string) {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			return
 		}
-		seen[match[1]] = struct{}{}
-		out = append(out, match[1])
+		if _, ok := seen[field]; ok {
+			return
+		}
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+	for _, match := range regexp.MustCompile(`column:([A-Za-z_][A-Za-z0-9_]*)`).FindAllStringSubmatch(text, -1) {
+		add(match[1])
+	}
+	for _, match := range regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_]*)`").FindAllStringSubmatch(text, -1) {
+		add(match[1])
 	}
 	sort.Strings(out)
 	return out
 }
 
-func tableCandidateScore(table string, fields []string, desc string, filterKeys []string) int {
+func tableCandidateScore(table string, fields []string, desc string, codeContext string, path string, text string, filterKeys []string) int {
 	score := 0
-	if strings.Contains(desc, strings.ToLower(table)) {
+	tableLower := strings.ToLower(table)
+	if strings.Contains(desc, tableLower) {
 		score += 3
 	}
+	if strings.Contains(codeContext, tableLower) {
+		score += 6
+	}
+	score += tokenOverlapScore(tableLower, desc, 2)
+	score += tokenOverlapScore(tableLower, codeContext, 4)
+	score += tokenOverlapScore(path, desc, 2)
+	score += tokenOverlapScore(path, codeContext, 2)
 	for _, field := range fields {
 		lowerField := strings.ToLower(field)
 		if strings.Contains(desc, lowerField) {
 			score += 2
 		}
+		if strings.Contains(codeContext, lowerField) {
+			score += 3
+		}
 		for _, key := range filterKeys {
 			if key == lowerField {
 				score += 4
 			}
+			if key == "event_id" && lowerField == "kafka_event_id" {
+				score += 5
+			}
+		}
+	}
+	for _, token := range []string{"conversion", "report", "monitor", "media", "kafka"} {
+		if strings.Contains(desc, token) && strings.Contains(tableLower+" "+path+" "+text, token) {
+			score += 2
+		}
+		if strings.Contains(codeContext, token) && strings.Contains(tableLower+" "+path+" "+text, token) {
+			score += 3
 		}
 	}
 	return score
+}
+
+func collectCodeContext(repoPath string, desc string) string {
+	terms := []string{
+		"HandleConversionEventQbusMessage",
+		"HandleConversionEventMessage",
+		"ReportWithMonitorRetry",
+		"BuildConversionEventMonitorContext",
+		"conversion_event.go",
+	}
+	for _, token := range strings.FieldsFunc(desc, func(r rune) bool {
+		return !(r == '_' || r == '-' || r == '/' || r == '.' || r == ':' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+	}) {
+		token = strings.TrimSpace(token)
+		if len(token) >= 8 {
+			terms = append(terms, token)
+		}
+	}
+	seen := map[string]struct{}{}
+	var b strings.Builder
+	for _, term := range terms {
+		if _, ok := seen[term]; ok {
+			continue
+		}
+		seen[term] = struct{}{}
+		_ = filepath.WalkDir(repoPath, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				if entry != nil && entry.IsDir() && strings.HasPrefix(entry.Name(), ".") && path != repoPath {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !isSQLInferenceFile(entry.Name()) {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			text := string(content)
+			if strings.Contains(strings.ToLower(path), strings.ToLower(term)) || strings.Contains(strings.ToLower(text), strings.ToLower(term)) {
+				b.WriteString(path)
+				b.WriteByte('\n')
+				b.WriteString(text)
+				b.WriteByte('\n')
+			}
+			return nil
+		})
+		if b.Len() > 200000 {
+			break
+		}
+	}
+	return strings.ToLower(b.String())
+}
+
+func tokenOverlapScore(source string, context string, weight int) int {
+	score := 0
+	for _, token := range strings.Split(strings.ToLower(source), "_") {
+		token = strings.TrimSpace(token)
+		if len(token) < 4 {
+			continue
+		}
+		if strings.Contains(context, token) {
+			score += weight
+		}
+	}
+	return score
+}
+
+func mergeTableCandidate(candidates map[string]TableCandidate, next TableCandidate) {
+	current, exists := candidates[next.Table]
+	if !exists {
+		candidates[next.Table] = next
+		return
+	}
+	current.Score += next.Score
+	if current.File == "" {
+		current.File = next.File
+	}
+	current.Fields = appendUniqueStrings(current.Fields, next.Fields...)
+	sort.Strings(current.Fields)
+	candidates[next.Table] = current
+}
+
+func alignFiltersWithTableFields(filters map[string]interface{}, fields []string) map[string]interface{} {
+	if len(filters) == 0 || len(fields) == 0 {
+		return filters
+	}
+	fieldSet := map[string]struct{}{}
+	for _, field := range fields {
+		fieldSet[strings.ToLower(field)] = struct{}{}
+	}
+	out := make(map[string]interface{}, len(filters))
+	for key, value := range filters {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey == "event_id" {
+			if _, hasEventID := fieldSet["event_id"]; !hasEventID {
+				if _, hasKafkaEventID := fieldSet["kafka_event_id"]; hasKafkaEventID {
+					out["kafka_event_id"] = value
+					continue
+				}
+			}
+		}
+		out[key] = value
+	}
+	return out
 }
