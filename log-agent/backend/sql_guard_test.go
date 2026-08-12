@@ -7,6 +7,30 @@ import (
 	"testing"
 )
 
+func TestCollectCodeSearchTermsFromDescriptionIsGeneric(t *testing.T) {
+	terms := collectCodeSearchTermsFromDescription(`caller=service/payment_notify.go:88 msg=HandlePaymentNotifyMessage status=reported event_id=event-1`)
+	for _, want := range []string{
+		"service/payment_notify.go:88",
+		"service/payment_notify.go",
+		"HandlePaymentNotifyMessage",
+		"event-1",
+	} {
+		if !containsString(terms, want) {
+			t.Fatalf("terms does not contain %q: %#v", want, terms)
+		}
+	}
+	for _, forbidden := range []string{
+		"HandleConversionEventQbusMessage",
+		"ReportWithMonitorRetry",
+		"BuildConversionEventMonitorContext",
+		"reported",
+	} {
+		if containsString(terms, forbidden) {
+			t.Fatalf("terms should not contain hardcoded token %q: %#v", forbidden, terms)
+		}
+	}
+}
+
 func TestValidateReadonlySQLRejectsMutationsAndMultiStatements(t *testing.T) {
 	for _, sqlText := range []string{
 		"delete from orders where id = 1",
@@ -122,16 +146,29 @@ func TestPlanSQLInfersFuyaoMonitorTableAndKafkaEventIDAlias(t *testing.T) {
 	dir := t.TempDir()
 	serviceDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "service")
 	modelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql", "medium_mysql")
+	growthModelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql")
 	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
 		t.Fatalf("mkdir service dir: %v", err)
 	}
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
 		t.Fatalf("mkdir model dir: %v", err)
 	}
+	if err := os.MkdirAll(growthModelDir, 0o755); err != nil {
+		t.Fatalf("mkdir growth model dir: %v", err)
+	}
 	service := `package service
 func HandleConversionEventQbusMessage(topic, msg string, msgLen int64) {
 	result := HandleConversionEventMessage(msg)
 	_ = result
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 func reportBaiduConversionEvent() {
 	monitorCtx := BuildConversionEventMonitorContext()
@@ -154,6 +191,17 @@ func InsertToAdMediaReportMonitorLog(data AdMediaReportMonitorLog) error {
 	if err := os.WriteFile(filepath.Join(modelDir, "ad_media_report_monitor_log.go"), []byte(model), 0o644); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	growthModel := `package mysql
+const GrowthAgentTaskTable = "growth_agent_task"
+type GrowthAgentTask struct {
+	TaskID string ` + "`gorm:\"column:task_id\"`" + `
+	TaskName string ` + "`gorm:\"column:task_name\"`" + `
+}
+func (GrowthAgentTask) TableName() string { return GrowthAgentTaskTable }
+`
+	if err := os.WriteFile(filepath.Join(growthModelDir, "growth_agent.go"), []byte(growthModel), 0o644); err != nil {
+		t.Fatalf("write growth model: %v", err)
+	}
 
 	plan, err := planSQL(SQLQueryRequest{
 		Description:  "查询这个 kafka event_id 的事件是否出现在日志中并消费成功，在表中的记录是什么 HandleConversionEventQbusMessage ReportWithMonitorRetry",
@@ -171,6 +219,102 @@ func InsertToAdMediaReportMonitorLog(data AdMediaReportMonitorLog) error {
 	}
 	if len(plan.Args) != 1 || plan.Args[0] != "9017880d-031c-46a0-8fde-e4dace82c38d" {
 		t.Fatalf("args = %#v", plan.Args)
+	}
+	if len(plan.TableCandidates) == 0 || plan.TableCandidates[0].Table != "ad_media_report_monitor_log" {
+		t.Fatalf("table candidates = %#v", plan.TableCandidates)
+	}
+}
+
+func TestPlanSQLPrefersWritePointTableOverGrowthTaskNoise(t *testing.T) {
+	dir := t.TempDir()
+	serviceDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "service")
+	modelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql", "medium_mysql")
+	growthModelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql")
+	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
+		t.Fatalf("mkdir service dir: %v", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir model dir: %v", err)
+	}
+	if err := os.MkdirAll(growthModelDir, 0o755); err != nil {
+		t.Fatalf("mkdir growth model dir: %v", err)
+	}
+	service := `package service
+func HandleConversionEventQbusMessage(topic, msg string, msgLen int64) {
+	result := HandleConversionEventMessage(msg)
+	_ = result
+}
+func reportBaiduConversionEvent() {
+	monitorCtx := BuildConversionEventMonitorContext()
+	ReportWithMonitorRetry(monitorCtx)
+}
+`
+	if err := os.WriteFile(filepath.Join(serviceDir, "conversion_event.go"), []byte(service), 0o644); err != nil {
+		t.Fatalf("write service: %v", err)
+	}
+	model := `package medium_mysql
+const AdMediaReportMonitorLogTable = "ad_media_report_monitor_log"
+type AdMediaReportMonitorLog struct {
+	KafkaEventID string ` + "`gorm:\"column:kafka_event_id\"`" + `
+	ReportResult string ` + "`gorm:\"column:report_result\"`" + `
+	Response string ` + "`gorm:\"column:response\"`" + `
+}
+func InsertToAdMediaReportMonitorLog(data AdMediaReportMonitorLog) error {
+	return db.Table(AdMediaReportMonitorLogTable).Create(&data).Error
+}
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "ad_media_report_monitor_log.go"), []byte(model), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	growthModel := `package mysql
+const GrowthAgentTaskTable = "growth_agent_task"
+type GrowthAgentTask struct {
+	TaskID string ` + "`gorm:\"column:task_id\"`" + `
+	TaskName string ` + "`gorm:\"column:task_name\"`" + `
+	Status string ` + "`gorm:\"column:status\"`" + `
+}
+func (GrowthAgentTask) TableName() string { return GrowthAgentTaskTable }
+`
+	if err := os.WriteFile(filepath.Join(growthModelDir, "growth_agent.go"), []byte(growthModel), 0o644); err != nil {
+		t.Fatalf("write growth model: %v", err)
+	}
+
+	plan, err := planSQL(SQLQueryRequest{
+		Description:  "查询这个 kafka event_id 的事件是否出现在日志中并消费成功，在表中的记录是什么 HandleConversionEventQbusMessage ReportWithMonitorRetry",
+		CodeRepoPath: dir,
+		Filters: map[string]interface{}{
+			"event_id": "9017880d-031c-46a0-8fde-e4dace82c38d",
+		},
+	}, SQLConfig{MaxRows: 50})
+	if err != nil {
+		t.Fatalf("planSQL: %v", err)
+	}
+	if plan.SQL != "select * from ad_media_report_monitor_log where kafka_event_id = ? limit 50" {
+		t.Fatalf("sql = %q", plan.SQL)
+	}
+	if len(plan.TableCandidates) == 0 || plan.TableCandidates[0].Table != "ad_media_report_monitor_log" {
+		t.Fatalf("table candidates = %#v", plan.TableCandidates)
+	}
+}
+
+func TestPlanSQLPrefersRealFuyaoMonitorTableFromRepository(t *testing.T) {
+	dir := "/Users/work_project/360/ad-platform-bot/backend/ad_platform_go/webmember"
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("skip real repository check: %v", err)
+	}
+
+	plan, err := planSQL(SQLQueryRequest{
+		Description:  "查询这个 kafka event_id 的事件是否出现在日志中并消费成功，在表中的记录是什么 HandleConversionEventQbusMessage ReportWithMonitorRetry",
+		CodeRepoPath: dir,
+		Filters: map[string]interface{}{
+			"event_id": "9017880d-031c-46a0-8fde-e4dace82c38d",
+		},
+	}, SQLConfig{MaxRows: 50})
+	if err != nil {
+		t.Fatalf("planSQL: %v", err)
+	}
+	if plan.SQL != "select * from ad_media_report_monitor_log where kafka_event_id = ? limit 50" {
+		t.Fatalf("sql = %q", plan.SQL)
 	}
 	if len(plan.TableCandidates) == 0 || plan.TableCandidates[0].Table != "ad_media_report_monitor_log" {
 		t.Fatalf("table candidates = %#v", plan.TableCandidates)

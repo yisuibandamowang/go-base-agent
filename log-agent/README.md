@@ -217,7 +217,7 @@ SQL 是链路排查的内部辅助能力，默认关闭，不会影响现有 `/a
 
 启用后仍只允许只读 `SELECT`，后端会拒绝多语句和 `INSERT`、`UPDATE`、`DELETE`、`ALTER`、`DROP`、`TRUNCATE` 等非只读操作，并自动追加 `LIMIT`。如果配置了项目级 SSH profile，后端会按需建立临时 tunnel 到代码里解析出的数据库 `host:port`；未配置 SSH profile 时会尝试直连代码中的数据库地址。
 
-诊断链路会优先从日志事实和代码链路推断表名与过滤字段，而不是要求前端手动填表。比如扶摇 `HandleConversionEventQbusMessage` 这类 Kafka 事件，后端会结合 `service/conversion_event.go`、`ReportWithMonitorRetry`、`ad_media_report_monitor_log` 的代码线索推断目标表；如果表结构里只有 `kafka_event_id` 而日志里提到的是 `event_id`, 后端会自动把条件映射到 `kafka_event_id` 再查库。
+诊断链路会先从日志事实检索代码链路和写库点，再用这些代码证据推断表名与过滤字段，而不是要求前端手动填表。比如扶摇 `HandleConversionEventQbusMessage` 这类 Kafka 事件，后端会结合 `service/conversion_event.go`、`ReportWithMonitorRetry`、`ad_media_report_monitor_log` 的代码线索推断目标表；如果表结构里只有 `kafka_event_id` 而日志里提到的是 `event_id`, 后端会自动把条件映射到 `kafka_event_id` 再查库。
 
 ### Beta 链路排查
 
@@ -227,7 +227,7 @@ SQL 是链路排查的内部辅助能力，默认关闭，不会影响现有 `/a
 POST /api/log-agent/diagnosis/search/stream
 ```
 
-这个接口先复用现有日志检索、代码线索和模型分析流程，再追加可选 SQL 查询事件。未启用 SQL 时会输出 `db_query_result` 事件并提示 `SQL 助手未启用`。
+这个接口的执行顺序是：先复用现有日志检索，再检索代码链路和写库点，然后执行可选 SQL 查询，最后把日志、代码证据和数据库结果一起交给模型生成诊断结论。未启用 SQL 时会输出 `db_query_result` 事件并提示 `SQL 助手未启用`。
 
 当未显式填写 SQL 条件时，Beta 链路会做最小自动推断：
 

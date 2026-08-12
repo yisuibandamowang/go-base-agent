@@ -319,6 +319,98 @@ insert into ad_media_report_monitor_log(kafka_event_id, report_result, response)
 	}
 }
 
+func TestDiagnosisStreamEmitsCodeEvidenceBeforeSQLQuery(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`create table ad_media_report_monitor_log(kafka_event_id text, report_result text);
+insert into ad_media_report_monitor_log(kafka_event_id, report_result) values('9017880d-031c-46a0-8fde-e4dace82c38d', 'success');`); err != nil {
+		t.Fatalf("seed sqlite: %v", err)
+	}
+	codeRepoPath := writeFuyaoMonitorFixture(t)
+	executor := NewSQLExecutor(SQLConfig{Enable: true, Dialect: "sqlite", MaxRows: 50}, db)
+	router := newRouterWithSQL(AppConfig{SQL: SQLConfig{Enable: true, Dialect: "sqlite", MaxRows: 50}}, fuyaoConversionLogReader{}, executor)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	body := `{"project":"fuyao","service":"webmember","env":"online","question":"查询这个kafka event_id的事件是否出现在日志中并消费成功，在表中的记录是什么","keywords":["9017880d-031c-46a0-8fde-e4dace82c38d"],"code_repo_path":"` + codeRepoPath + `"}`
+	resp, err := http.Post(server.URL+"/api/log-agent/diagnosis/search/stream", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post diagnosis stream: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	response := string(respBody)
+	codeEvidenceAt := strings.Index(response, "event:code_evidence")
+	dbQueryAt := strings.Index(response, "event:db_query_result")
+	dbSchemaAt := strings.Index(response, "event:db_schema_progress")
+	if codeEvidenceAt < 0 {
+		t.Fatalf("diagnosis stream does not contain code_evidence\n%s", response)
+	}
+	if dbQueryAt < 0 || dbSchemaAt < 0 {
+		t.Fatalf("diagnosis stream does not contain db query events\n%s", response)
+	}
+	if !(codeEvidenceAt < dbSchemaAt && dbSchemaAt < dbQueryAt) {
+		t.Fatalf("event order is wrong: code_evidence=%d db_schema_progress=%d db_query_result=%d\n%s", codeEvidenceAt, dbSchemaAt, dbQueryAt, response)
+	}
+}
+
+func TestSearchCodeEvidenceFollowsCallerToWritePoint(t *testing.T) {
+	dir := writeFuyaoMonitorFixture(t)
+	growthModelDir := filepath.Join(dir, "backend", "ad_platform_go", "webmember", "model", "mysql")
+	if err := os.MkdirAll(growthModelDir, 0o755); err != nil {
+		t.Fatalf("mkdir growth model dir: %v", err)
+	}
+	growthModel := `package mysql
+const GrowthAgentTaskTable = "growth_agent_task"
+type GrowthAgentTask struct {
+	TaskID string ` + "`gorm:\"column:task_id\"`" + `
+	TaskName string ` + "`gorm:\"column:task_name\"`" + `
+	Status string ` + "`gorm:\"column:status\"`" + `
+}
+func (GrowthAgentTask) TableName() string { return GrowthAgentTaskTable }
+`
+	if err := os.WriteFile(filepath.Join(growthModelDir, "growth_agent.go"), []byte(growthModel), 0o644); err != nil {
+		t.Fatalf("write growth model: %v", err)
+	}
+
+	raw := map[string]interface{}{
+		"fileLogs": []interface{}{
+			map[string]interface{}{
+				"lines": []interface{}{
+					`{"level":"info","ts":"2026-08-12T10:56:47.711+0800","caller":"service/conversion_event.go:122","msg":"[HandleConversionEventQbusMessage] 消费进入","topic":"mkt_conversion_event","event_id":"9017880d-031c-46a0-8fde-e4dace82c38d","event_name":"download","medium":"baidu"}`,
+					`{"level":"error","ts":"2026-08-12T10:56:47.885+0800","caller":"service/conversion_event.go:138","msg":"[HandleConversionEventQbusMessage] handle failed","status":"skipped","event_id":"9017880d-031c-46a0-8fde-e4dace82c38d","event_name":"download","medium":"baidu"}`,
+				},
+			},
+		},
+	}
+
+	evidence := searchCodeEvidence(context.Background(), dir, "webmember", LogSearchRequest{
+		Project:  "fuyao",
+		Service:  "webmember",
+		Env:      "online",
+		Keywords: []string{"9017880d-031c-46a0-8fde-e4dace82c38d"},
+	}, raw, 50)
+	joined := codeEvidenceText(evidence)
+	for _, want := range []string{
+		"HandleConversionEventQbusMessage",
+		"ReportWithMonitorRetry",
+		"InsertToAdMediaReportMonitorLog",
+		"AdMediaReportMonitorLogTable",
+		"kafka_event_id",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("code evidence does not contain %q\n%s", want, joined)
+		}
+	}
+}
+
 type fuyaoConversionLogReader struct{}
 
 func (fuyaoConversionLogReader) Search(ctx context.Context, req LogSearchRequest) (*LogSearchResponse, error) {
@@ -366,6 +458,15 @@ func reportBaiduConversionEvent() {
 `
 	if err := os.WriteFile(filepath.Join(serviceDir, "conversion_event.go"), []byte(service), 0o644); err != nil {
 		t.Fatalf("write service: %v", err)
+	}
+	monitorService := `package service
+func ReportWithMonitorRetry() {
+	runReportWithMonitorRetry(InsertToAdMediaReportMonitorLog)
+}
+func runReportWithMonitorRetry(insert func(AdMediaReportMonitorLog) error) {}
+`
+	if err := os.WriteFile(filepath.Join(serviceDir, "media_report_monitor_log.go"), []byte(monitorService), 0o644); err != nil {
+		t.Fatalf("write monitor service: %v", err)
 	}
 	model := `package medium_mysql
 const AdMediaReportMonitorLogTable = "ad_media_report_monitor_log"

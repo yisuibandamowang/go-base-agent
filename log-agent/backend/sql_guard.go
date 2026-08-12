@@ -289,6 +289,24 @@ func codeColumnNames(text string) []string {
 
 func tableCandidateScore(table string, fields []string, desc string, codeContext string, path string, text string, filterKeys []string) int {
 	score := 0
+	fieldSet := map[string]struct{}{}
+	for _, field := range fields {
+		fieldSet[strings.ToLower(strings.TrimSpace(field))] = struct{}{}
+	}
+	for _, key := range filterKeys {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey == "" {
+			continue
+		}
+		if _, ok := fieldSet[normalizedKey]; ok {
+			score += 20
+		}
+		if normalizedKey == "event_id" {
+			if _, ok := fieldSet["kafka_event_id"]; ok {
+				score += 60
+			}
+		}
+	}
 	tableLower := strings.ToLower(table)
 	if strings.Contains(desc, tableLower) {
 		score += 3
@@ -329,21 +347,7 @@ func tableCandidateScore(table string, fields []string, desc string, codeContext
 }
 
 func collectCodeContext(repoPath string, desc string) string {
-	terms := []string{
-		"HandleConversionEventQbusMessage",
-		"HandleConversionEventMessage",
-		"ReportWithMonitorRetry",
-		"BuildConversionEventMonitorContext",
-		"conversion_event.go",
-	}
-	for _, token := range strings.FieldsFunc(desc, func(r rune) bool {
-		return !(r == '_' || r == '-' || r == '/' || r == '.' || r == ':' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
-	}) {
-		token = strings.TrimSpace(token)
-		if len(token) >= 8 {
-			terms = append(terms, token)
-		}
-	}
+	terms := collectCodeSearchTermsFromDescription(desc)
 	seen := map[string]struct{}{}
 	var b strings.Builder
 	for _, term := range terms {
@@ -379,6 +383,56 @@ func collectCodeContext(repoPath string, desc string) string {
 		}
 	}
 	return strings.ToLower(b.String())
+}
+
+func collectCodeSearchTermsFromDescription(desc string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 12)
+	add := func(term string) {
+		term = strings.Trim(strings.TrimSpace(term), `"'，,;；。.`)
+		if !isUsefulCodeContextTerm(term) {
+			return
+		}
+		if _, ok := seen[term]; ok {
+			return
+		}
+		seen[term] = struct{}{}
+		out = append(out, term)
+	}
+	for _, match := range regexp.MustCompile(`\b[A-Za-z0-9_./-]+\.go:\d+\b`).FindAllString(desc, -1) {
+		add(match)
+		if idx := strings.LastIndex(match, ":"); idx > 0 {
+			add(match[:idx])
+		}
+	}
+	for _, match := range regexp.MustCompile(`\b[A-Z][A-Za-z0-9_]{5,}\b`).FindAllString(desc, -1) {
+		add(match)
+	}
+	for _, match := range regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]{2,40}=([A-Za-z0-9_./:-]{4,})`).FindAllStringSubmatch(desc, -1) {
+		add(match[1])
+	}
+	for _, token := range strings.FieldsFunc(desc, func(r rune) bool {
+		return !(r == '_' || r == '-' || r == '/' || r == '.' || r == ':' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+	}) {
+		add(token)
+		if len(out) >= 16 {
+			break
+		}
+	}
+	return out
+}
+
+func isUsefulCodeContextTerm(term string) bool {
+	if len([]rune(term)) < 4 {
+		return false
+	}
+	lower := strings.ToLower(term)
+	switch lower {
+	case "event_id", "order_id", "status", "topic", "caller", "service", "online", "error", "level", "trace_id", "where", "from", "select", "reported", "failed", "success", "skipped", "duplicate":
+		return false
+	default:
+		return !regexp.MustCompile(`^\d+$`).MatchString(term)
+	}
 }
 
 func tokenOverlapScore(source string, context string, weight int) int {

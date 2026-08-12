@@ -144,8 +144,9 @@ func newRouterWithSQL(cfg AppConfig, reader LogReader, sqlExecutor *SQLExecutor)
 				emit(LogStreamEvent{Type: "error", TraceID: req.TraceID, Error: err.Error()})
 				return
 			}
-			dbResult := runDiagnosisSQLStep(reqCtx, req, resp.Raw, cfg.Analyzer.CodeRepoPath, cfg.SQL, sqlExecutor, emit)
-			runDiagnosisAnalysisStep(reqCtx, reader, req, resp, cfg.Analyzer, dbResult, emit)
+			codeEvidence := runDiagnosisCodeEvidenceStep(reqCtx, req, resp.Raw, cfg.Analyzer, emit)
+			dbResult := runDiagnosisSQLStep(reqCtx, req, resp.Raw, codeEvidence, cfg.Analyzer.CodeRepoPath, cfg.SQL, sqlExecutor, emit)
+			runDiagnosisAnalysisStep(reqCtx, reader, req, resp, codeEvidence, cfg.Analyzer, dbResult, emit)
 			emit(LogStreamEvent{Type: "done", TraceID: req.TraceID, Message: "完成"})
 		}()
 		c.Header("Cache-Control", "no-cache")
@@ -179,12 +180,22 @@ func diagnosisLogReader(reader LogReader) LogReader {
 	return reader
 }
 
-func runDiagnosisSQLStep(ctx context.Context, req LogSearchRequest, raw map[string]interface{}, fallbackRepoPath string, sqlConf SQLConfig, sqlExecutor *SQLExecutor, emit LogStreamEmitter) *SQLQueryResponse {
+func runDiagnosisCodeEvidenceStep(ctx context.Context, req LogSearchRequest, raw map[string]interface{}, analyzerConf AnalyzerConfig, emit LogStreamEmitter) []CodeEvidence {
+	codeRepoPath := codeRepoPathForRequest(req, analyzerConf.CodeRepoPath)
+	emit(LogStreamEvent{Type: "analysis_progress", TraceID: req.TraceID, Message: "开始检索代码链路线索"})
+	slog.Info("diagnosis code evidence search started", "trace_id", req.TraceID, "repo", codeRepoPath)
+	codeEvidence := searchCodeEvidence(ctx, codeRepoPath, req.Service, req, raw, analyzerConf.CodeMaxLines)
+	emit(LogStreamEvent{Type: "code_evidence", TraceID: req.TraceID, Message: fmt.Sprintf("代码线索检索完成，共 %d 条", len(codeEvidence)), CodeEvidence: codeEvidence})
+	slog.Info("diagnosis code evidence search completed", "trace_id", req.TraceID, "count", len(codeEvidence))
+	return codeEvidence
+}
+
+func runDiagnosisSQLStep(ctx context.Context, req LogSearchRequest, raw map[string]interface{}, codeEvidence []CodeEvidence, fallbackRepoPath string, sqlConf SQLConfig, sqlExecutor *SQLExecutor, emit LogStreamEmitter) *SQLQueryResponse {
 	if !sqlConf.Enable {
 		emit(LogStreamEvent{Type: "db_query_result", TraceID: req.TraceID, Message: "SQL 助手未启用", Error: "SQL 助手未启用"})
 		return nil
 	}
-	queryReq := sqlQueryRequestForDiagnosis(req, raw, fallbackRepoPath)
+	queryReq := sqlQueryRequestForDiagnosisWithCodeEvidence(req, raw, codeEvidence, fallbackRepoPath)
 	if strings.TrimSpace(queryReq.SQL) == "" && strings.TrimSpace(queryReq.Table) == "" && strings.TrimSpace(queryReq.CodeRepoPath) == "" {
 		emit(LogStreamEvent{Type: "db_query_result", TraceID: req.TraceID, Message: "未提供 SQL、sql_table 或代码目录，跳过数据库查询"})
 		return nil
@@ -199,7 +210,7 @@ func runDiagnosisSQLStep(ctx context.Context, req LogSearchRequest, raw map[stri
 	return result
 }
 
-func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSearchRequest, resp *LogSearchResponse, analyzerConf AnalyzerConfig, dbResult *SQLQueryResponse, emit LogStreamEmitter) {
+func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSearchRequest, resp *LogSearchResponse, codeEvidence []CodeEvidence, analyzerConf AnalyzerConfig, dbResult *SQLQueryResponse, emit LogStreamEmitter) {
 	if resp == nil || req.ResolveOnly {
 		return
 	}
@@ -207,12 +218,6 @@ func runDiagnosisAnalysisStep(ctx context.Context, reader LogReader, req LogSear
 	if !ok || analyzing == nil || analyzing.analyzer == nil {
 		return
 	}
-	codeRepoPath := codeRepoPathForRequest(req, analyzerConf.CodeRepoPath)
-	emit(LogStreamEvent{Type: "analysis_progress", TraceID: req.TraceID, Message: "开始检索会员代码链路线索"})
-	slog.Info("diagnosis code evidence search started", "trace_id", req.TraceID, "repo", codeRepoPath)
-	codeEvidence := searchCodeEvidence(ctx, codeRepoPath, req.Service, req, resp.Raw, analyzerConf.CodeMaxLines)
-	emit(LogStreamEvent{Type: "code_evidence", TraceID: req.TraceID, Message: fmt.Sprintf("代码线索检索完成，共 %d 条", len(codeEvidence)), CodeEvidence: codeEvidence})
-	slog.Info("diagnosis code evidence search completed", "trace_id", req.TraceID, "count", len(codeEvidence))
 
 	input := AnalysisInput{
 		Question:     req.Question,
@@ -280,6 +285,10 @@ func dbResultText(result *SQLQueryResponse) string {
 }
 
 func sqlQueryRequestForDiagnosis(req LogSearchRequest, raw map[string]interface{}, fallbackRepoPath string) SQLQueryRequest {
+	return sqlQueryRequestForDiagnosisWithCodeEvidence(req, raw, nil, fallbackRepoPath)
+}
+
+func sqlQueryRequestForDiagnosisWithCodeEvidence(req LogSearchRequest, raw map[string]interface{}, codeEvidence []CodeEvidence, fallbackRepoPath string) SQLQueryRequest {
 	filters := req.SQLFilters
 	if filters == nil {
 		filters = map[string]interface{}{}
@@ -309,7 +318,7 @@ func sqlQueryRequestForDiagnosis(req LogSearchRequest, raw map[string]interface{
 		TraceID:      req.TraceID,
 		SQL:          req.SQL,
 		Table:        req.SQLTable,
-		Description:  diagnosisSQLDescription(req.Question, raw),
+		Description:  diagnosisSQLDescription(req.Question, raw, codeEvidence),
 		CodeRepoPath: codeRepoPathForRequest(req, fallbackRepoPath),
 		Columns:      req.SQLColumns,
 		Filters:      filters,
@@ -317,13 +326,16 @@ func sqlQueryRequestForDiagnosis(req LogSearchRequest, raw map[string]interface{
 	}
 }
 
-func diagnosisSQLDescription(question string, raw map[string]interface{}) string {
+func diagnosisSQLDescription(question string, raw map[string]interface{}, codeEvidence []CodeEvidence) string {
 	parts := []string{strings.TrimSpace(question)}
 	if raw != nil {
 		lines := strings.Join(extractLogLines(raw), "\n")
 		for _, finding := range deterministicLogFindings(lines) {
 			parts = append(parts, finding)
 		}
+	}
+	if text := codeEvidenceText(codeEvidence); strings.TrimSpace(text) != "" {
+		parts = append(parts, text)
 	}
 	return strings.Join(uniqueNonEmptyStrings(parts), "\n")
 }
