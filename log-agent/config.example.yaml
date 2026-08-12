@@ -1,0 +1,16 @@
+# log-agent/config.example.yaml
+# 复制为 log-agent/config.yaml 后填写本机真实 SSH 信息。
+# log-agent/config.yaml 已加入 .gitignore，不要提交真实配置。
+
+sql:
+  enable: true
+  dialect: postgres
+  timeout_ms: 3000
+  max_rows: 50
+  ssh_profiles:
+    member:
+      enable: true
+      host: chenhongyi
+    fuyao:
+      enable: true
+      host: chenhongyi
