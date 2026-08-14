@@ -15,6 +15,7 @@ type PromptContext struct {
 	History      []chat.Message
 	KbContext    string
 	McpContext   string
+	CodeContext  string
 }
 
 // PromptBuilder builds a chat.Request from a PromptContext.
@@ -62,7 +63,7 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 }
 
 func buildPromptUserContent(ctx PromptContext) string {
-	evidence := buildPromptEvidence(ctx.McpContext, ctx.KbContext)
+	evidence := buildPromptEvidence(ctx.McpContext, ctx.KbContext, ctx.CodeContext)
 	question := buildPromptQuestion(ctx.Question, ctx.SubQuestions)
 	if evidence == "" {
 		return ctx.Question
@@ -74,6 +75,13 @@ func buildPromptUserContent(ctx PromptContext) string {
 	} else if strings.TrimSpace(ctx.McpContext) != "" {
 		instruction = "请结合以下MCP工具结果回答用户问题；如果工具结果不足以回答，请直接说明工具结果中没有相关信息。"
 	}
+	if strings.TrimSpace(ctx.CodeContext) != "" {
+		if strings.TrimSpace(ctx.McpContext) != "" || strings.TrimSpace(ctx.KbContext) != "" {
+			instruction = "请结合以下代码仓库证据、MCP工具结果和知识库内容回答用户问题；如果证据之间冲突，请优先说明冲突并给出可追溯依据。"
+		} else {
+			instruction = "请结合以下代码仓库证据回答用户问题；如果代码仓库证据不足以回答，请直接说明缺少相关源码、调用链或表结构信息，不要使用模型自身知识补充。"
+		}
+	}
 
 	if question == "" {
 		return instruction + "\n\n" + evidence
@@ -81,13 +89,16 @@ func buildPromptUserContent(ctx PromptContext) string {
 	return instruction + "\n\n" + evidence + "\n\n" + question
 }
 
-func buildPromptEvidence(mcpContext, kbContext string) string {
-	sections := make([]string, 0, 2)
+func buildPromptEvidence(mcpContext, kbContext, codeContext string) string {
+	sections := make([]string, 0, 3)
 	if mcp := strings.TrimSpace(mcpContext); mcp != "" {
 		sections = append(sections, "<tool-data>\n"+mcp+"\n</tool-data>")
 	}
 	if kb := strings.TrimSpace(kbContext); kb != "" {
 		sections = append(sections, "<documents>\n"+kb+"\n</documents>")
+	}
+	if code := strings.TrimSpace(codeContext); code != "" {
+		sections = append(sections, "<code-documents>\n"+code+"\n</code-documents>")
 	}
 	return strings.Join(sections, "\n\n")
 }

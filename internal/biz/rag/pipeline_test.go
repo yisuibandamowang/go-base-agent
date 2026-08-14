@@ -3,6 +3,8 @@ package rag
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -277,6 +279,19 @@ func (p staticMcpContextProvider) BuildContext(ctx context.Context, question str
 	return p.context, p.err
 }
 
+type recordingPromptBuilder struct {
+	last PromptContext
+}
+
+func (b *recordingPromptBuilder) Build(ctx PromptContext) chat.Request {
+	b.last = ctx
+	return chat.Request{Messages: []chat.Message{chat.NewUserMessage(ctx.Question)}, MaxTokens: ptrInt(1)}
+}
+
+func ptrInt(v int) *int {
+	return &v
+}
+
 type contextSensitiveTraceRecorder struct {
 	finishRunErr  error
 	finishNodeErr []error
@@ -368,6 +383,31 @@ func TestPipeline_StreamChat_UsesConfiguredDefaultTopK(t *testing.T) {
 	<-done
 	if len(retriever.topKs) == 0 || retriever.topKs[0] != 15 {
 		t.Fatalf("expected default topK 15, got %+v", retriever.topKs)
+	}
+}
+
+func TestPipeline_StreamChat_UsesCodeRepoPathForCodeContext(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "service.go"), []byte(`package demo
+func HandleThing() {}
+`), 0o644); err != nil {
+		t.Fatalf("write code fixture: %v", err)
+	}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("hello")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+	sender, _ := newTestSSESender(t)
+	prompt := &recordingPromptBuilder{}
+	p := NewPipeline(llm, prompt, &NoopRewriter{}, testRetriever(), &NoopMemoryService{})
+	p.SetCodeRepoPath(dir)
+	p.StreamChat(context.Background(), "HandleThing 在哪里", "conv-1", "task-1", false, sender)
+
+	if !strings.Contains(prompt.last.CodeContext, "HandleThing") {
+		t.Fatalf("expected code context to include HandleThing, got %+v", prompt.last.CodeContext)
 	}
 }
 

@@ -17,13 +17,15 @@ import (
 )
 
 type contextCaptureService struct {
-	user   *appctx.LoginUser
-	tenant *appctx.TenantContext
+	user         *appctx.LoginUser
+	tenant       *appctx.TenantContext
+	codeRepoPath string
 }
 
 func (s *contextCaptureService) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
 	s.user = appctx.User(ctx)
 	s.tenant = appctx.Tenant(ctx)
+	s.codeRepoPath = appctx.CodeRepoPath(ctx)
 	sender.SendFinish("", "")
 	sender.SendDone()
 	sender.Close()
@@ -141,6 +143,23 @@ func TestController_Chat_PreservesTenantContext(t *testing.T) {
 
 	if svc.tenant == nil || svc.tenant.TenantID != "tenant-1" {
 		t.Fatalf("expected tenant context to be preserved, got %+v", svc.tenant)
+	}
+}
+
+func TestController_Chat_PreservesCodeRepoPathContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &contextCaptureService{}
+	ctl := NewController(svc)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=test&conversationId=conv-1&codeRepoPath=/tmp/member-code", nil)
+	c.Request = req
+
+	ctl.Chat(c)
+
+	if svc.codeRepoPath != "/tmp/member-code" {
+		t.Fatalf("expected code repo path to be preserved, got %q", svc.codeRepoPath)
 	}
 }
 

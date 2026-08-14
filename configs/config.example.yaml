@@ -36,6 +36,9 @@ rag:
     dimension: 1536
     metric-type: COSINE
 
+  code:
+    repo-path: ${RAG_CODE_REPO_PATH:}
+
   context:
     enrich:
       enabled: true

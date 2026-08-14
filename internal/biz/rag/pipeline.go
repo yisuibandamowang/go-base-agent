@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"go-base-agent/internal/biz/codeqna"
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/infra/chat"
 )
@@ -33,6 +34,7 @@ type Pipeline struct {
 	messageChunkSize int
 	streamTimeout    time.Duration
 	defaultTopK      int
+	codeRepoPath     string
 }
 
 // NewPipeline creates a new RAG pipeline.
@@ -73,6 +75,11 @@ func (p *Pipeline) SetStreamTimeout(timeout time.Duration) {
 // SetDefaultTopK sets the default retrieval TopK for the pipeline.
 func (p *Pipeline) SetDefaultTopK(topK int) {
 	p.defaultTopK = topK
+}
+
+// SetCodeRepoPath sets an optional code repository path for code Q&A evidence.
+func (p *Pipeline) SetCodeRepoPath(repoPath string) {
+	p.codeRepoPath = strings.TrimSpace(repoPath)
 }
 
 // SetPreferredLLMService sets the lightweight LLM used for non-RAG responses.
@@ -231,6 +238,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
+	codeCtx := p.buildCodeContext(ctx, q)
 
 	req := p.prompt.Build(PromptContext{
 		Question:     q,
@@ -238,6 +246,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		History:      history,
 		KbContext:    withChunkSources(chunks, kbCtx),
 		McpContext:   mcpCtx,
+		CodeContext:  codeCtx,
 	})
 	thinkingVal := deepThinking
 	req.Thinking = &thinkingVal
@@ -555,6 +564,28 @@ func (p *Pipeline) streamRetrievalFallback(ctx, persistenceCtx context.Context, 
 		task.bindHandle(handle)
 	}
 	handle.Wait()
+}
+
+func (p *Pipeline) buildCodeContext(ctx context.Context, question string) string {
+	if p == nil {
+		return ""
+	}
+	repoPath := strings.TrimSpace(appctx.CodeRepoPath(ctx))
+	if repoPath == "" {
+		repoPath = strings.TrimSpace(p.codeRepoPath)
+	}
+	if repoPath == "" {
+		return ""
+	}
+	items, err := codeqna.Search(ctx, codeqna.SearchRequest{
+		RepoPath: repoPath,
+		Question: question,
+		MaxLines: 20,
+	})
+	if err != nil || len(items) == 0 {
+		return ""
+	}
+	return codeqna.FormatEvidence(items)
 }
 
 // StopTask implements Service.StopTask.
@@ -904,8 +935,9 @@ func (p *Pipeline) streamSystemOnlyResponse(ctx, persistenceCtx context.Context,
 
 func (p *Pipeline) buildSystemOnlyRequest(question string, history []chat.Message, customPrompt string) chat.Request {
 	req := p.prompt.Build(PromptContext{
-		Question: question,
-		History:  history,
+		Question:    question,
+		History:     history,
+		CodeContext: p.buildCodeContext(context.Background(), question),
 	})
 	if strings.TrimSpace(customPrompt) == "" {
 		if falseVal := false; req.Thinking == nil {

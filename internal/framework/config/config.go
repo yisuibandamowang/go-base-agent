@@ -96,6 +96,7 @@ type MinerUConfig struct {
 type RAGConfig struct {
 	Vector       RAGVectorConfig       `mapstructure:"vector"`
 	Default      RAGDefaultConfig      `mapstructure:"default"`
+	Code         RAGCodeConfig         `mapstructure:"code"`
 	Context      RAGContextConfig      `mapstructure:"context"`
 	QueryRewrite RAGQueryRewriteConfig `mapstructure:"query-rewrite"`
 	Rerank       RAGRerankConfig       `mapstructure:"rerank"`
@@ -121,6 +122,10 @@ type RAGDefaultConfig struct {
 	Dimension      int    `mapstructure:"dimension"`
 	MetricType     string `mapstructure:"metric-type"`
 	SSETimeoutMs   int64  `mapstructure:"sse-timeout-ms"`
+}
+
+type RAGCodeConfig struct {
+	RepoPath string `mapstructure:"repo-path"`
 }
 
 func (c RAGDefaultConfig) SSETimeoutDuration() time.Duration {

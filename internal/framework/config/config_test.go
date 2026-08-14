@@ -356,6 +356,29 @@ func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadParsesRAGCodeRepoPath(t *testing.T) {
+	yaml := `
+rag:
+  code:
+    repo-path: /Users/work_project/360/member
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.RAG.Code.RepoPath != "/Users/work_project/360/member" {
+		t.Fatalf("unexpected code repo path: %q", cfg.RAG.Code.RepoPath)
+	}
+}
+
 func TestLoadExpandsEmptyDefaultEnvPlaceholder(t *testing.T) {
 	yaml := `
 rag:

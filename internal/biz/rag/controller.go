@@ -74,6 +74,9 @@ func (ctl *Controller) Chat(c *gin.Context) {
 	// Use a detached context so the pipeline can finish after SSE transport cleanup,
 	// while preserving request-scoped identity for conversation memory.
 	ctx := detachedRequestContext(c.Request.Context())
+	if repoPath := strings.TrimSpace(c.Query("codeRepoPath")); repoPath != "" {
+		ctx = appctx.WithCodeRepoPath(ctx, repoPath)
+	}
 	ctl.svc.StreamChat(ctx, question, conversationID, taskID, deepThinking, sender)
 }
 
@@ -145,6 +148,9 @@ func detachedRequestContext(reqCtx context.Context) context.Context {
 	}
 	if tenant := appctx.Tenant(reqCtx); tenant != nil {
 		ctx = appctx.WithTenant(ctx, tenant)
+	}
+	if repoPath := appctx.CodeRepoPath(reqCtx); strings.TrimSpace(repoPath) != "" {
+		ctx = appctx.WithCodeRepoPath(ctx, strings.TrimSpace(repoPath))
 	}
 	return ctx
 }

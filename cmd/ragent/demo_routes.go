@@ -241,6 +241,9 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 				"dimension":      cfg.RAG.Default.Dimension,
 				"metricType":     cfg.RAG.Default.MetricType,
 			},
+			"code": map[string]any{
+				"repoPath": strings.TrimSpace(cfg.RAG.Code.RepoPath),
+			},
 			"queryRewrite": map[string]any{
 				"enabled":            cfg.RAG.QueryRewrite.IsEnabledByDefault(),
 				"maxHistoryMessages": cfg.RAG.QueryRewrite.MaxHistoryMessages,

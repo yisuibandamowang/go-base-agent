@@ -405,6 +405,7 @@ func main() {
 	ragPipeline.SetMessageChunkSize(cfg.AI.Stream.MessageChunkSize)
 	ragPipeline.SetStreamTimeout(cfg.RAG.Default.SSETimeoutDuration())
 	ragPipeline.SetDefaultTopK(cfg.RAG.Search.DefaultTopK)
+	ragPipeline.SetCodeRepoPath(cfg.RAG.Code.RepoPath)
 	ragPipeline.SetPreferredLLMService(preferredLLMService)
 	ragPipeline.SetAnswerCache(rag.NewRedisAnswerCacheManager(rdb), cfg.RAG.AnswerCache.IsEnabledByDefault(), cfg.RAG.AnswerCache.TTLDuration())
 	ragPipeline.SetMcpContextProvider(mcpContextProvider)

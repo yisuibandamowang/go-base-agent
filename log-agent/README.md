@@ -45,7 +45,7 @@ http://localhost:9108
 | `LOG_AGENT_ANALYZER_BASE_URL` | `https://api.360.cn/v1` | 360 智脑 OpenAI 兼容接口地址 |
 | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` | 空 | 阿里云百炼 OpenAI 兼容接口兜底 API Key |
 | `LOG_AGENT_ANALYZER_BAILIAN_BASE_URL` | `https://dashscope.aliyuncs.com` | 阿里云百炼接口地址 |
-| `LOG_AGENT_ANALYZER_CODE_REPO_PATH` | `/Users/work_project/360/member` | 会员微服务代码仓库路径；扶摇项目未填写代码目录时默认使用 `/Users/work_project/360/ad-platform-bot` |
+| `LOG_AGENT_ANALYZER_CODE_REPO_PATH` | `/Users/work_project/360/member` | 会员微服务代码仓库路径；前端“代码目录”输入框可手动覆盖本机路径，扶摇项目未填写代码目录时默认使用 `/Users/work_project/360/ad-platform-bot` |
 | `LOG_AGENT_SQL_ENABLE` | `false` | 是否启用诊断链路内部 SQL 辅助查询；默认关闭，不影响现有日志链路 |
 | `LOG_AGENT_SQL_DIALECT` | `postgres` | SQL 方言，当前支持 `postgres` / `sqlite` |
 | `LOG_AGENT_SQL_DSN` | 空 | 可选固定只读数据库连接串；诊断链路优先从代码仓库解析数据库直连配置 |
@@ -194,6 +194,8 @@ qihoo_id=3523031789
 - 后端再按 `qihoo_id` 字段做严格匹配，兼容普通 JSON 和转义 JSON
 
 多行 `field=value` 会在后端做 AND 过滤，避免把只命中其中一个字段的日志展示出来。如果需要跨服务按纯值串链路，可以另起一行显式输入 `3523031789`。
+
+前端“代码目录”输入框支持手动覆盖本机代码仓库路径，后端会优先使用请求内的 `code_repo_path`，再回退到项目默认路径。这个路径会同时用于代码线索检索、SQL 表推断和诊断链路中的源码证据收集。
 
 智能分析会在日志查询后结合代码线索调用模型服务。代码目录可在前端“代码目录”输入框按请求覆盖；未填写时 member 使用后端配置的 `LOG_AGENT_ANALYZER_CODE_REPO_PATH`，fuyao 使用 `/Users/work_project/360/ad-platform-bot`。当前模型路由为代码内硬编码降级策略：
 

@@ -489,6 +489,7 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	queryRewriteEnabled := true
 	rateLimitEnabled := true
+	codeRepoPath := "/Users/work_project/360/member"
 
 	cfg := &config.Config{
 		RAG: config.RAGConfig{
@@ -497,6 +498,9 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				CollectionName: "rag_default_store",
 				Dimension:      1536,
 				MetricType:     "COSINE",
+			},
+			Code: config.RAGCodeConfig{
+				RepoPath: codeRepoPath,
 			},
 			QueryRewrite: config.RAGQueryRewriteConfig{
 				Enabled:            &queryRewriteEnabled,
@@ -615,6 +619,9 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	}
 	if ragCfg["rateLimit"].(map[string]any)["global"].(map[string]any)["pollIntervalMs"].(float64) != 200 {
 		t.Fatalf("unexpected rate limit settings: %#v", ragCfg["rateLimit"])
+	}
+	if ragCfg["code"].(map[string]any)["repoPath"].(string) != codeRepoPath {
+		t.Fatalf("unexpected code repo path: %#v", ragCfg["code"])
 	}
 	aiCfg := resp.Data["ai"].(map[string]any)
 	provider := aiCfg["providers"].(map[string]any)["openai"].(map[string]any)
