@@ -65,6 +65,9 @@ func TestDefaultPromptBuilder_WithKbContext(t *testing.T) {
 	if !strings.Contains(content, "什么是RAG") {
 		t.Fatal("question should be in user message")
 	}
+	if !strings.Contains(req.Messages[0].Content, "[N](#cite-N)") {
+		t.Fatal("system prompt should include citation rules for kb context")
+	}
 }
 
 func TestDefaultPromptBuilder_WrapsEvidenceAndQuestionLikeJavaPromptService(t *testing.T) {
@@ -181,7 +184,7 @@ func TestDefaultPromptBuilder_SelectsScenePromptSlots(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			b := NewDefaultPromptBuilder(resolver)
 			req := b.Build(tt.ctx)
-			if req.Messages[0].Content != tt.wantSystem {
+			if !strings.Contains(req.Messages[0].Content, tt.wantSystem) {
 				t.Fatalf("unexpected system prompt: %q", req.Messages[0].Content)
 			}
 		})
@@ -204,6 +207,9 @@ func TestDefaultPromptBuilder_WithMcpOnlyContextUsesToolDataWithoutDocuments(t *
 	}
 	if !strings.Contains(content, "<question>查询天气</question>") {
 		t.Fatalf("expected mcp-only prompt to wrap question, got %q", content)
+	}
+	if strings.Contains(req.Messages[0].Content, "[N](#cite-N)") {
+		t.Fatalf("expected mcp-only system prompt not to include citation rules, got %q", req.Messages[0].Content)
 	}
 }
 

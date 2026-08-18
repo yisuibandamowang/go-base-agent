@@ -36,6 +36,8 @@ type DefaultPromptBuilder struct {
 	resolver   RuntimePromptResolver
 }
 
+const citationRulesFile = "answer_citation_rules.txt"
+
 // NewDefaultPromptBuilder creates a builder using embedded prompt templates.
 func NewDefaultPromptBuilder(resolver ...RuntimePromptResolver) *DefaultPromptBuilder {
 	return NewPromptBuilder("", "default_system.txt", resolver...)
@@ -60,6 +62,7 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages := make([]chat.Message, 0, len(ctx.History)+2)
 
 	sysPrompt := b.resolveSystemPrompt(ctx)
+	sysPrompt = b.appendCitationRulesIfNeeded(ctx, sysPrompt)
 	if sysPrompt != "" {
 		messages = append(messages, chat.NewSystemMessage(sysPrompt))
 	}
@@ -103,6 +106,27 @@ func systemPromptSlotCandidates(ctx PromptContext) []string {
 	default:
 		return []string{"SYSTEM_CHAT"}
 	}
+}
+
+func (b *DefaultPromptBuilder) appendCitationRulesIfNeeded(ctx PromptContext, sysPrompt string) string {
+	if strings.TrimSpace(ctx.KbContext) == "" {
+		return sysPrompt
+	}
+	if b == nil || b.loader == nil {
+		return sysPrompt
+	}
+	rules, err := b.loader.Render(citationRulesFile, nil)
+	if err != nil {
+		return sysPrompt
+	}
+	rules = strings.TrimSpace(rules)
+	if rules == "" {
+		return sysPrompt
+	}
+	if strings.TrimSpace(sysPrompt) == "" {
+		return rules
+	}
+	return strings.TrimSpace(sysPrompt) + "\n\n" + rules
 }
 
 func buildPromptUserContent(ctx PromptContext) string {
