@@ -15,6 +15,7 @@ import (
 	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/framework/lock"
 	initializerCleanup "go-base-agent/internal/initializer/cleanup"
+	initializerMigrate "go-base-agent/internal/initializer/migrate"
 	initializerPreflight "go-base-agent/internal/initializer/preflight"
 )
 
@@ -31,6 +32,11 @@ func main() {
 	case "preflight":
 		if err := runPreflight(os.Args[2:]); err != nil {
 			slog.Error("preflight failed", "err", err)
+			os.Exit(1)
+		}
+	case "migrate":
+		if err := runMigrate(os.Args[2:]); err != nil {
+			slog.Error("migrate failed", "err", err)
 			os.Exit(1)
 		}
 	case "cleanup":
@@ -194,9 +200,71 @@ func runCleanup(args []string) error {
 	return nil
 }
 
+func runMigrate(args []string) error {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	configPath := fs.String("config", "configs/config.yaml", "config file path")
+	schemaFile := fs.String("schema-file", "resources/database/schema_pg.sql", "schema sql file path")
+	initFile := fs.String("init-file", "resources/database/init_data_pg.sql", "initial data sql file path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(strings.TrimSpace(*configPath))
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	gormDB, err := db.NewDB(cfg.Database)
+	if err != nil {
+		return fmt.Errorf("database check failed: %w", err)
+	}
+	defer func() {
+		if closeErr := db.Close(gormDB); closeErr != nil {
+			slog.Warn("close database failed", "err", closeErr)
+		}
+	}()
+
+	slog.Info("migrate start", "schema_file", resolveSQLFile(*schemaFile), "init_file", resolveSQLFile(*initFile))
+	if err := initializerMigrate.Run(context.Background(), initializerMigrate.Options{
+		CheckDB: func(ctx context.Context) error {
+			return db.Ping(ctx, gormDB)
+		},
+		SchemaFile: resolveSQLFile(*schemaFile),
+		InitFile:   resolveSQLFile(*initFile),
+		ExecuteSQL: func(ctx context.Context, path string) error {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("read sql file: %w", err)
+			}
+			sqlDB, err := gormDB.DB()
+			if err != nil {
+				return fmt.Errorf("get sql db: %w", err)
+			}
+			if _, err := sqlDB.ExecContext(ctx, string(raw)); err != nil {
+				return fmt.Errorf("execute sql: %w", err)
+			}
+			return nil
+		},
+	}); err != nil {
+		return err
+	}
+	slog.Info("migrate completed")
+	return nil
+}
+
 func resolveCleanupFile(path string) string {
 	if strings.TrimSpace(path) == "" {
 		return "resources/database/cleanup_pg.sql"
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Clean(path)
+}
+
+func resolveSQLFile(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
 	}
 	if filepath.IsAbs(path) {
 		return path

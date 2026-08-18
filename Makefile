@@ -33,7 +33,7 @@ mod:
 	$(GO) mod tidy
 
 migrate:
-	bash scripts/migrate.sh
+	$(GO) run ./cmd/initializer migrate
 
 cleanup-db:
 	$(GO) run ./cmd/initializer cleanup --confirm RESET-ENTERPRISE-KNOWLEDGE-BASE

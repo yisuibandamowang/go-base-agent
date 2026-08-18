@@ -69,7 +69,7 @@
 ## 架构概览
 
 ```text
-cmd/initializer/main.go # 预检/清理入口
+cmd/initializer/main.go # 预检/清理/初始化入口
 cmd/ragent/main.go       # 主服务入口
 cmd/mcp-server/main.go   # MCP Server 入口
 
@@ -122,6 +122,8 @@ docker compose -f deploy/docker-compose.yml up -d
 ```bash
 make migrate
 ```
+
+会执行 `cmd/initializer migrate`，依次灌入数据库结构和初始数据。
 
 ### 2.1 清理初始化数据
 
