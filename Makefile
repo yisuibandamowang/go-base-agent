@@ -1,4 +1,4 @@
-.PHONY: run build test lint migrate cleanup-db clean
+.PHONY: run build test lint migrate cleanup-db preflight clean
 
 APP_NAME    := ragent
 BUILD_DIR   := build
@@ -36,6 +36,9 @@ migrate:
 
 cleanup-db:
 	bash scripts/cleanup.sh
+
+preflight:
+	bash scripts/preflight.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

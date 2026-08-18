@@ -128,6 +128,14 @@ make cleanup-db
 
 会执行 `resources/database/cleanup_pg.sql`，用于清空企业知识库初始化数据和相关业务表，保留表结构。
 
+### 2.2 运行预检
+
+```bash
+make preflight
+```
+
+会检查 PostgreSQL、Redis、健康接口和管理员登录状态。
+
 ### 3. 配置环境
 
 ```bash
@@ -215,7 +223,7 @@ internal/infra/          # AI provider 与路由实现
 internal/biz/            # 业务代码
 resources/database/      # schema、初始化数据与清理脚本
 resources/prompts/       # Prompt 模板
-scripts/                 # 迁移脚本、验证脚本
+scripts/                 # 迁移、清理、预检与验证脚本
 cmd/ragent/              # 主服务
 cmd/mcp-server/          # MCP Server
 ```
