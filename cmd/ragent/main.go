@@ -142,6 +142,16 @@ func main() {
 		slog.Error("failed to initialize vector store", "err", err)
 		os.Exit(1)
 	}
+	var graphClient *rag.LightRagClient
+	if strings.EqualFold(cfg.RAG.Graph.Type, "lightrag") {
+		graphClient = rag.NewLightRagClient(
+			cfg.RAG.Graph.Lightrag.BaseURL,
+			cfg.RAG.Graph.Lightrag.APIKey,
+			nil,
+			cfg.RAG.Search.Channels.TimeoutMs,
+		)
+		vecStore = rag.NewGraphSyncingVectorStore(vecStore, graphClient)
+	}
 	fileStore, err := knowledgeHandler.NewConfiguredFileStore(cfg.RustFS)
 	if err != nil {
 		slog.Warn("rustfs file store unavailable, fallback to memory", "err", err)
@@ -355,12 +365,6 @@ func main() {
 		searchChannels = append(searchChannels, keywordChannel)
 	}
 	if strings.EqualFold(cfg.RAG.Graph.Type, "lightrag") && cfg.RAG.Search.Channels.Graph.IsEnabledByDefaultWith(false) {
-		graphClient := rag.NewLightRagClient(
-			cfg.RAG.Graph.Lightrag.BaseURL,
-			cfg.RAG.Graph.Lightrag.APIKey,
-			nil,
-			cfg.RAG.Search.Channels.TimeoutMs,
-		)
 		searchChannels = append(searchChannels, rag.NewGraphSearchChannel(searchBackend, graphClient, cfg.RAG.Graph.Lightrag.QueryMode, 8))
 	}
 	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {

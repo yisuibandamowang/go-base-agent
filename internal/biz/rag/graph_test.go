@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	knowledgeModel "go-base-agent/internal/biz/knowledge/model"
@@ -61,6 +62,52 @@ func TestLightRagClientRetrieveByScopeSplitsByCollection(t *testing.T) {
 	}
 	if evidence.Matched[0].Metadata["doc_id"] != "1954071234567890100" {
 		t.Fatalf("unexpected doc id: %+v", evidence.Matched[0])
+	}
+}
+
+func TestLightRagClientInsertTextAndDeleteByDoc(t *testing.T) {
+	var gotInsertBody map[string]any
+	var gotDeleteBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/documents/text":
+			_ = json.NewDecoder(r.Body).Decode(&gotInsertBody)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/documents":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statuses": map[string]any{
+					"ready": []map[string]any{
+						{"id": "remote-1", "file_path": "kb_1954071234567890100.txt"},
+						{"id": "remote-2", "file_path": "kb_other.txt"},
+					},
+				},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/documents/delete_document":
+			_ = json.NewDecoder(r.Body).Decode(&gotDeleteBody)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewLightRagClient(server.URL, "", nil, 0)
+	if err := client.InsertText(context.Background(), "第一段\n\n第二段", "kb_1954071234567890100"); err != nil {
+		t.Fatalf("insert text: %v", err)
+	}
+	if gotInsertBody["text"] != "第一段\n\n第二段" {
+		t.Fatalf("unexpected insert body: %+v", gotInsertBody)
+	}
+	if gotInsertBody["file_source"] != "kb_1954071234567890100" {
+		t.Fatalf("unexpected file source: %+v", gotInsertBody)
+	}
+
+	if err := client.DeleteByDoc(context.Background(), "1954071234567890100"); err != nil {
+		t.Fatalf("delete by doc: %v", err)
+	}
+	docIDs, ok := gotDeleteBody["doc_ids"].([]any)
+	if !ok || len(docIDs) != 1 || !strings.Contains(strings.TrimSpace(docIDs[0].(string)), "remote-1") {
+		t.Fatalf("unexpected delete body: %+v", gotDeleteBody)
 	}
 }
 

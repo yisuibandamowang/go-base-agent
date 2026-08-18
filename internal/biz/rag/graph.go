@@ -57,6 +57,12 @@ type GraphQueryClient interface {
 	RetrieveByScope(ctx context.Context, question, mode string, topK int, collections []string) GraphEvidence
 }
 
+// GraphSyncClient syncs document writes and deletes to LightRAG-compatible graph services.
+type GraphSyncClient interface {
+	InsertText(ctx context.Context, text, fileSource string) error
+	DeleteByDoc(ctx context.Context, docID string) error
+}
+
 // LightRagClient calls the LightRAG HTTP API.
 type LightRagClient struct {
 	baseURL      string
@@ -91,7 +97,7 @@ func (c *LightRagClient) RetrieveByScope(ctx context.Context, question, mode str
 		"mode":                  firstGraphNonEmpty(strings.TrimSpace(mode), "mix"),
 		"only_need_context":     true,
 		"include_references":    true,
-		"include_chunk_content":  true,
+		"include_chunk_content": true,
 	}
 	if topK > 0 {
 		body["top_k"] = topK
@@ -104,13 +110,57 @@ func (c *LightRagClient) RetrieveByScope(ctx context.Context, question, mode str
 	return parseGraphEvidence(payload, collections)
 }
 
+// InsertText writes or refreshes a document in LightRAG.
+func (c *LightRagClient) InsertText(ctx context.Context, text, fileSource string) error {
+	if c == nil || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	body := map[string]any{
+		"text": text,
+	}
+	if strings.TrimSpace(fileSource) != "" {
+		body["file_source"] = strings.TrimSpace(fileSource)
+	}
+	if _, err := c.postJSON(ctx, "/documents/text", body, false); err != nil {
+		slog.Warn("LightRAG document write failed", "file_source", fileSource, "err", err)
+		return err
+	}
+	return nil
+}
+
+// DeleteByDoc deletes all graph data related to one document.
+func (c *LightRagClient) DeleteByDoc(ctx context.Context, docID string) error {
+	if c == nil || strings.TrimSpace(docID) == "" {
+		return nil
+	}
+	if err := c.deleteMatching(ctx, func(filePath string) bool {
+		return strings.Contains(filePath, docID)
+	}, "docId="+strings.TrimSpace(docID)); err != nil {
+		slog.Warn("LightRAG document delete failed", "doc_id", docID, "err", err)
+		return err
+	}
+	return nil
+}
+
 func (c *LightRagClient) postJSON(ctx context.Context, path string, body any, query bool) ([]byte, error) {
+	return c.doJSON(ctx, http.MethodPost, path, body, query)
+}
+
+func (c *LightRagClient) deleteJSON(ctx context.Context, path string, body any) ([]byte, error) {
+	return c.doJSON(ctx, http.MethodDelete, path, body, false)
+}
+
+func (c *LightRagClient) doJSON(ctx context.Context, method, path string, body any, query bool) ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("lightRag client not configured")
 	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal graph request: %w", err)
+	var data []byte
+	var err error
+	if body != nil {
+		data, err = json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal graph request: %w", err)
+		}
 	}
 	reqCtx := ctx
 	if query && c.queryTimeout > 0 {
@@ -118,7 +168,11 @@ func (c *LightRagClient) postJSON(ctx context.Context, path string, body any, qu
 		reqCtx, cancel = context.WithTimeout(ctx, c.queryTimeout)
 		defer cancel()
 	}
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
+	var bodyReader io.Reader
+	if len(data) > 0 {
+		bodyReader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("create graph request: %w", err)
 	}
@@ -133,13 +187,48 @@ func (c *LightRagClient) postJSON(ctx context.Context, path string, body any, qu
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		return nil, fmt.Errorf("graph query HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("graph request HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	data, err = io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read graph response: %w", err)
 	}
 	return data, nil
+}
+
+func (c *LightRagClient) deleteMatching(ctx context.Context, filePathMatch func(string) bool, logKey string) error {
+	if c == nil {
+		return fmt.Errorf("lightRag client not configured")
+	}
+	docsPayload, err := c.doJSON(ctx, http.MethodGet, "/documents", nil, false)
+	if err != nil {
+		return err
+	}
+	var docs struct {
+		Statuses map[string][]struct {
+			ID       string `json:"id"`
+			FilePath string `json:"file_path"`
+		} `json:"statuses"`
+	}
+	if err := json.Unmarshal(docsPayload, &docs); err != nil {
+		return fmt.Errorf("unmarshal graph documents: %w", err)
+	}
+	docIDs := make([]string, 0)
+	for _, group := range docs.Statuses {
+		for _, doc := range group {
+			if strings.TrimSpace(doc.FilePath) != "" && filePathMatch(doc.FilePath) && strings.TrimSpace(doc.ID) != "" {
+				docIDs = append(docIDs, doc.ID)
+			}
+		}
+	}
+	if len(docIDs) == 0 {
+		return nil
+	}
+	body := map[string]any{"doc_ids": docIDs}
+	if _, err := c.deleteJSON(ctx, "/documents/delete_document", body); err != nil {
+		return fmt.Errorf("delete graph documents %s: %w", logKey, err)
+	}
+	return nil
 }
 
 func parseGraphEvidence(payload []byte, collections []string) GraphEvidence {
@@ -229,7 +318,7 @@ type GraphSearchChannel struct {
 	backend   KnowledgeSearchBackend
 	client    GraphQueryClient
 	queryMode string
-	priority   int
+	priority  int
 }
 
 // NewGraphSearchChannel creates a graph search channel.
@@ -245,7 +334,7 @@ func NewGraphSearchChannel(backend KnowledgeSearchBackend, client GraphQueryClie
 		backend:   backend,
 		client:    client,
 		queryMode: queryMode,
-		priority:   priority,
+		priority:  priority,
 	}
 }
 

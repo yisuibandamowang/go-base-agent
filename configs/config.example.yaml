@@ -39,6 +39,7 @@ rag:
     lightrag:
       base-url: http://127.0.0.1:9621
       query-mode: hybrid
+    # type=lightrag 时会启用图谱检索通道，并在向量写入/删除后 best-effort 同步 LightRAG 图谱
     embedding-model: qwen-emb-8b
 
   default:
