@@ -215,6 +215,21 @@ func (h *ConversationHandler) DeleteFeedback(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 
+// RecommendedQuestions POST /api/ragent/conversations/messages/:messageId/recommended-questions
+func (h *ConversationHandler) RecommendedQuestions(c *gin.Context) {
+	user := middleware.GetLoginUser(c)
+	if user == nil {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "未登录"))
+		return
+	}
+	payload, err := h.svc.GenerateRecommendedQuestions(c.Request.Context(), c.Param("messageId"), user.UserID)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(payload))
+}
+
 func paginationParams(c *gin.Context) (int, int) {
 	page, err := strconv.Atoi(c.DefaultQuery("current", c.DefaultQuery("page", "1")))
 	if err != nil || page < 1 {

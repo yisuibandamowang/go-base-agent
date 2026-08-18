@@ -271,6 +271,7 @@ func main() {
 	if err := agentPromptResolver.Refresh(context.Background()); err != nil {
 		slog.Warn("failed to load agent prompts", "err", err)
 	}
+	convSvc.SetRecommendedQuestionGenerator(conversationService.NewLLMRecommendedQuestionGenerator(preferredLLMService, "", agentPromptResolver))
 
 	summaryGenerator := conversationService.NewLLMSummaryGenerator(preferredLLMService, "", agentPromptResolver)
 	dbMemStore := conversationService.NewDBMemoryStore(
@@ -508,6 +509,7 @@ func main() {
 			conv.GET("", convHandler.List)
 			conv.GET("/:conversationId", convHandler.Get)
 			conv.GET("/:conversationId/messages", convHandler.Messages)
+			conv.POST("/messages/:messageId/recommended-questions", convHandler.RecommendedQuestions)
 			conv.PUT("/:conversationId", convHandler.UpdateTitle)
 			conv.PUT("/:conversationId/title", convHandler.UpdateTitle)
 			conv.DELETE("/:conversationId", convHandler.Delete)

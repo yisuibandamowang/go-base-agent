@@ -23,13 +23,14 @@ import (
 
 // ConversationService 会话业务服务。
 type ConversationService struct {
-	convRepo           *repo.ConversationRepo
-	msgRepo            *repo.MessageRepo
-	fbRepo             *repo.FeedbackRepo
-	sumRepo            *repo.ConversationSummaryRepo
-	feedbackMQProducer mq.Producer
-	feedbackMQEnabled  bool
-	titleMaxChars      int
+	convRepo             *repo.ConversationRepo
+	msgRepo              *repo.MessageRepo
+	fbRepo               *repo.FeedbackRepo
+	sumRepo              *repo.ConversationSummaryRepo
+	feedbackMQProducer   mq.Producer
+	feedbackMQEnabled    bool
+	titleMaxChars        int
+	recommendedQuestions recommendedQuestionGenerator
 }
 
 // NewConversationService 创建 ConversationService。
@@ -53,6 +54,11 @@ func (s *ConversationService) SetTitleMaxChars(maxChars int) {
 	if maxChars > 0 {
 		s.titleMaxChars = maxChars
 	}
+}
+
+// SetRecommendedQuestionGenerator 设置推荐追问生成器。
+func (s *ConversationService) SetRecommendedQuestionGenerator(generator recommendedQuestionGenerator) {
+	s.recommendedQuestions = generator
 }
 
 // SetFeedbackMQProducer 设置消息反馈 MQ 生产者。

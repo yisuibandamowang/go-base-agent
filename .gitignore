@@ -24,6 +24,7 @@ vendor/
 
 # Config (本地真实配置，不提交)
 configs/config.yaml
+log-agent/config.yaml
 
 # Test artifacts
 testdata/sse/*.txt

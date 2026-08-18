@@ -44,6 +44,7 @@
 - 知识图谱：`rag.graph.type=lightrag` 时启用 LightRAG 图谱后端，并可通过 `rag.search.channels.graph.enabled` 参与检索召回；同时向量写入、文档删除和知识库清理会 best-effort 同步图谱数据，后台提供 `/admin/kg/graph` 与 `/admin/kg/labels` 用于图谱浏览
 - 模型路由：多 provider 候选、首包探测、故障切换、三态熔断；RAG 主回答优先走云端候选，rewrite、摘要、标题和 MCP 选择/抽参、普通非 RAG 回答优先走本地 Ollama `qwen3.6:latest`，本地不可用再降级云端路由
 - 管理后台：仪表盘、追踪、示例问题、用户管理、审计日志
+- 会话增强：标题生成、摘要压缩和推荐追问生成
 - 系统设置快照：`/rag/settings` 返回引擎、后端选型、检索管线、AI、SSE 超时与上传配置的只读展示
 - MCP：主服务可接入远程 MCP Server，按问题选择相关工具、提取参数并注入工具结果；独立进程暴露知识库、销售、天气、联网搜索等工具能力
 - 联调工具：提供 LangChain4j 兼容测试路由，图片分析在配置 VLM 时调用真实多模态模型，未配置时降级 demo 响应
