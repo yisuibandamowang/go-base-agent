@@ -68,6 +68,7 @@
 ## 架构概览
 
 ```text
+cmd/initializer/main.go # 预检入口
 cmd/ragent/main.go       # 主服务入口
 cmd/mcp-server/main.go   # MCP Server 入口
 
@@ -135,7 +136,7 @@ make cleanup-db
 make preflight
 ```
 
-会检查 PostgreSQL、Redis、健康接口和管理员登录状态。
+会检查 PostgreSQL、Redis、健康接口和管理员登录状态，当前由 `cmd/initializer preflight` 执行。
 
 ### 3. 配置环境
 

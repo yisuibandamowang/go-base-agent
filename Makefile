@@ -11,6 +11,7 @@ run:
 build:
 	$(GO) build $(GOFLAGS) -o $(BUILD_DIR)/$(APP_NAME) ./cmd/ragent
 	$(GO) build $(GOFLAGS) -o $(BUILD_DIR)/mcp-server ./cmd/mcp-server
+	$(GO) build $(GOFLAGS) -o $(BUILD_DIR)/initializer ./cmd/initializer
 
 test:
 	$(GO) test -race -cover ./...
@@ -38,7 +39,7 @@ cleanup-db:
 	bash scripts/cleanup.sh
 
 preflight:
-	bash scripts/preflight.sh
+	$(GO) run ./cmd/initializer preflight
 
 clean:
 	rm -rf $(BUILD_DIR)
