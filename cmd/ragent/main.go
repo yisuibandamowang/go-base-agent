@@ -35,6 +35,7 @@ import (
 	knowledgeRepo "go-base-agent/internal/biz/knowledge/repo"
 	knowledgeService "go-base-agent/internal/biz/knowledge/service"
 	"go-base-agent/internal/biz/rag"
+	ragHandler "go-base-agent/internal/biz/rag/handler"
 	userHandler "go-base-agent/internal/biz/user/handler"
 	userRepoPkg "go-base-agent/internal/biz/user/repo"
 	userService "go-base-agent/internal/biz/user/service"
@@ -415,6 +416,7 @@ func main() {
 	mcpExtractor := rag.NewLLMMcpParameterExtractor(preferredLLMService)
 	mcpSelector := rag.NewLLMMcpToolSelector(preferredLLMService)
 	mcpContextProvider := rag.NewDefaultMcpContextProvider(mcpRegistry, mcpExtractor, mcpSelector)
+	graphH := ragHandler.NewGraphHandler(rag.NewGraphQueryService(graphClient))
 	if len(cfg.RAG.MCP.Servers) > 0 {
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := rag.RegisterRemoteMcpServers(registerCtx, mcpRegistry, toMcpServerSpecs(cfg.RAG.MCP.Servers), &http.Client{Timeout: 10 * time.Second}); err != nil {
@@ -567,6 +569,8 @@ func main() {
 
 		// RAG settings
 		api.GET("/rag/settings", ragSettings(cfg))
+		api.GET("/admin/kg/graph", graphH.Graph)
+		api.GET("/admin/kg/labels", graphH.Labels)
 		registerRagEvalRoute(api, llmRewriter, &ragEvalRetriever{Retriever: enrichedRetriever, mcp: mcpContextProvider}, cfg.App.Eval.Enabled, cfg.RAG.Search.DefaultTopK, intentResolverSvc)
 		demoH := newDemoHandler()
 		if hasVLM {

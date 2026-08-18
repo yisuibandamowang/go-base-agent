@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -158,8 +160,49 @@ func (c *LightRagClient) DeleteByCollection(ctx context.Context, collectionName 
 	return nil
 }
 
+// FetchGraph fetches a graph sub-view from LightRAG.
+func (c *LightRagClient) FetchGraph(ctx context.Context, label string, maxDepth, maxNodes int) ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("lightRag client not configured")
+	}
+	values := url.Values{}
+	values.Set("label", firstGraphNonEmpty(strings.TrimSpace(label), "*"))
+	values.Set("max_depth", strconv.Itoa(maxGraphPositive(maxDepth, 1)))
+	values.Set("max_nodes", strconv.Itoa(maxGraphPositive(maxNodes, 1)))
+	return c.getJSON(ctx, "/graphs", values)
+}
+
+// FetchLabels fetches graph entity labels from LightRAG.
+func (c *LightRagClient) FetchLabels(ctx context.Context, keyword string, limit int) ([]string, error) {
+	if c == nil {
+		return nil, fmt.Errorf("lightRag client not configured")
+	}
+	keyword = strings.TrimSpace(keyword)
+	path := "/graph/label/popular"
+	values := url.Values{}
+	if keyword == "" {
+		values.Set("limit", strconv.Itoa(clampGraphLimit(limit, 300, 1000)))
+	} else {
+		path = "/graph/label/search"
+		values.Set("q", keyword)
+		values.Set("limit", strconv.Itoa(clampGraphLimit(limit, 50, 100)))
+	}
+	payload, err := c.getJSON(ctx, path, values)
+	if err != nil {
+		return nil, err
+	}
+	return parseGraphLabels(payload), nil
+}
+
 func (c *LightRagClient) postJSON(ctx context.Context, path string, body any, query bool) ([]byte, error) {
 	return c.doJSON(ctx, http.MethodPost, path, body, query)
+}
+
+func (c *LightRagClient) getJSON(ctx context.Context, path string, values url.Values) ([]byte, error) {
+	if len(values) > 0 {
+		path += "?" + values.Encode()
+	}
+	return c.doJSON(ctx, http.MethodGet, path, nil, false)
 }
 
 func (c *LightRagClient) deleteJSON(ctx context.Context, path string, body any) ([]byte, error) {
@@ -245,6 +288,57 @@ func (c *LightRagClient) deleteMatching(ctx context.Context, filePathMatch func(
 		return fmt.Errorf("delete graph documents %s: %w", logKey, err)
 	}
 	return nil
+}
+
+func parseGraphLabels(payload []byte) []string {
+	var raw []any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil
+	}
+	labels := make([]string, 0, len(raw))
+	for _, item := range raw {
+		switch v := item.(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				labels = append(labels, strings.TrimSpace(v))
+			}
+		case map[string]any:
+			label := graphLabelValue(v, "label")
+			if label == "" {
+				label = graphLabelValue(v, "name")
+			}
+			if strings.TrimSpace(label) != "" && label != "<nil>" {
+				labels = append(labels, strings.TrimSpace(label))
+			}
+		}
+	}
+	return labels
+}
+
+func graphLabelValue(values map[string]any, key string) string {
+	value, ok := values[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func maxGraphPositive(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func clampGraphLimit(value, fallback, max int) int {
+	v := fallback
+	if value > 0 {
+		v = value
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 func parseGraphEvidence(payload []byte, collections []string) GraphEvidence {
