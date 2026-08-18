@@ -59,17 +59,7 @@ func NewPromptBuilder(externalDir, systemFile string, resolver ...RuntimePromptR
 func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages := make([]chat.Message, 0, len(ctx.History)+2)
 
-	sysPrompt := ""
-	if b.resolver != nil {
-		sysPrompt = strings.TrimSpace(b.resolver.Resolve("SYSTEM_CHAT"))
-	}
-	if sysPrompt == "" {
-		var err error
-		sysPrompt, err = b.loader.Render(b.systemFile, nil)
-		if err != nil {
-			sysPrompt = "你是一个有帮助的AI助手。"
-		}
-	}
+	sysPrompt := b.resolveSystemPrompt(ctx)
 	if sysPrompt != "" {
 		messages = append(messages, chat.NewSystemMessage(sysPrompt))
 	}
@@ -79,6 +69,40 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages = append(messages, chat.NewUserMessage(buildPromptUserContent(ctx)))
 	maxTokens := 1024
 	return chat.Request{Messages: messages, MaxTokens: &maxTokens}
+}
+
+func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
+	if b != nil && b.resolver != nil {
+		for _, slotKey := range systemPromptSlotCandidates(ctx) {
+			if prompt := strings.TrimSpace(b.resolver.Resolve(slotKey)); prompt != "" {
+				return prompt
+			}
+		}
+	}
+	if b == nil || b.loader == nil {
+		return "你是一个有帮助的AI助手。"
+	}
+	sysPrompt, err := b.loader.Render(b.systemFile, nil)
+	if err != nil {
+		return "你是一个有帮助的AI助手。"
+	}
+	return strings.TrimSpace(sysPrompt)
+}
+
+func systemPromptSlotCandidates(ctx PromptContext) []string {
+	hasMcp := strings.TrimSpace(ctx.McpContext) != ""
+	hasKb := strings.TrimSpace(ctx.KbContext) != ""
+	hasCode := strings.TrimSpace(ctx.CodeContext) != ""
+	switch {
+	case hasMcp && (hasKb || hasCode):
+		return []string{"MIXED_ANSWER", "SYSTEM_CHAT"}
+	case hasMcp:
+		return []string{"MCP_ANSWER", "SYSTEM_CHAT"}
+	case hasKb || hasCode:
+		return []string{"KB_ANSWER", "SYSTEM_CHAT"}
+	default:
+		return []string{"SYSTEM_CHAT"}
+	}
 }
 
 func buildPromptUserContent(ctx PromptContext) string {

@@ -9,6 +9,21 @@ import (
 	"go-base-agent/internal/infra/chat"
 )
 
+type stubRuntimePromptResolver struct {
+	prompts map[string]string
+}
+
+func (r *stubRuntimePromptResolver) Resolve(slotKey string) string {
+	if r == nil {
+		return ""
+	}
+	return r.prompts[strings.ToUpper(strings.TrimSpace(slotKey))]
+}
+
+func (r *stubRuntimePromptResolver) Render(slotKey string, data any) (string, error) {
+	return r.Resolve(slotKey), nil
+}
+
 func TestDefaultPromptBuilder_Basic(t *testing.T) {
 	b := NewDefaultPromptBuilder()
 	req := b.Build(PromptContext{Question: "你好"})
@@ -119,6 +134,57 @@ func TestDefaultPromptBuilder_WithMcpContext(t *testing.T) {
 	}
 	if !strings.Contains(content, "查询订单状态") {
 		t.Fatal("question should be in user message")
+	}
+}
+
+func TestDefaultPromptBuilder_SelectsScenePromptSlots(t *testing.T) {
+	resolver := &stubRuntimePromptResolver{prompts: map[string]string{
+		"KB_ANSWER":    "kb scene prompt",
+		"MCP_ANSWER":   "mcp scene prompt",
+		"MIXED_ANSWER": "mixed scene prompt",
+		"SYSTEM_CHAT":  "fallback prompt",
+	}}
+
+	tests := []struct {
+		name       string
+		ctx        PromptContext
+		wantSystem string
+	}{
+		{
+			name: "kb only",
+			ctx: PromptContext{
+				Question:  "什么是RAG",
+				KbContext: "RAG是检索增强生成技术。",
+			},
+			wantSystem: "kb scene prompt",
+		},
+		{
+			name: "mcp only",
+			ctx: PromptContext{
+				Question:   "查订单状态",
+				McpContext: "工具：order_status",
+			},
+			wantSystem: "mcp scene prompt",
+		},
+		{
+			name: "mixed",
+			ctx: PromptContext{
+				Question:   "查订单并结合知识库",
+				KbContext:  "订单手册",
+				McpContext: "工具：order_status",
+			},
+			wantSystem: "mixed scene prompt",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewDefaultPromptBuilder(resolver)
+			req := b.Build(tt.ctx)
+			if req.Messages[0].Content != tt.wantSystem {
+				t.Fatalf("unexpected system prompt: %q", req.Messages[0].Content)
+			}
+		})
 	}
 }
 
