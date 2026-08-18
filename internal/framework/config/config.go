@@ -94,6 +94,7 @@ type MinerUConfig struct {
 }
 
 type RAGConfig struct {
+	Engine       RAGEngineConfig       `mapstructure:"engine"`
 	Vector       RAGVectorConfig       `mapstructure:"vector"`
 	Graph        RAGGraphConfig        `mapstructure:"graph"`
 	Default      RAGDefaultConfig      `mapstructure:"default"`
@@ -118,10 +119,14 @@ type RAGVectorConfig struct {
 	Type string `mapstructure:"type"`
 }
 
+type RAGEngineConfig struct {
+	Type string `mapstructure:"type"`
+}
+
 type RAGGraphConfig struct {
-	Type           string                  `mapstructure:"type"`
-	Lightrag       RAGGraphLightRAGConfig  `mapstructure:"lightrag"`
-	EmbeddingModel string                  `mapstructure:"embedding-model"`
+	Type           string                 `mapstructure:"type"`
+	Lightrag       RAGGraphLightRAGConfig `mapstructure:"lightrag"`
+	EmbeddingModel string                 `mapstructure:"embedding-model"`
 }
 
 type RAGGraphLightRAGConfig struct {
@@ -305,7 +310,7 @@ type RAGSearchConfig struct {
 }
 
 type RAGSearchChannelsConfig struct {
-	TimeoutMs      int                     `mapstructure:"timeout-ms"`
+	TimeoutMs      int                    `mapstructure:"timeout-ms"`
 	VectorGlobal   RAGSearchChannelConfig `mapstructure:"vector-global"`
 	IntentDirected RAGSearchChannelConfig `mapstructure:"intent-directed"`
 	Keyword        RAGSearchChannelConfig `mapstructure:"keyword"`
@@ -587,6 +592,7 @@ func applyDefaults(cfg *Config) {
 	if cfg == nil {
 		return
 	}
+	cfg.RAG.Engine.Type = normalizeOrchestrationMode(cfg.RAG.Engine.Type)
 	ai := &cfg.AI
 	if ai.Selection.FailureThreshold <= 0 {
 		ai.Selection.FailureThreshold = 2
@@ -708,6 +714,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if limit.PollIntervalMs <= 0 {
 		limit.PollIntervalMs = 200
+	}
+}
+
+func normalizeOrchestrationMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "agent":
+		return "agent"
+	default:
+		return "workflow"
 	}
 }
 

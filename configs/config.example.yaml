@@ -28,6 +28,9 @@ milvus:
   uri: ${MILVUS_URI}
 
 rag:
+  engine:
+    type: workflow
+
   vector:
     type: pg
 

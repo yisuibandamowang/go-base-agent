@@ -720,6 +720,37 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	}
 }
 
+func TestRagSettingsUsesConfiguredEngineType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		RAG: config.RAGConfig{
+			Engine: config.RAGEngineConfig{Type: "agent"},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/ragent/rag/settings", nil)
+	ragSettings(cfg)(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Code string         `json:"code"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+
+	engine := resp.Data["engine"].(map[string]any)
+	if engine["type"].(string) != "agent" {
+		t.Fatalf("unexpected engine settings: %#v", engine)
+	}
+}
+
 func TestRagSettingsExposesGraphBackendConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	graphEnabled := true

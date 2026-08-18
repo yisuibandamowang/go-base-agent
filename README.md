@@ -199,6 +199,7 @@ curl http://localhost:9091/metrics
 | `redis` | Redis 连接信息 |
 | `rocketmq` | RocketMQ NameServer 与 producer 配置 |
 | `milvus` | 预留向量库切换配置 |
+| `rag.engine.type` | 执行架构档位，默认 `workflow`；可显式切换为 `agent`，用于区分编排管线与 ReAct 主智能体模式 |
 | `rag.vector.type` | 默认 `pg`，预留 `milvus` 切换 |
 | `rag.graph` | 知识图谱后端配置；`type=none` 时不启用，`type=lightrag` 时注册 LightRAG 客户端与图谱检索通道 |
 | `rag.search` | RAG 多通道检索配置；默认 TopK、通道倍数、融合 RRF 与 rerank 候选上限按 Java `SearchChannelProperties` 补齐默认值 |
@@ -206,7 +207,7 @@ curl http://localhost:9091/metrics
 | `rag.memory` | 会话记忆配置；存在消息历史时会保留最新摘要作为系统消息，并按 Java 版窗口策略截取最近消息；摘要压缩异步执行并用 Redis 锁串行化，配置会校验 `summary-start-turns > history-keep-turns` |
 | `rag.rate-limit.global` | RAG 聊天全局并发队列限流；默认启用并按 Java 使用 `max-concurrent=50`、`max-wait-seconds=20`、`lease-seconds=600`、`poll-interval-ms=200`；超时会返回 `reject + finish + done` SSE |
 | `rag.mcp.servers` | 远程 MCP Server 列表；主服务启动时执行 `initialize` / `tools/list` 并注册远端工具，问答时会先按 tenant/domain 过滤可见工具再选择调用 |
-| `app.intent-tree.init-from-factory` | 默认 `false`；开启后主服务启动时会按 Java `IntentTreeFactory` 初始化默认意图树，已存在的 `intentCode` 会跳过 |
+| `app.intent-tree.init-from-factory` | 默认 `false`；开启后主服务启动时会按 Java `IntentTreeFactory` 初始化默认意图树，已存在的 `intentCode` 会跳过；仅在 `rag.engine.type` 未显式配置时作为兼容兜底 |
 | `ai.stream.message-chunk-size` | SSE 消息分块粒度；主链路会按 rune 数批量发送 `message` 事件 |
 | `ai.providers.*` | Chat / Embedding / Rerank provider 配置 |
 | `sa-token` | JWT 认证配置，包含 token 名称和过期时间 |

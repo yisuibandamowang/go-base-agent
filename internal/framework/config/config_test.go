@@ -120,6 +120,29 @@ ai:
 	}
 }
 
+func TestLoadParsesRAGEngineType(t *testing.T) {
+	yaml := `
+rag:
+  engine:
+    type: agent
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.RAG.Engine.Type != "agent" {
+		t.Fatalf("unexpected rag engine type: %s", cfg.RAG.Engine.Type)
+	}
+}
+
 func TestCandidateIsEnabled(t *testing.T) {
 	t.Run("nil means enabled", func(t *testing.T) {
 		c := AICandidateConfig{}

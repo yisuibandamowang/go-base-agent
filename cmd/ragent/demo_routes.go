@@ -294,10 +294,24 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 }
 
 func resolveEngineType(cfg *config.Config) string {
-	if cfg != nil && cfg.App.IntentTree.InitFromFactory {
-		return "agent"
+	if cfg != nil {
+		if mode := strings.TrimSpace(cfg.RAG.Engine.Type); mode != "" {
+			return normalizeDemoOrchestrationMode(mode)
+		}
+		if cfg.App.IntentTree.InitFromFactory {
+			return "agent"
+		}
 	}
 	return "workflow"
+}
+
+func normalizeDemoOrchestrationMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "agent":
+		return "agent"
+	default:
+		return "workflow"
+	}
 }
 
 func buildRAGBackendSettings(cfg *config.Config) map[string]any {
