@@ -227,12 +227,24 @@ func firstDemoNonEmpty(values ...string) string {
 
 func ragSettingsPayload(cfg *config.Config) map[string]any {
 	return map[string]any{
+		"engine": map[string]any{
+			"type": resolveEngineType(cfg),
+		},
+		"backends": buildRAGBackendSettings(cfg),
 		"upload": map[string]any{
 			"maxFileSize":    demoUploadMaxFileSize,
 			"maxRequestSize": demoUploadMaxRequestSize,
 			"allowedTypes":   []string{".pdf", ".docx", ".md", ".txt", ".html", ".csv"},
 		},
 		"rag": map[string]any{
+			"features": map[string]any{
+				"queryRewrite":  cfg.RAG.QueryRewrite.IsEnabledByDefault(),
+				"rerank":        cfg.RAG.Rerank.IsEnabledByDefault(),
+				"citation":      true,
+				"contextEnrich": cfg.RAG.Context.Enrich.IsEnabledByDefault(),
+				"trace":         cfg.RAG.Trace.IsEnabledByDefault(),
+			},
+			"search": buildRAGSearchSettings(cfg),
 			"vector": map[string]any{
 				"type": cfg.RAG.Vector.Type,
 			},
@@ -276,6 +288,103 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 			"embedding": buildEmbeddingSettings(cfg.AI.Embedding),
 			"rerank":    buildRerankSettings(cfg.AI.Rerank),
 			"vlm":       buildVlmSettings(cfg.AI.VLM),
+		},
+	}
+}
+
+func resolveEngineType(cfg *config.Config) string {
+	if cfg != nil && cfg.App.IntentTree.InitFromFactory {
+		return "agent"
+	}
+	return "workflow"
+}
+
+func buildRAGBackendSettings(cfg *config.Config) map[string]any {
+	if cfg == nil {
+		return map[string]any{
+			"storage": map[string]any{"type": "s3"},
+			"vector":  map[string]any{"type": ""},
+			"keyword": map[string]any{"type": "pg"},
+			"graph":   map[string]any{"type": "none"},
+		}
+	}
+	return map[string]any{
+		"storage": map[string]any{
+			"type":        "s3",
+			"kbBucket":    cfg.RustFS.KBBucket,
+			"assetBucket": cfg.RustFS.AssetBucket,
+			"endpoint":    cfg.RustFS.URL,
+			"publicUrl":   cfg.RustFS.URL,
+			"region":      cfg.RustFS.Region,
+		},
+		"vector": map[string]any{
+			"type": cfg.RAG.Vector.Type,
+		},
+		"keyword": map[string]any{
+			"type":           "pg",
+			"uris":           "",
+			"index":          "",
+			"analyzer":       "",
+			"searchAnalyzer": "",
+		},
+		"graph": map[string]any{
+			"type":           "none",
+			"baseUrl":        "",
+			"queryMode":      "",
+			"embeddingModel": "",
+		},
+	}
+}
+
+func buildRAGSearchSettings(cfg *config.Config) map[string]any {
+	if cfg == nil {
+		return map[string]any{}
+	}
+	vectorGlobal := cfg.RAG.Search.Channels.VectorGlobal
+	intentDirected := cfg.RAG.Search.Channels.IntentDirected
+	keyword := cfg.RAG.Search.Channels.Keyword
+	webSearch := cfg.RAG.Search.Channels.WebSearch
+	recallBudget := vectorGlobal.CandidateBudget
+	if recallBudget <= 0 {
+		recallBudget = cfg.RAG.Search.DefaultTopK * vectorGlobal.TopKMultiplier
+	}
+	if recallBudget <= 0 {
+		recallBudget = cfg.RAG.Search.DefaultTopK
+	}
+	return map[string]any{
+		"defaultTopK":  cfg.RAG.Search.DefaultTopK,
+		"recallBudget": recallBudget,
+		"scope": map[string]any{
+			"minIntentScore":      intentDirected.MinIntentScore,
+			"confidenceThreshold": vectorGlobal.ConfidenceThreshold,
+			"supplementRatio":     vectorGlobal.SingleIntentSupplementThreshold,
+		},
+		"channels": map[string]any{
+			"timeoutMs": 0,
+			"vector": map[string]any{
+				"enabled": vectorGlobal.IsEnabledByDefault(),
+				"weight":  1.0,
+			},
+			"keyword": map[string]any{
+				"enabled": keyword.IsEnabledByDefault(),
+				"weight":  1.0,
+			},
+			"graph": map[string]any{
+				"enabled": false,
+				"weight":  0.0,
+			},
+			"webSearch": map[string]any{
+				"enabled":          webSearch.Enabled,
+				"weight":           1.0,
+				"count":            webSearch.Count,
+				"timeoutSeconds":   webSearch.TimeoutSeconds,
+				"apiKeyConfigured": strings.TrimSpace(webSearch.APIKey) != "",
+			},
+		},
+		"fusion": map[string]any{
+			"strategy":             cfg.RAG.Search.Fusion.Strategy,
+			"rrfK":                 cfg.RAG.Search.Fusion.RRFK,
+			"rerankCandidateLimit": cfg.RAG.Search.Fusion.RerankCandidateLimit,
 		},
 	}
 }

@@ -488,6 +488,10 @@ func TestToMcpServerSpecsCarriesDomains(t *testing.T) {
 func TestRagSettingsExposesFullConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	queryRewriteEnabled := true
+	rerankEnabled := true
+	contextEnrichEnabled := true
+	traceEnabled := true
+	webSearchEnabled := true
 	rateLimitEnabled := true
 	codeRepoPath := "/Users/work_project/360/member"
 
@@ -499,6 +503,9 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				Dimension:      1536,
 				MetricType:     "COSINE",
 			},
+			Context: config.RAGContextConfig{
+				Enrich: config.RAGContextEnrichConfig{Enabled: &contextEnrichEnabled},
+			},
 			Code: config.RAGCodeConfig{
 				RepoPath: codeRepoPath,
 			},
@@ -507,6 +514,7 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				MaxHistoryMessages: 4,
 				MaxHistoryChars:    500,
 			},
+			Rerank: config.RAGRerankConfig{Enabled: &rerankEnabled},
 			RateLimit: config.RAGRateLimitConfig{
 				Global: config.RAGRateLimitGlobalConfig{
 					Enabled:        &rateLimitEnabled,
@@ -524,6 +532,40 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				SummaryMaxChars:   200,
 				TitleMaxLength:    30,
 			},
+			Search: config.RAGSearchConfig{
+				DefaultTopK: 8,
+				Channels: config.RAGSearchChannelsConfig{
+					VectorGlobal: config.RAGSearchChannelConfig{
+						Enabled:                         &queryRewriteEnabled,
+						ConfidenceThreshold:             0.7,
+						SingleIntentSupplementThreshold: 0.85,
+						CandidateBudget:                 88,
+						TopKMultiplier:                  4,
+					},
+					IntentDirected: config.RAGSearchChannelConfig{
+						Enabled:        &queryRewriteEnabled,
+						MinIntentScore: 0.45,
+						TopKMultiplier: 3,
+					},
+					Keyword: config.RAGSearchChannelConfig{
+						Enabled:        &queryRewriteEnabled,
+						Mode:           "both",
+						TopKMultiplier: 2,
+					},
+					WebSearch: config.RAGWebSearchConfig{
+						Enabled:        webSearchEnabled,
+						APIKey:         "ydc-secret",
+						Count:          6,
+						TimeoutSeconds: 11,
+					},
+				},
+				Fusion: config.RAGSearchFusionConfig{
+					Strategy:             "rrf",
+					RRFK:                 61,
+					RerankCandidateLimit: 40,
+				},
+			},
+			Trace: config.RAGTraceConfig{Enabled: &traceEnabled},
 		},
 		AI: config.AIConfig{
 			Providers: config.AIProvidersConfig{
@@ -584,6 +626,12 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				DefaultModel: "qwen-vl",
 			},
 		},
+		RustFS: config.RustFSConfig{
+			URL:         "http://localhost:9000",
+			Region:      "us-east-1",
+			KBBucket:    "ragent-kb",
+			AssetBucket: "ragent-assets",
+		},
 	}
 
 	w := httptest.NewRecorder()
@@ -610,9 +658,43 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	if upload["maxRequestSize"].(float64) != 100<<20 {
 		t.Fatalf("unexpected maxRequestSize: %#v", upload["maxRequestSize"])
 	}
+	engine := resp.Data["engine"].(map[string]any)
+	if engine["type"].(string) != "workflow" {
+		t.Fatalf("unexpected engine settings: %#v", engine)
+	}
+	backends := resp.Data["backends"].(map[string]any)
+	if backends["storage"].(map[string]any)["type"].(string) != "s3" {
+		t.Fatalf("unexpected storage backend: %#v", backends["storage"])
+	}
+	if backends["vector"].(map[string]any)["type"].(string) != "pg" {
+		t.Fatalf("unexpected vector backend: %#v", backends["vector"])
+	}
+	if backends["keyword"].(map[string]any)["type"].(string) != "pg" {
+		t.Fatalf("unexpected keyword backend: %#v", backends["keyword"])
+	}
+	if backends["graph"].(map[string]any)["type"].(string) != "none" {
+		t.Fatalf("unexpected graph backend: %#v", backends["graph"])
+	}
 	ragCfg := resp.Data["rag"].(map[string]any)
 	if ragCfg["default"].(map[string]any)["dimension"].(float64) != 1536 {
 		t.Fatalf("unexpected rag default dimension: %#v", ragCfg["default"])
+	}
+	if ragCfg["features"].(map[string]any)["trace"].(bool) != true {
+		t.Fatalf("unexpected feature settings: %#v", ragCfg["features"])
+	}
+	search := ragCfg["search"].(map[string]any)
+	if search["recallBudget"].(float64) != 88 {
+		t.Fatalf("unexpected search recall budget: %#v", search)
+	}
+	channels := search["channels"].(map[string]any)
+	if _, ok := channels["timeoutMs"]; !ok {
+		t.Fatalf("missing search channel timeout: %#v", channels)
+	}
+	if channels["webSearch"].(map[string]any)["apiKeyConfigured"].(bool) != true {
+		t.Fatalf("unexpected web search settings: %#v", channels["webSearch"])
+	}
+	if search["fusion"].(map[string]any)["rrfK"].(float64) != 61 {
+		t.Fatalf("unexpected fusion settings: %#v", search["fusion"])
 	}
 	if ragCfg["memory"].(map[string]any)["titleMaxLength"].(float64) != 30 {
 		t.Fatalf("unexpected memory settings: %#v", ragCfg["memory"])
