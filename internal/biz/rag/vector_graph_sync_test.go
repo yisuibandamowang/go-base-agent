@@ -46,6 +46,23 @@ func TestGraphSyncingVectorStoreDeletesDocumentVectorsAfterDelegateSuccess(t *te
 	}
 }
 
+func TestGraphSyncingVectorStoreDropsVectorSpaceAndSyncsGraphCollection(t *testing.T) {
+	delegate := &recordingGraphSyncVectorStore{}
+	syncClient := &recordingGraphSyncClient{}
+	store := NewGraphSyncingVectorStore(delegate, syncClient)
+
+	err := store.DropVectorSpace(context.Background(), "kb")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !delegate.dropVectorSpaceCalled {
+		t.Fatal("expected delegate drop to be called")
+	}
+	if syncClient.deletedCollection != "kb" {
+		t.Fatalf("unexpected deleted collection: %q", syncClient.deletedCollection)
+	}
+}
+
 func TestGraphSyncingVectorStoreSkipsSyncWhenDelegateFails(t *testing.T) {
 	delegate := &recordingGraphSyncVectorStore{indexErr: errors.New("delegate failed")}
 	syncClient := &recordingGraphSyncClient{}
@@ -61,10 +78,11 @@ func TestGraphSyncingVectorStoreSkipsSyncWhenDelegateFails(t *testing.T) {
 }
 
 type recordingGraphSyncVectorStore struct {
-	indexCalled          bool
-	deleteDocumentCalled bool
-	indexErr             error
-	deleteErr            error
+	indexCalled           bool
+	deleteDocumentCalled  bool
+	dropVectorSpaceCalled bool
+	indexErr              error
+	deleteErr             error
 }
 
 func (r *recordingGraphSyncVectorStore) IndexDocumentChunks(context.Context, string, string, []VectorChunk) error {
@@ -102,15 +120,17 @@ func (r *recordingGraphSyncVectorStore) VectorSpaceExists(context.Context, Vecto
 }
 
 func (r *recordingGraphSyncVectorStore) DropVectorSpace(context.Context, string) error {
+	r.dropVectorSpaceCalled = true
 	return nil
 }
 
 type recordingGraphSyncClient struct {
-	insertText   string
-	fileSource   string
-	deletedDocID string
-	insertErr    error
-	deleteErr    error
+	insertText        string
+	fileSource        string
+	deletedDocID      string
+	deletedCollection string
+	insertErr         error
+	deleteErr         error
 }
 
 func (r *recordingGraphSyncClient) InsertText(_ context.Context, text, fileSource string) error {
@@ -121,6 +141,11 @@ func (r *recordingGraphSyncClient) InsertText(_ context.Context, text, fileSourc
 
 func (r *recordingGraphSyncClient) DeleteByDoc(_ context.Context, docID string) error {
 	r.deletedDocID = docID
+	return r.deleteErr
+}
+
+func (r *recordingGraphSyncClient) DeleteByCollection(_ context.Context, collectionName string) error {
+	r.deletedCollection = collectionName
 	return r.deleteErr
 }
 

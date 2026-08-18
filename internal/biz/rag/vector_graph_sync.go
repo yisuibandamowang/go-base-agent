@@ -105,7 +105,15 @@ func (s *GraphSyncingVectorStore) DropVectorSpace(ctx context.Context, collectio
 	if s == nil || s.delegate == nil {
 		return fmt.Errorf("vector store is nil")
 	}
-	return s.delegate.DropVectorSpace(ctx, collectionName)
+	if err := s.delegate.DropVectorSpace(ctx, collectionName); err != nil {
+		return err
+	}
+	if s.sync != nil {
+		if err := s.sync.DeleteByCollection(ctx, collectionName); err != nil {
+			slog.Warn("graph sync collection delete skipped", "collection", collectionName, "err", err)
+		}
+	}
+	return nil
 }
 
 func concatVectorChunkText(chunks []VectorChunk) string {

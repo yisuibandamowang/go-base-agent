@@ -61,6 +61,7 @@ type GraphQueryClient interface {
 type GraphSyncClient interface {
 	InsertText(ctx context.Context, text, fileSource string) error
 	DeleteByDoc(ctx context.Context, docID string) error
+	DeleteByCollection(ctx context.Context, collectionName string) error
 }
 
 // LightRagClient calls the LightRAG HTTP API.
@@ -137,6 +138,21 @@ func (c *LightRagClient) DeleteByDoc(ctx context.Context, docID string) error {
 		return strings.Contains(filePath, docID)
 	}, "docId="+strings.TrimSpace(docID)); err != nil {
 		slog.Warn("LightRAG document delete failed", "doc_id", docID, "err", err)
+		return err
+	}
+	return nil
+}
+
+// DeleteByCollection deletes all graph data related to one collection.
+func (c *LightRagClient) DeleteByCollection(ctx context.Context, collectionName string) error {
+	if c == nil || strings.TrimSpace(collectionName) == "" {
+		return nil
+	}
+	if err := c.deleteMatching(ctx, func(filePath string) bool {
+		source := ParseGraphFileSource(filePath)
+		return source != nil && strings.EqualFold(source.CollectionName, strings.TrimSpace(collectionName))
+	}, "collection="+strings.TrimSpace(collectionName)); err != nil {
+		slog.Warn("LightRAG collection delete failed", "collection", collectionName, "err", err)
 		return err
 	}
 	return nil

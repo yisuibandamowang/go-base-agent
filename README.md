@@ -41,7 +41,7 @@
 - 知识库管理：创建、查询、更新、删除知识库
 - 文档入库：上传、解析、分块、向量化、入库
 - RAG 问答：SSE 流式输出、查询改写、多问句拆分、术语归一化、意图路由、多通道融合检索、重排序、记忆压缩，并按 KB / MCP / 混合场景优先读取对应提示词槽位；KB 场景会额外注入引用规则提示
-- 知识图谱：`rag.graph.type=lightrag` 时启用 LightRAG 图谱后端，并可通过 `rag.search.channels.graph.enabled` 参与检索召回；同时向量写入和删除会 best-effort 同步图谱数据
+- 知识图谱：`rag.graph.type=lightrag` 时启用 LightRAG 图谱后端，并可通过 `rag.search.channels.graph.enabled` 参与检索召回；同时向量写入、文档删除和知识库清理会 best-effort 同步图谱数据
 - 模型路由：多 provider 候选、首包探测、故障切换、三态熔断；RAG 主回答优先走云端候选，rewrite、摘要、标题和 MCP 选择/抽参、普通非 RAG 回答优先走本地 Ollama `qwen3.6:latest`，本地不可用再降级云端路由
 - 管理后台：仪表盘、追踪、示例问题、用户管理、审计日志
 - 系统设置快照：`/rag/settings` 返回引擎、后端选型、检索管线、AI、SSE 超时与上传配置的只读展示
@@ -201,7 +201,7 @@ curl http://localhost:9091/metrics
 | `milvus` | 预留向量库切换配置 |
 | `rag.engine.type` | 执行架构档位，默认 `workflow`；可显式切换为 `agent`，用于区分编排管线与 ReAct 主智能体模式 |
 | `rag.vector.type` | 默认 `pg`，预留 `milvus` 切换 |
-| `rag.graph` | 知识图谱后端配置；`type=none` 时不启用，`type=lightrag` 时注册 LightRAG 客户端、图谱检索通道，并在向量写入/删除时 best-effort 同步图谱 |
+| `rag.graph` | 知识图谱后端配置；`type=none` 时不启用，`type=lightrag` 时注册 LightRAG 客户端、图谱检索通道，并在向量写入/文档删除/知识库清理时 best-effort 同步图谱 |
 | `rag.search` | RAG 多通道检索配置；默认 TopK、通道倍数、融合 RRF 与 rerank 候选上限按 Java `SearchChannelProperties` 补齐默认值 |
 | `rag.query-rewrite` | 查询改写配置；主链路会先按 `t_query_term_mapping` 做启用规则的术语归一化，启用时走 LLM 改写+拆分，关闭时走规则拆分 |
 | `rag.memory` | 会话记忆配置；存在消息历史时会保留最新摘要作为系统消息，并按 Java 版窗口策略截取最近消息；摘要压缩异步执行并用 Redis 锁串行化，配置会校验 `summary-start-turns > history-keep-turns` |

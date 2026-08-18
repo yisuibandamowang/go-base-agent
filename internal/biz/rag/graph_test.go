@@ -111,6 +111,38 @@ func TestLightRagClientInsertTextAndDeleteByDoc(t *testing.T) {
 	}
 }
 
+func TestLightRagClientDeleteByCollectionMatchesExactCollection(t *testing.T) {
+	var gotDeleteBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/documents":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statuses": map[string]any{
+					"ready": []map[string]any{
+						{"id": "remote-kb", "file_path": "kb_1954071234567890100.txt"},
+						{"id": "remote-kb-hr", "file_path": "kb_hr_1954071234567890200.txt"},
+					},
+				},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/documents/delete_document":
+			_ = json.NewDecoder(r.Body).Decode(&gotDeleteBody)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewLightRagClient(server.URL, "", nil, 0)
+	if err := client.DeleteByCollection(context.Background(), "kb"); err != nil {
+		t.Fatalf("delete by collection: %v", err)
+	}
+	docIDs, ok := gotDeleteBody["doc_ids"].([]any)
+	if !ok || len(docIDs) != 1 || docIDs[0] != "remote-kb" {
+		t.Fatalf("unexpected delete body: %+v", gotDeleteBody)
+	}
+}
+
 func TestGraphSearchChannelBoostsTopKAndUsesCollections(t *testing.T) {
 	backend := &recordingGraphBackend{
 		kbs: []knowledgeModel.KnowledgeBase{
