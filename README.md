@@ -69,7 +69,7 @@
 ## 架构概览
 
 ```text
-cmd/initializer/main.go # 预检入口
+cmd/initializer/main.go # 预检/清理入口
 cmd/ragent/main.go       # 主服务入口
 cmd/mcp-server/main.go   # MCP Server 入口
 
@@ -129,7 +129,7 @@ make migrate
 make cleanup-db
 ```
 
-会执行 `resources/database/cleanup_pg.sql`，用于清空企业知识库初始化数据和相关业务表，保留表结构。
+会执行 `cmd/initializer cleanup`，用于清空企业知识库初始化数据和相关业务表，保留表结构。
 
 ### 2.2 运行预检
 

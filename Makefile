@@ -36,7 +36,7 @@ migrate:
 	bash scripts/migrate.sh
 
 cleanup-db:
-	bash scripts/cleanup.sh
+	$(GO) run ./cmd/initializer cleanup --confirm RESET-ENTERPRISE-KNOWLEDGE-BASE
 
 preflight:
 	$(GO) run ./cmd/initializer preflight
