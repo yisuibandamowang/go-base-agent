@@ -67,6 +67,20 @@ func (r *AgentRepo) FindBuiltinProfile(ctx context.Context) (*agentModel.AgentPr
 	return &item, nil
 }
 
+// FindActiveProfile 查询激活智能体。
+func (r *AgentRepo) FindActiveProfile(ctx context.Context) (*agentModel.AgentProfile, error) {
+	var item agentModel.AgentProfile
+	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Where("active = 1").Order("create_time ASC, id ASC").First(&item).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find active agent profile: %w", err)
+	}
+	return &item, nil
+}
+
 // ProfileNameExists 判断名称是否已存在。
 func (r *AgentRepo) ProfileNameExists(ctx context.Context, name, excludeID string) (bool, error) {
 	query := r.db.WithContext(ctx).Model(&agentModel.AgentProfile{}).Scopes(db.NotDeletedScope()).

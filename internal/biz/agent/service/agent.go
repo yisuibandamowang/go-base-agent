@@ -18,6 +18,7 @@ type AgentService struct {
 	repo          *agentRepo.AgentRepo
 	mode          string
 	auditRecorder *auditService.BizChangeLogService
+	prompts       *PromptResolver
 }
 
 // NewAgentService 创建 AgentService。
@@ -31,6 +32,11 @@ func NewAgentService(repo *agentRepo.AgentRepo, mode string) *AgentService {
 // SetAuditRecorder 设置审计记录器。
 func (s *AgentService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
 	s.auditRecorder = recorder
+}
+
+// SetPromptResolver 设置运行时提示词解析器。
+func (s *AgentService) SetPromptResolver(resolver *PromptResolver) {
+	s.prompts = resolver
 }
 
 // List 查询全部智能体。
@@ -109,6 +115,7 @@ func (s *AgentService) Create(ctx context.Context, req agentDto.CreateAgentProfi
 	if err := s.repo.CreateProfile(ctx, profile); err != nil {
 		return "", err
 	}
+	s.refreshPromptResolver(ctx)
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:       auditService.BizTypeAgentProfile,
 		BizID:         profile.ID,
@@ -149,6 +156,7 @@ func (s *AgentService) Update(ctx context.Context, id string, req agentDto.Updat
 	}); err != nil {
 		return nil, err
 	}
+	s.refreshPromptResolver(ctx)
 	after, err := s.mustLoad(ctx, id)
 	if err != nil {
 		return nil, err
@@ -194,6 +202,7 @@ func (s *AgentService) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	s.refreshPromptResolver(ctx)
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:        auditService.BizTypeAgentProfile,
 		BizID:          id,
@@ -227,6 +236,7 @@ func (s *AgentService) Activate(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	s.refreshPromptResolver(ctx)
 	after, err := s.mustLoad(ctx, id)
 	if err != nil {
 		return err
@@ -310,6 +320,7 @@ func (s *AgentService) SavePrompt(ctx context.Context, id, slotKey string, req a
 			return err
 		}
 	}
+	s.refreshPromptResolver(ctx)
 	s.recordAudit(ctx, auditService.RecordReq{
 		BizType:       auditService.BizTypeAgentProfile,
 		BizID:         id,
@@ -385,6 +396,15 @@ func (s *AgentService) recordAudit(ctx context.Context, req auditService.RecordR
 	}
 	if err := s.auditRecorder.Record(ctx, req); err != nil {
 		slog.Warn("audit record failed", "err", err, "biz_type", req.BizType, "biz_id", req.BizID)
+	}
+}
+
+func (s *AgentService) refreshPromptResolver(ctx context.Context) {
+	if s == nil || s.prompts == nil {
+		return
+	}
+	if err := s.prompts.Refresh(ctx); err != nil {
+		slog.Warn("refresh agent prompt resolver failed", "err", err)
 	}
 }
 

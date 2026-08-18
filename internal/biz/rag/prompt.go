@@ -23,23 +23,35 @@ type PromptBuilder interface {
 	Build(ctx PromptContext) chat.Request
 }
 
+// RuntimePromptResolver resolves runtime prompt templates from mutable sources such as the agent tables.
+type RuntimePromptResolver interface {
+	Resolve(slotKey string) string
+	Render(slotKey string, data any) (string, error)
+}
+
 // DefaultPromptBuilder constructs prompts using a template loader.
 type DefaultPromptBuilder struct {
 	loader     *PromptLoader
 	systemFile string // e.g. "default_system.txt"
+	resolver   RuntimePromptResolver
 }
 
 // NewDefaultPromptBuilder creates a builder using embedded prompt templates.
-func NewDefaultPromptBuilder() *DefaultPromptBuilder {
-	return NewPromptBuilder("", "default_system.txt")
+func NewDefaultPromptBuilder(resolver ...RuntimePromptResolver) *DefaultPromptBuilder {
+	return NewPromptBuilder("", "default_system.txt", resolver...)
 }
 
 // NewPromptBuilder creates a builder with an optional external template directory.
 // If externalDir is empty, embedded prompts are used.
-func NewPromptBuilder(externalDir, systemFile string) *DefaultPromptBuilder {
+func NewPromptBuilder(externalDir, systemFile string, resolver ...RuntimePromptResolver) *DefaultPromptBuilder {
+	var promptResolver RuntimePromptResolver
+	if len(resolver) > 0 {
+		promptResolver = resolver[0]
+	}
 	return &DefaultPromptBuilder{
 		loader:     NewPromptLoader(externalDir),
 		systemFile: systemFile,
+		resolver:   promptResolver,
 	}
 }
 
@@ -47,9 +59,16 @@ func NewPromptBuilder(externalDir, systemFile string) *DefaultPromptBuilder {
 func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages := make([]chat.Message, 0, len(ctx.History)+2)
 
-	sysPrompt, err := b.loader.Render(b.systemFile, nil)
-	if err != nil {
-		sysPrompt = "你是一个有帮助的AI助手。"
+	sysPrompt := ""
+	if b.resolver != nil {
+		sysPrompt = strings.TrimSpace(b.resolver.Resolve("SYSTEM_CHAT"))
+	}
+	if sysPrompt == "" {
+		var err error
+		sysPrompt, err = b.loader.Render(b.systemFile, nil)
+		if err != nil {
+			sysPrompt = "你是一个有帮助的AI助手。"
+		}
 	}
 	if sysPrompt != "" {
 		messages = append(messages, chat.NewSystemMessage(sysPrompt))

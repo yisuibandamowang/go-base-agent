@@ -16,13 +16,19 @@ const conversationSummaryPromptFile = "conversation_summary.txt"
 type LLMSummaryGenerator struct {
 	llm    chat.LLMService
 	loader *rag.PromptLoader
+	prompt rag.RuntimePromptResolver
 }
 
 // NewLLMSummaryGenerator 创建会话摘要生成器。
-func NewLLMSummaryGenerator(llm chat.LLMService, externalPromptDir string) *LLMSummaryGenerator {
+func NewLLMSummaryGenerator(llm chat.LLMService, externalPromptDir string, promptResolver ...rag.RuntimePromptResolver) *LLMSummaryGenerator {
+	var resolver rag.RuntimePromptResolver
+	if len(promptResolver) > 0 {
+		resolver = promptResolver[0]
+	}
 	return &LLMSummaryGenerator{
 		llm:    llm,
 		loader: rag.NewPromptLoader(externalPromptDir),
+		prompt: resolver,
 	}
 }
 
@@ -35,11 +41,7 @@ func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Messa
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
 	}
 
-	prompt, err := g.loader.Render(conversationSummaryPromptFile, map[string]any{
-		"SummaryMaxChars": maxChars,
-		"PreviousSummary": previousSummary,
-		"History":         renderConversationHistory(history),
-	})
+	prompt, err := g.renderPrompt(maxChars, previousSummary, history)
 	if err != nil {
 		slog.Warn("render conversation summary prompt failed", "err", err)
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
@@ -60,6 +62,23 @@ func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Messa
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
 	}
 	return summary, nil
+}
+
+func (g *LLMSummaryGenerator) renderPrompt(maxChars int, previousSummary string, history []chat.Message) (string, error) {
+	if g.prompt != nil {
+		if rendered, err := g.prompt.Render("CONVERSATION_SUMMARY", map[string]any{
+			"SummaryMaxChars": maxChars,
+			"PreviousSummary": previousSummary,
+			"History":         renderConversationHistory(history),
+		}); err == nil && strings.TrimSpace(rendered) != "" {
+			return rendered, nil
+		}
+	}
+	return g.loader.Render(conversationSummaryPromptFile, map[string]any{
+		"SummaryMaxChars": maxChars,
+		"PreviousSummary": previousSummary,
+		"History":         renderConversationHistory(history),
+	})
 }
 
 func renderConversationHistory(history []chat.Message) string {

@@ -255,7 +255,13 @@ func main() {
 		}
 	}
 
-	summaryGenerator := conversationService.NewLLMSummaryGenerator(preferredLLMService, "")
+	agentRepoObj := agentRepo.NewAgentRepo(gormDB)
+	agentPromptResolver := agentService.NewPromptResolver(agentRepoObj, resolveEngineType(cfg))
+	if err := agentPromptResolver.Refresh(context.Background()); err != nil {
+		slog.Warn("failed to load agent prompts", "err", err)
+	}
+
+	summaryGenerator := conversationService.NewLLMSummaryGenerator(preferredLLMService, "", agentPromptResolver)
 	dbMemStore := conversationService.NewDBMemoryStore(
 		gormDB,
 		convRepo,
@@ -312,8 +318,9 @@ func main() {
 	adminSvc.SetAuditRecorder(auditSvc)
 	adminH := adminHandler.NewAdminHandler(adminSvc)
 
-	agentSvc := agentService.NewAgentService(agentRepo.NewAgentRepo(gormDB), resolveEngineType(cfg))
+	agentSvc := agentService.NewAgentService(agentRepoObj, resolveEngineType(cfg))
 	agentSvc.SetAuditRecorder(auditSvc)
+	agentSvc.SetPromptResolver(agentPromptResolver)
 	agentH := agentHandler.NewAgentHandler(agentSvc)
 
 	auditH := auditHandler.NewAuditHandler(auditSvc)
@@ -413,7 +420,7 @@ func main() {
 	}
 
 	ragPipeline := rag.NewPipeline(llmService,
-		rag.NewDefaultPromptBuilder(),
+		rag.NewDefaultPromptBuilder(agentPromptResolver),
 		llmRewriter,
 		enrichedRetriever,
 		memSvc,
