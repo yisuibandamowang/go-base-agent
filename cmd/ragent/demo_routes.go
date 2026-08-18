@@ -252,6 +252,7 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 				"collectionName": cfg.RAG.Default.CollectionName,
 				"dimension":      cfg.RAG.Default.Dimension,
 				"metricType":     cfg.RAG.Default.MetricType,
+				"sseTimeoutMs":   cfg.RAG.Default.SSETimeoutMs,
 			},
 			"code": map[string]any{
 				"repoPath": strings.TrimSpace(cfg.RAG.Code.RepoPath),

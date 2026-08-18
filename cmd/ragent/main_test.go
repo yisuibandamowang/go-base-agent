@@ -503,6 +503,7 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				CollectionName: "rag_default_store",
 				Dimension:      1536,
 				MetricType:     "COSINE",
+				SSETimeoutMs:   300000,
 			},
 			Context: config.RAGContextConfig{
 				Enrich: config.RAGContextEnrichConfig{Enabled: &contextEnrichEnabled},
@@ -679,6 +680,9 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	ragCfg := resp.Data["rag"].(map[string]any)
 	if ragCfg["default"].(map[string]any)["dimension"].(float64) != 1536 {
 		t.Fatalf("unexpected rag default dimension: %#v", ragCfg["default"])
+	}
+	if ragCfg["default"].(map[string]any)["sseTimeoutMs"].(float64) != 300000 {
+		t.Fatalf("unexpected rag default sse timeout: %#v", ragCfg["default"])
 	}
 	if ragCfg["features"].(map[string]any)["trace"].(bool) != true {
 		t.Fatalf("unexpected feature settings: %#v", ragCfg["features"])
