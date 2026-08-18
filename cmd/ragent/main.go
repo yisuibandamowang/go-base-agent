@@ -396,7 +396,9 @@ func main() {
 			cfg.RAG.Search.Fusion.RerankCandidateLimit,
 		))
 	}
-	multiRetriever := rag.NewMultiChannelRetriever(rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors))
+	multiEngine := rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors)
+	multiEngine.SetChannelTimeout(time.Duration(cfg.RAG.Search.Channels.TimeoutMs) * time.Millisecond)
+	multiRetriever := rag.NewMultiChannelRetriever(multiEngine)
 	retriever := maybeWrapRerankRetriever(multiRetriever, rerankService, cfg.RAG.Rerank.IsEnabledByDefault())
 	enrichedRetriever := maybeWrapMetadataEnrichingRetriever(
 		retriever,

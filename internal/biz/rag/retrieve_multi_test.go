@@ -267,3 +267,38 @@ func TestMultiChannelRetrievalEngine_RunsChannelsConcurrently(t *testing.T) {
 		t.Fatalf("expected concurrent retrieval to finish quickly, got %s", elapsed)
 	}
 }
+
+func TestMultiChannelRetrievalEngine_EnforcesChannelTimeout(t *testing.T) {
+	channels := []SearchChannel{
+		&testChannel{
+			name:     "fast",
+			priority: 1,
+			enabled:  true,
+			typ:      ChannelKeyword,
+			chunks:   []RetrievedChunk{{ID: "fast", Text: "fast"}},
+		},
+		&testChannel{
+			name:     "slow",
+			priority: 2,
+			enabled:  true,
+			typ:      ChannelGraph,
+			chunks:   []RetrievedChunk{{ID: "slow", Text: "slow"}},
+			delay:    300 * time.Millisecond,
+		},
+	}
+
+	engine := NewMultiChannelRetrievalEngine(channels, nil)
+	engine.SetChannelTimeout(80 * time.Millisecond)
+
+	start := time.Now()
+	chunks, err := engine.Retrieve(context.Background(), SearchContext{OriginalQuestion: "test", TopK: 10})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].ID != "fast" {
+		t.Fatalf("expected timeout to drop slow channel only, got %+v", chunks)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("expected timeout to finish quickly, got %s", elapsed)
+	}
+}

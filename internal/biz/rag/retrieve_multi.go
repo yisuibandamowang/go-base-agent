@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 )
 
@@ -65,6 +64,7 @@ type SearchResultPostProcessor interface {
 type MultiChannelRetrievalEngine struct {
 	channels       []SearchChannel
 	postProcessors []SearchResultPostProcessor
+	channelTimeout time.Duration
 }
 
 // MultiChannelRetriever adapts MultiChannelRetrievalEngine to the Retriever interface.
@@ -111,6 +111,17 @@ func NewMultiChannelRetrievalEngine(channels []SearchChannel, postProcessors []S
 	}
 }
 
+// SetChannelTimeout configures per-channel timeout degradation.
+func (e *MultiChannelRetrievalEngine) SetChannelTimeout(timeout time.Duration) {
+	if e == nil {
+		return
+	}
+	if timeout < 0 {
+		timeout = 0
+	}
+	e.channelTimeout = timeout
+}
+
 // Retrieve runs enabled channels in parallel, then applies post-processors.
 func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
 	type result struct {
@@ -118,26 +129,72 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 		err    error
 	}
 	results := make([]result, len(e.channels))
-	var wg sync.WaitGroup
+	if len(e.channels) == 0 {
+		return nil, nil
+	}
+	activeCount := 0
+	outcomes := make(chan struct {
+		idx int
+		res SearchChannelResult
+		err error
+	}, len(e.channels))
 	for i, ch := range e.channels {
 		if !ch.IsEnabled(sc) {
 			continue
 		}
-		wg.Add(1)
+		activeCount++
 		go func(idx int, channel SearchChannel) {
-			defer wg.Done()
 			start := time.Now()
-			r, err := channel.Search(ctx, sc)
-			if err != nil {
-				results[idx].err = err
+			done := make(chan struct {
+				res SearchChannelResult
+				err error
+			}, 1)
+			go func() {
+				r, err := channel.Search(ctx, sc)
+				if err == nil {
+					r.LatencyMs = time.Since(start).Milliseconds()
+				}
+				select {
+				case done <- struct {
+					res SearchChannelResult
+					err error
+				}{res: r, err: err}:
+				default:
+				}
+			}()
+			if e.channelTimeout <= 0 {
+				outcome := <-done
+				outcomes <- struct {
+					idx int
+					res SearchChannelResult
+					err error
+				}{idx: idx, res: outcome.res, err: outcome.err}
 				return
 			}
-			slog.Debug("rag search channel completed", "channel", channel.Name(), "chunks", len(r.Chunks))
-			r.LatencyMs = time.Since(start).Milliseconds()
-			results[idx].result = r
+			timer := time.NewTimer(e.channelTimeout)
+			defer timer.Stop()
+			select {
+			case outcome := <-done:
+				slog.Debug("rag search channel completed", "channel", channel.Name(), "chunks", len(outcome.res.Chunks))
+				outcomes <- struct {
+					idx int
+					res SearchChannelResult
+					err error
+				}{idx: idx, res: outcome.res, err: outcome.err}
+			case <-timer.C:
+				slog.Warn("rag search channel timed out", "channel", channel.Name(), "timeout_ms", e.channelTimeout.Milliseconds())
+				outcomes <- struct {
+					idx int
+					res SearchChannelResult
+					err error
+				}{idx: idx, res: SearchChannelResult{ChannelType: channel.Type(), ChannelName: channel.Name()}, err: nil}
+			}
 		}(i, ch)
 	}
-	wg.Wait()
+	for i := 0; i < activeCount; i++ {
+		outcome := <-outcomes
+		results[outcome.idx] = result{result: outcome.res, err: outcome.err}
+	}
 
 	var allChunks []RetrievedChunk
 	var allResults []SearchChannelResult
