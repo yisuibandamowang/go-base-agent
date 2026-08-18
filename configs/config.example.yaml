@@ -228,6 +228,25 @@ ai:
   chat:
     default-model: qwen3-max
     deep-thinking-model: qwen3-max
+    default-tier: standard
+    deep-thinking-tier: deep
+    tiers:
+      fast:
+        candidates:
+          - qwen3-local
+          - qwen-plus
+        timeout-ms: 5000
+      standard:
+        candidates:
+          - qwen3-max
+          - qwen-plus
+          - qwen3-local
+        timeout-ms: 30000
+      deep:
+        candidates:
+          - qwen3-max
+          - glm-4.7
+        timeout-ms: 120000
     candidates:
       - id: qwen-plus
         provider: bailian

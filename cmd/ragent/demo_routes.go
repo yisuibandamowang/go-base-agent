@@ -430,8 +430,22 @@ func buildChatSettings(cfg config.AIChatConfig) map[string]any {
 	return map[string]any{
 		"defaultModel":      cfg.DefaultModel,
 		"deepThinkingModel": cfg.DeepThinkingModel,
+		"defaultTier":       cfg.DefaultTier,
+		"deepThinkingTier":  cfg.DeepThinkingTier,
+		"tiers":             buildChatTiers(cfg.Tiers),
 		"candidates":        buildChatCandidates(cfg.Candidates),
 	}
+}
+
+func buildChatTiers(tiers map[string]config.AIChatTierConfig) map[string]any {
+	result := make(map[string]any, len(tiers))
+	for name, tier := range tiers {
+		result[name] = map[string]any{
+			"candidates": append([]string(nil), tier.Candidates...),
+			"timeoutMs":  tier.TimeoutMs,
+		}
+	}
+	return result
 }
 
 func buildEmbeddingSettings(cfg config.AIEmbeddingConfig) map[string]any {

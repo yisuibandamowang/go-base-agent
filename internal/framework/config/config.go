@@ -431,9 +431,17 @@ type AIStreamConfig struct {
 }
 
 type AIChatConfig struct {
-	DefaultModel      string              `mapstructure:"default-model"`
-	DeepThinkingModel string              `mapstructure:"deep-thinking-model"`
-	Candidates        []AICandidateConfig `mapstructure:"candidates"`
+	DefaultModel      string                      `mapstructure:"default-model"`
+	DeepThinkingModel string                      `mapstructure:"deep-thinking-model"`
+	DefaultTier       string                      `mapstructure:"default-tier"`
+	DeepThinkingTier  string                      `mapstructure:"deep-thinking-tier"`
+	Tiers             map[string]AIChatTierConfig `mapstructure:"tiers"`
+	Candidates        []AICandidateConfig         `mapstructure:"candidates"`
+}
+
+type AIChatTierConfig struct {
+	Candidates []string `mapstructure:"candidates"`
+	TimeoutMs  int      `mapstructure:"timeout-ms"`
 }
 
 type AICandidateConfig struct {

@@ -36,6 +36,18 @@ ai:
   chat:
     default-model: gpt-4.1
     deep-thinking-model: claude-sonnet-4
+    default-tier: standard
+    deep-thinking-tier: deep
+    tiers:
+      fast:
+        candidates: [gpt-4.1]
+        timeout-ms: 5000
+      standard:
+        candidates: [claude-sonnet-4, gpt-4.1]
+        timeout-ms: 30000
+      deep:
+        candidates: [claude-sonnet-4]
+        timeout-ms: 120000
     candidates:
       - id: gpt-4.1
         provider: openai
@@ -117,6 +129,18 @@ ai:
 	}
 	if cfg.AI.Selection.FirstPacketTimeoutSeconds != 30 {
 		t.Fatalf("unexpected first packet timeout: %d", cfg.AI.Selection.FirstPacketTimeoutSeconds)
+	}
+	if cfg.AI.Chat.DefaultTier != "standard" {
+		t.Fatalf("unexpected chat default tier: %s", cfg.AI.Chat.DefaultTier)
+	}
+	if cfg.AI.Chat.DeepThinkingTier != "deep" {
+		t.Fatalf("unexpected chat deep thinking tier: %s", cfg.AI.Chat.DeepThinkingTier)
+	}
+	if len(cfg.AI.Chat.Tiers) != 3 {
+		t.Fatalf("unexpected chat tier count: %d", len(cfg.AI.Chat.Tiers))
+	}
+	if cfg.AI.Chat.Tiers["deep"].TimeoutMs != 120000 {
+		t.Fatalf("unexpected deep tier timeout: %d", cfg.AI.Chat.Tiers["deep"].TimeoutMs)
 	}
 }
 

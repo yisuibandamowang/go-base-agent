@@ -591,6 +591,22 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 			Chat: config.AIChatConfig{
 				DefaultModel:      "qwen3-max",
 				DeepThinkingModel: "qwen3-max",
+				DefaultTier:       "standard",
+				DeepThinkingTier:  "deep",
+				Tiers: map[string]config.AIChatTierConfig{
+					"fast": {
+						Candidates: []string{"qwen3-local", "qwen-plus"},
+						TimeoutMs:  5000,
+					},
+					"standard": {
+						Candidates: []string{"qwen3-max", "qwen-plus", "qwen3-local"},
+						TimeoutMs:  30000,
+					},
+					"deep": {
+						Candidates: []string{"qwen3-max", "glm-4.7"},
+						TimeoutMs:  120000,
+					},
+				},
 				Candidates: []config.AICandidateConfig{
 					{
 						ID:               "qwen3-max",
@@ -717,6 +733,20 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	}
 	if aiCfg["chat"].(map[string]any)["defaultModel"].(string) != "qwen3-max" {
 		t.Fatalf("unexpected chat config: %#v", aiCfg["chat"])
+	}
+	chat := aiCfg["chat"].(map[string]any)
+	if chat["defaultTier"].(string) != "standard" {
+		t.Fatalf("unexpected chat default tier: %#v", chat)
+	}
+	if chat["deepThinkingTier"].(string) != "deep" {
+		t.Fatalf("unexpected chat deep thinking tier: %#v", chat)
+	}
+	tiers := chat["tiers"].(map[string]any)
+	if len(tiers) != 3 {
+		t.Fatalf("unexpected chat tier count: %#v", tiers)
+	}
+	if tiers["deep"].(map[string]any)["timeoutMs"].(float64) != 120000 {
+		t.Fatalf("unexpected deep tier timeout: %#v", tiers["deep"])
 	}
 }
 
