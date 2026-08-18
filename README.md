@@ -251,6 +251,7 @@ cmd/mcp-server/          # MCP Server
 | 会话 | `/api/ragent/conversations`、`/api/ragent/conversations/:conversationId/messages` |
 | 知识库 | `/api/ragent/knowledge-base`、`/api/ragent/knowledge-base/:id/docs/upload`（支持本地文件、远程 URL、内部 URL） |
 | 意图树 | `/api/ragent/intent-tree/*`、`/api/ragent/mappings*` |
+| 智能体 | `/api/ragent/agents*`、`/api/ragent/admin/agents*` |
 | 管理后台 | `/api/ragent/admin/*`、`/api/ragent/biz-change-logs*` |
 | 入库任务 | `/api/ragent/ingestion/pipelines*`、`/api/ragent/ingestion/tasks*` |
 | RAG 流式问答 | `/rag/v3/chat`、`/rag/v3/stop`（支持配置默认代码仓库路径 `rag.code.repo-path`，也支持请求参数 `codeRepoPath` 手动覆盖） |

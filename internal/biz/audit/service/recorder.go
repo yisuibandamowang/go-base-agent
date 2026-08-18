@@ -29,6 +29,8 @@ const (
 	BizTypeIntentTree = "INTENT_TREE"
 	// BizTypeQueryTermMapping 查询词映射业务对象。
 	BizTypeQueryTermMapping = "QUERY_TERM_MAPPING"
+	// BizTypeAgentProfile 智能体业务对象。
+	BizTypeAgentProfile = "AGENT_PROFILE"
 )
 
 const (

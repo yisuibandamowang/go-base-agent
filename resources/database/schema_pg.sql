@@ -110,6 +110,38 @@ CREATE TABLE t_sample_question (
 CREATE INDEX idx_sample_question_deleted ON t_sample_question (deleted);
 COMMENT ON TABLE t_sample_question IS '示例问题表';
 
+CREATE TABLE t_agent_profile (
+    id          VARCHAR(20)  NOT NULL PRIMARY KEY,
+    name        VARCHAR(64)  NOT NULL,
+    description VARCHAR(512),
+    avatar      VARCHAR(32),
+    builtin     SMALLINT     NOT NULL DEFAULT 0,
+    active      SMALLINT     NOT NULL DEFAULT 0,
+    create_by   VARCHAR(20),
+    update_by   VARCHAR(20),
+    create_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted     SMALLINT     NOT NULL DEFAULT 0,
+    CONSTRAINT uk_agent_name UNIQUE (name)
+);
+CREATE INDEX idx_agent_active ON t_agent_profile (active);
+COMMENT ON TABLE t_agent_profile IS '智能体人设配置表';
+
+CREATE TABLE t_agent_prompt (
+    id          VARCHAR(20)  NOT NULL PRIMARY KEY,
+    agent_id    VARCHAR(20)  NOT NULL,
+    slot_key    VARCHAR(64)  NOT NULL,
+    content     TEXT,
+    create_by   VARCHAR(20),
+    update_by   VARCHAR(20),
+    create_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted     SMALLINT     NOT NULL DEFAULT 0,
+    CONSTRAINT uk_agent_slot UNIQUE (agent_id, slot_key)
+);
+CREATE INDEX idx_agent_prompt_agent ON t_agent_prompt (agent_id);
+COMMENT ON TABLE t_agent_prompt IS '智能体提示词槽位表';
+
 CREATE TABLE t_biz_change_log (
     id             VARCHAR(20)   NOT NULL PRIMARY KEY,
     biz_type       VARCHAR(64)   NOT NULL,

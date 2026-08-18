@@ -9,6 +9,8 @@ TRUNCATE TABLE
     t_conversation_summary,
     t_message,
     t_conversation,
+    t_agent_prompt,
+    t_agent_profile,
     t_rag_trace_node,
     t_rag_trace_run,
     t_ingestion_task_node,

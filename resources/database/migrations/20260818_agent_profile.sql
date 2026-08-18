@@ -1,7 +1,37 @@
--- PostgreSQL Initial Data for Ragent
+-- v1.1.0 20260818 智能体人设配置
+-- 新增智能体管理表与默认内置智能体数据，供后台管理页使用
 
-INSERT INTO t_user (id, username, password, role, avatar, create_time, update_time, deleted)
-VALUES (2001523723396308993, 'admin', '$2a$10$Sl2e9s24hF6GonxLyxi9gOZm4q4G5LFnQdjHZWVleZzISJiSTHabu', 'admin', 'https://static.deepseek.com/user-avatar/G_6cuD8GbD53VwGRwisvCsZ6', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0);
+CREATE TABLE IF NOT EXISTS t_agent_profile (
+    id          VARCHAR(20)  NOT NULL PRIMARY KEY,
+    name        VARCHAR(64)  NOT NULL,
+    description VARCHAR(512),
+    avatar      VARCHAR(32),
+    builtin     SMALLINT     NOT NULL DEFAULT 0,
+    active      SMALLINT     NOT NULL DEFAULT 0,
+    create_by   VARCHAR(20),
+    update_by   VARCHAR(20),
+    create_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted     SMALLINT     NOT NULL DEFAULT 0,
+    CONSTRAINT uk_agent_name UNIQUE (name)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_active ON t_agent_profile (active);
+COMMENT ON TABLE t_agent_profile IS '智能体人设配置表';
+
+CREATE TABLE IF NOT EXISTS t_agent_prompt (
+    id          VARCHAR(20)  NOT NULL PRIMARY KEY,
+    agent_id    VARCHAR(20)  NOT NULL,
+    slot_key    VARCHAR(64)  NOT NULL,
+    content     TEXT,
+    create_by   VARCHAR(20),
+    update_by   VARCHAR(20),
+    create_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted     SMALLINT     NOT NULL DEFAULT 0,
+    CONSTRAINT uk_agent_slot UNIQUE (agent_id, slot_key)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_prompt_agent ON t_agent_prompt (agent_id);
+COMMENT ON TABLE t_agent_prompt IS '智能体提示词槽位表';
 
 INSERT INTO t_agent_profile (id, name, description, avatar, builtin, active, create_time, update_time, deleted)
 VALUES ('2001523723396309001', '默认助手', '系统默认人设，其他智能体未覆盖的提示词都会回落到这里', 'orbit-indigo', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)

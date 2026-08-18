@@ -14,6 +14,9 @@ import (
 	adminHandler "go-base-agent/internal/biz/admin/handler"
 	adminRepo "go-base-agent/internal/biz/admin/repo"
 	adminService "go-base-agent/internal/biz/admin/service"
+	agentHandler "go-base-agent/internal/biz/agent/handler"
+	agentRepo "go-base-agent/internal/biz/agent/repo"
+	agentService "go-base-agent/internal/biz/agent/service"
 	auditHandler "go-base-agent/internal/biz/audit/handler"
 	auditRepo "go-base-agent/internal/biz/audit/repo"
 	auditService "go-base-agent/internal/biz/audit/service"
@@ -309,6 +312,10 @@ func main() {
 	adminSvc.SetAuditRecorder(auditSvc)
 	adminH := adminHandler.NewAdminHandler(adminSvc)
 
+	agentSvc := agentService.NewAgentService(agentRepo.NewAgentRepo(gormDB), resolveEngineType(cfg))
+	agentSvc.SetAuditRecorder(auditSvc)
+	agentH := agentHandler.NewAgentHandler(agentSvc)
+
 	auditH := auditHandler.NewAuditHandler(auditSvc)
 
 	ingestionPipelineSvc := ingestionService.NewPipelineService(ingestionRepo.NewPipelineRepo(gormDB), gormDB)
@@ -518,6 +525,25 @@ func main() {
 		api.POST("/admin/sample-questions", adminH.CreateSampleQuestion)
 		api.PUT("/admin/sample-questions/:id", adminH.UpdateSampleQuestion)
 		api.DELETE("/admin/sample-questions/:id", adminH.DeleteSampleQuestion)
+
+		// Agents — 同时注册 /agents/* 和 /admin/agents/* 兼容路径
+		api.GET("/agents", agentH.List)
+		api.POST("/agents", agentH.Create)
+		api.PUT("/agents/:id", agentH.Update)
+		api.DELETE("/agents/:id", agentH.Delete)
+		api.POST("/agents/:id/activate", agentH.Activate)
+		api.GET("/agents/:id/prompts", agentH.Prompts)
+		api.PUT("/agents/:id/prompts/:slotKey", agentH.SavePrompt)
+		api.GET("/agents/prompt-slots/:slotKey/default", agentH.DefaultPrompt)
+
+		api.GET("/admin/agents", agentH.List)
+		api.POST("/admin/agents", agentH.Create)
+		api.PUT("/admin/agents/:id", agentH.Update)
+		api.DELETE("/admin/agents/:id", agentH.Delete)
+		api.POST("/admin/agents/:id/activate", agentH.Activate)
+		api.GET("/admin/agents/:id/prompts", agentH.Prompts)
+		api.PUT("/admin/agents/:id/prompts/:slotKey", agentH.SavePrompt)
+		api.GET("/admin/agents/prompt-slots/:slotKey/default", agentH.DefaultPrompt)
 
 		api.GET("/admin/users", adminH.ListUsers)
 		api.POST("/admin/users", adminH.CreateUser)
