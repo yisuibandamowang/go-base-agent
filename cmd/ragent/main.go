@@ -428,7 +428,11 @@ func main() {
 	}
 
 	ragPipeline := rag.NewPipeline(llmService,
-		rag.NewDefaultPromptBuilder(agentPromptResolver),
+		func() *rag.DefaultPromptBuilder {
+			builder := rag.NewDefaultPromptBuilder(agentPromptResolver)
+			builder.SetEngineMode(resolveEngineType(cfg))
+			return builder
+		}(),
 		llmRewriter,
 		enrichedRetriever,
 		memSvc,

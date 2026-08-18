@@ -200,7 +200,7 @@ curl http://localhost:9091/metrics
 | `redis` | Redis 连接信息 |
 | `rocketmq` | RocketMQ NameServer 与 producer 配置 |
 | `milvus` | 预留向量库切换配置 |
-| `rag.engine.type` | 执行架构档位，默认 `workflow`；可显式切换为 `agent`，用于区分编排管线与 ReAct 主智能体模式 |
+| `rag.engine.type` | 执行架构档位，默认 `workflow`；可显式切换为 `agent`，用于区分编排管线与 ReAct 主智能体模式，agent 模式下主回答优先使用 `AGENT_MAIN` 槽位 |
 | `rag.vector.type` | 默认 `pg`，预留 `milvus` 切换 |
 | `rag.graph` | 知识图谱后端配置；`type=none` 时不启用，`type=lightrag` 时注册 LightRAG 客户端、图谱检索通道，并在向量写入/文档删除/知识库清理时 best-effort 同步图谱 |
 | `rag.search` | RAG 多通道检索配置；默认 TopK、通道倍数、通道级超时、融合 RRF 与 rerank 候选上限按 Java `SearchChannelProperties` 补齐默认值 |

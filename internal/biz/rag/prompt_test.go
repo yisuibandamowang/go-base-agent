@@ -191,6 +191,28 @@ func TestDefaultPromptBuilder_SelectsScenePromptSlots(t *testing.T) {
 	}
 }
 
+func TestDefaultPromptBuilder_UsesAgentMainPromptInAgentMode(t *testing.T) {
+	resolver := &stubRuntimePromptResolver{prompts: map[string]string{
+		"AGENT_MAIN":  "agent main prompt",
+		"SYSTEM_CHAT": "fallback prompt",
+	}}
+	b := NewDefaultPromptBuilder(resolver)
+	b.SetEngineMode("agent")
+
+	req := b.Build(PromptContext{
+		Question:   "查询订单状态",
+		KbContext:  "订单手册支持订单状态查询。",
+		McpContext: "工具：order_status",
+	})
+
+	if !strings.Contains(req.Messages[0].Content, "agent main prompt") {
+		t.Fatalf("expected agent mode to use AGENT_MAIN prompt, got %q", req.Messages[0].Content)
+	}
+	if strings.Contains(req.Messages[0].Content, "fallback prompt") {
+		t.Fatalf("expected agent mode not to fall back to SYSTEM_CHAT when AGENT_MAIN exists, got %q", req.Messages[0].Content)
+	}
+}
+
 func TestDefaultPromptBuilder_WithMcpOnlyContextUsesToolDataWithoutDocuments(t *testing.T) {
 	b := NewDefaultPromptBuilder()
 	req := b.Build(PromptContext{

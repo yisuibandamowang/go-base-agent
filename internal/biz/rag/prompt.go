@@ -34,6 +34,7 @@ type DefaultPromptBuilder struct {
 	loader     *PromptLoader
 	systemFile string // e.g. "default_system.txt"
 	resolver   RuntimePromptResolver
+	engineMode string
 }
 
 const citationRulesFile = "answer_citation_rules.txt"
@@ -57,6 +58,14 @@ func NewPromptBuilder(externalDir, systemFile string, resolver ...RuntimePromptR
 	}
 }
 
+// SetEngineMode configures the current orchestration mode for prompt selection.
+func (b *DefaultPromptBuilder) SetEngineMode(mode string) {
+	if b == nil {
+		return
+	}
+	b.engineMode = strings.ToUpper(strings.TrimSpace(mode))
+}
+
 // Build constructs a chat.Request from the prompt context.
 func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages := make([]chat.Message, 0, len(ctx.History)+2)
@@ -76,7 +85,7 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 
 func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
 	if b != nil && b.resolver != nil {
-		for _, slotKey := range systemPromptSlotCandidates(ctx) {
+		for _, slotKey := range systemPromptSlotCandidates(ctx, b.engineMode) {
 			if prompt := strings.TrimSpace(b.resolver.Resolve(slotKey)); prompt != "" {
 				return prompt
 			}
@@ -92,7 +101,10 @@ func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
 	return strings.TrimSpace(sysPrompt)
 }
 
-func systemPromptSlotCandidates(ctx PromptContext) []string {
+func systemPromptSlotCandidates(ctx PromptContext, mode string) []string {
+	if strings.EqualFold(strings.TrimSpace(mode), "agent") {
+		return []string{"AGENT_MAIN", "KB_ANSWER", "SYSTEM_CHAT"}
+	}
 	hasMcp := strings.TrimSpace(ctx.McpContext) != ""
 	hasKb := strings.TrimSpace(ctx.KbContext) != ""
 	hasCode := strings.TrimSpace(ctx.CodeContext) != ""
