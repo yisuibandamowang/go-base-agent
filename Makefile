@@ -1,4 +1,4 @@
-.PHONY: run build test lint migrate clean
+.PHONY: run build test lint migrate cleanup-db clean
 
 APP_NAME    := ragent
 BUILD_DIR   := build
@@ -33,6 +33,9 @@ mod:
 
 migrate:
 	bash scripts/migrate.sh
+
+cleanup-db:
+	bash scripts/cleanup.sh
 
 clean:
 	rm -rf $(BUILD_DIR)
