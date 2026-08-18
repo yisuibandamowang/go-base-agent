@@ -31,6 +31,13 @@ rag:
   vector:
     type: pg
 
+  graph:
+    type: none
+    lightrag:
+      base-url: http://127.0.0.1:9621
+      query-mode: hybrid
+    embedding-model: qwen-emb-8b
+
   default:
     collection-name: rag_default_store
     dimension: 1536
@@ -117,6 +124,7 @@ rag:
           - ticket
 
   search:
+    timeout-ms: 15000
     channels:
       vector-global:
         enabled: true
@@ -132,6 +140,8 @@ rag:
         enabled: true
         mode: both
         top-k-multiplier: 1
+      graph:
+        enabled: false
       web-search:
         enabled: false
         api-url: ${YOUCOM_API_URL:https://api.ydc-index.io/search}

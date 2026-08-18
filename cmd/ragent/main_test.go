@@ -498,6 +498,7 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	cfg := &config.Config{
 		RAG: config.RAGConfig{
 			Vector: config.RAGVectorConfig{Type: "pg"},
+			Graph:  config.RAGGraphConfig{Type: "none"},
 			Default: config.RAGDefaultConfig{
 				CollectionName: "rag_default_store",
 				Dimension:      1536,
@@ -712,6 +713,67 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	}
 	if aiCfg["chat"].(map[string]any)["defaultModel"].(string) != "qwen3-max" {
 		t.Fatalf("unexpected chat config: %#v", aiCfg["chat"])
+	}
+}
+
+func TestRagSettingsExposesGraphBackendConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	graphEnabled := true
+	cfg := &config.Config{
+		RAG: config.RAGConfig{
+			Graph: config.RAGGraphConfig{
+				Type: "lightrag",
+				Lightrag: config.RAGGraphLightRAGConfig{
+					BaseURL:   "http://127.0.0.1:9621",
+					QueryMode: "hybrid",
+				},
+				EmbeddingModel: "qwen-emb-8b",
+			},
+			Search: config.RAGSearchConfig{
+				Channels: config.RAGSearchChannelsConfig{
+					Graph: config.RAGSearchChannelConfig{Enabled: &graphEnabled},
+				},
+			},
+		},
+		RustFS: config.RustFSConfig{},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/ragent/rag/settings", nil)
+	ragSettings(cfg)(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Code string         `json:"code"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+
+	backends := resp.Data["backends"].(map[string]any)
+	graph := backends["graph"].(map[string]any)
+	if graph["type"].(string) != "lightrag" {
+		t.Fatalf("unexpected graph backend type: %#v", graph)
+	}
+	if graph["baseUrl"].(string) != "http://127.0.0.1:9621" {
+		t.Fatalf("unexpected graph baseUrl: %#v", graph)
+	}
+	if graph["queryMode"].(string) != "hybrid" {
+		t.Fatalf("unexpected graph queryMode: %#v", graph)
+	}
+	if graph["embeddingModel"].(string) != "qwen-emb-8b" {
+		t.Fatalf("unexpected graph embeddingModel: %#v", graph)
+	}
+
+	search := resp.Data["rag"].(map[string]any)["search"].(map[string]any)
+	channels := search["channels"].(map[string]any)
+	if channels["graph"].(map[string]any)["enabled"].(bool) != true {
+		t.Fatalf("unexpected graph channel settings: %#v", channels["graph"])
 	}
 }
 

@@ -95,6 +95,7 @@ type MinerUConfig struct {
 
 type RAGConfig struct {
 	Vector       RAGVectorConfig       `mapstructure:"vector"`
+	Graph        RAGGraphConfig        `mapstructure:"graph"`
 	Default      RAGDefaultConfig      `mapstructure:"default"`
 	Code         RAGCodeConfig         `mapstructure:"code"`
 	Context      RAGContextConfig      `mapstructure:"context"`
@@ -115,6 +116,18 @@ type RAGConfig struct {
 
 type RAGVectorConfig struct {
 	Type string `mapstructure:"type"`
+}
+
+type RAGGraphConfig struct {
+	Type           string                  `mapstructure:"type"`
+	Lightrag       RAGGraphLightRAGConfig  `mapstructure:"lightrag"`
+	EmbeddingModel string                  `mapstructure:"embedding-model"`
+}
+
+type RAGGraphLightRAGConfig struct {
+	BaseURL   string `mapstructure:"base-url"`
+	APIKey    string `mapstructure:"api-key"`
+	QueryMode string `mapstructure:"query-mode"`
 }
 
 type RAGDefaultConfig struct {
@@ -292,9 +305,11 @@ type RAGSearchConfig struct {
 }
 
 type RAGSearchChannelsConfig struct {
+	TimeoutMs      int                     `mapstructure:"timeout-ms"`
 	VectorGlobal   RAGSearchChannelConfig `mapstructure:"vector-global"`
 	IntentDirected RAGSearchChannelConfig `mapstructure:"intent-directed"`
 	Keyword        RAGSearchChannelConfig `mapstructure:"keyword"`
+	Graph          RAGSearchChannelConfig `mapstructure:"graph"`
 	WebSearch      RAGWebSearchConfig     `mapstructure:"web-search"`
 }
 
@@ -618,9 +633,22 @@ func applyDefaults(cfg *Config) {
 	if mem.TitleMaxLength <= 0 {
 		mem.TitleMaxLength = 30
 	}
+	graph := &cfg.RAG.Graph
+	if strings.TrimSpace(graph.Type) == "" {
+		graph.Type = "none"
+	}
+	if strings.TrimSpace(graph.Lightrag.BaseURL) == "" {
+		graph.Lightrag.BaseURL = "http://127.0.0.1:9621"
+	}
+	if strings.TrimSpace(graph.Lightrag.QueryMode) == "" {
+		graph.Lightrag.QueryMode = "hybrid"
+	}
 	search := &cfg.RAG.Search
 	if search.DefaultTopK <= 0 {
 		search.DefaultTopK = 10
+	}
+	if search.Channels.TimeoutMs <= 0 {
+		search.Channels.TimeoutMs = 15000
 	}
 	if search.Channels.VectorGlobal.ConfidenceThreshold <= 0 {
 		search.Channels.VectorGlobal.ConfidenceThreshold = 0.6
@@ -645,6 +673,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if search.Channels.Keyword.TopKMultiplier <= 0 {
 		search.Channels.Keyword.TopKMultiplier = 2
+	}
+	if search.Channels.Graph.Enabled == nil {
+		disabled := false
+		search.Channels.Graph.Enabled = &disabled
 	}
 	if search.Channels.WebSearch.Count <= 0 {
 		search.Channels.WebSearch.Count = 5

@@ -313,6 +313,49 @@ rag:
 	}
 }
 
+func TestLoadParsesRAGGraphConfig(t *testing.T) {
+	yaml := `
+rag:
+  graph:
+    type: lightrag
+    lightrag:
+      base-url: http://127.0.0.1:9621
+      query-mode: hybrid
+    embedding-model: qwen-emb-8b
+  search:
+    channels:
+      graph:
+        enabled: true
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.RAG.Graph.Type != "lightrag" {
+		t.Fatalf("unexpected graph type: %s", cfg.RAG.Graph.Type)
+	}
+	if cfg.RAG.Graph.Lightrag.BaseURL != "http://127.0.0.1:9621" {
+		t.Fatalf("unexpected graph base url: %s", cfg.RAG.Graph.Lightrag.BaseURL)
+	}
+	if cfg.RAG.Graph.Lightrag.QueryMode != "hybrid" {
+		t.Fatalf("unexpected graph query mode: %s", cfg.RAG.Graph.Lightrag.QueryMode)
+	}
+	if cfg.RAG.Graph.EmbeddingModel != "qwen-emb-8b" {
+		t.Fatalf("unexpected graph embedding model: %s", cfg.RAG.Graph.EmbeddingModel)
+	}
+	if !cfg.RAG.Search.Channels.Graph.IsEnabledByDefaultWith(false) {
+		t.Fatal("expected graph channel enable flag to parse from config")
+	}
+}
+
 func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
 	yaml := `rag: {}`
 

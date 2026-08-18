@@ -328,10 +328,10 @@ func buildRAGBackendSettings(cfg *config.Config) map[string]any {
 			"searchAnalyzer": "",
 		},
 		"graph": map[string]any{
-			"type":           "none",
-			"baseUrl":        "",
-			"queryMode":      "",
-			"embeddingModel": "",
+			"type":           cfg.RAG.Graph.Type,
+			"baseUrl":        cfg.RAG.Graph.Lightrag.BaseURL,
+			"queryMode":      cfg.RAG.Graph.Lightrag.QueryMode,
+			"embeddingModel": cfg.RAG.Graph.EmbeddingModel,
 		},
 	}
 }
@@ -343,6 +343,7 @@ func buildRAGSearchSettings(cfg *config.Config) map[string]any {
 	vectorGlobal := cfg.RAG.Search.Channels.VectorGlobal
 	intentDirected := cfg.RAG.Search.Channels.IntentDirected
 	keyword := cfg.RAG.Search.Channels.Keyword
+	graph := cfg.RAG.Search.Channels.Graph
 	webSearch := cfg.RAG.Search.Channels.WebSearch
 	recallBudget := vectorGlobal.CandidateBudget
 	if recallBudget <= 0 {
@@ -360,7 +361,7 @@ func buildRAGSearchSettings(cfg *config.Config) map[string]any {
 			"supplementRatio":     vectorGlobal.SingleIntentSupplementThreshold,
 		},
 		"channels": map[string]any{
-			"timeoutMs": 0,
+			"timeoutMs": cfg.RAG.Search.Channels.TimeoutMs,
 			"vector": map[string]any{
 				"enabled": vectorGlobal.IsEnabledByDefault(),
 				"weight":  1.0,
@@ -370,8 +371,8 @@ func buildRAGSearchSettings(cfg *config.Config) map[string]any {
 				"weight":  1.0,
 			},
 			"graph": map[string]any{
-				"enabled": false,
-				"weight":  0.0,
+				"enabled": graph.IsEnabledByDefaultWith(false),
+				"weight":  0.8,
 			},
 			"webSearch": map[string]any{
 				"enabled":          webSearch.Enabled,

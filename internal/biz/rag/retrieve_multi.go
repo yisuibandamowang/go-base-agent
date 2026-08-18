@@ -18,6 +18,7 @@ const (
 	ChannelVectorGlobal   SearchChannelType = "VECTOR_GLOBAL"
 	ChannelIntentDirected SearchChannelType = "INTENT_DIRECTED"
 	ChannelKeyword        SearchChannelType = "KEYWORD"
+	ChannelGraph          SearchChannelType = "GRAPH"
 	ChannelHybrid         SearchChannelType = "HYBRID"
 	ChannelWebSearch      SearchChannelType = "WEB_SEARCH"
 )
@@ -199,6 +200,8 @@ func dedupChannelPriority(typ SearchChannelType) int {
 		return 2
 	case ChannelVectorGlobal:
 		return 3
+	case ChannelGraph:
+		return 4
 	default:
 		return 99
 	}

@@ -323,7 +323,7 @@ func main() {
 
 	vectorRetriever := rag.NewVectorRetriever(vecStore, embService, kbRepo, cfg.RAG.Search.DefaultTopK)
 	searchBackend := rag.NewKnowledgeSearchBackend(gormDB, kbRepo)
-	searchChannels := make([]rag.SearchChannel, 0, 4)
+	searchChannels := make([]rag.SearchChannel, 0, 5)
 	if cfg.RAG.Search.Channels.IntentDirected.IsEnabledByDefault() {
 		intentChannel := rag.NewBackendIntentDirectedSearchChannel(searchBackend, vecStore, embService, 1)
 		intentChannel.SetIntentOptions(
@@ -339,6 +339,15 @@ func main() {
 			cfg.RAG.Search.Channels.Keyword.TopKMultiplier,
 		)
 		searchChannels = append(searchChannels, keywordChannel)
+	}
+	if strings.EqualFold(cfg.RAG.Graph.Type, "lightrag") && cfg.RAG.Search.Channels.Graph.IsEnabledByDefaultWith(false) {
+		graphClient := rag.NewLightRagClient(
+			cfg.RAG.Graph.Lightrag.BaseURL,
+			cfg.RAG.Graph.Lightrag.APIKey,
+			nil,
+			cfg.RAG.Search.Channels.TimeoutMs,
+		)
+		searchChannels = append(searchChannels, rag.NewGraphSearchChannel(searchBackend, graphClient, cfg.RAG.Graph.Lightrag.QueryMode, 8))
 	}
 	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
 		vectorGlobalChannel := rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, vectorRetriever)
