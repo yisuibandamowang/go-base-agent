@@ -40,3 +40,8 @@ coverage.out
 .env.*.local
 
 /docs
+
+# Compiled binaries at repo root (from go build)
+/initializer
+/ragent
+/mcp-server

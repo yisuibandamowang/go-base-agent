@@ -1,7 +1,8 @@
-.PHONY: run build test lint migrate cleanup-db preflight clean
+.PHONY: run build test lint migrate cleanup-db preflight initialize clean
 
 APP_NAME    := ragent
 BUILD_DIR   := build
+AGENT_TYPE_DIR ?= resources/initializer/enterprise-knowledge-base
 GO          := go
 GOFLAGS     := -trimpath -ldflags="-s -w"
 
@@ -40,6 +41,9 @@ cleanup-db:
 
 preflight:
 	$(GO) run ./cmd/initializer preflight
+
+initialize:
+	$(GO) run ./cmd/initializer initialize --agent-type-dir $(AGENT_TYPE_DIR) --confirm RESET-ENTERPRISE-KNOWLEDGE-BASE
 
 clean:
 	rm -rf $(BUILD_DIR)
