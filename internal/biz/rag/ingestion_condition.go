@@ -19,6 +19,8 @@ func NewConditionEvaluator() *ConditionEvaluator {
 }
 
 // Evaluate returns whether the condition allows the node to execute.
+// 未知或畸形的条件结构 fail-closed 返回 false：放行畸形条件会让节点绕过配置意图执行，
+// 宁可漏执行也不可错执行。对齐 Java ConditionEvaluator 的 isStructurallyValid 校验。
 func (e *ConditionEvaluator) Evaluate(ctx *IngestionContext, condition any) bool {
 	if condition == nil {
 		return true
@@ -31,7 +33,7 @@ func (e *ConditionEvaluator) Evaluate(ctx *IngestionContext, condition any) bool
 	case map[string]any:
 		return e.evaluateObject(ctx, c)
 	default:
-		return true
+		return false
 	}
 }
 
@@ -87,7 +89,12 @@ func (e *ConditionEvaluator) evaluateString(ctx *IngestionContext, condition str
 
 func (e *ConditionEvaluator) evaluateObject(ctx *IngestionContext, condition map[string]any) bool {
 	if all, ok := condition["all"]; ok {
-		for _, item := range anySlice(all) {
+		items := anySlice(all)
+		if items == nil && all != nil {
+			// all 不是数组属畸形结构，fail-closed
+			return false
+		}
+		for _, item := range items {
 			if !e.Evaluate(ctx, item) {
 				return false
 			}
@@ -96,8 +103,9 @@ func (e *ConditionEvaluator) evaluateObject(ctx *IngestionContext, condition map
 	}
 	if any, ok := condition["any"]; ok {
 		items := anySlice(any)
-		if len(items) == 0 {
-			return true
+		// any 缺字段或非数组均视为畸形：空数组在 Java 侧同样返回 false
+		if items == nil {
+			return false
 		}
 		for _, item := range items {
 			if e.Evaluate(ctx, item) {
@@ -112,7 +120,8 @@ func (e *ConditionEvaluator) evaluateObject(ctx *IngestionContext, condition map
 
 	field := strings.TrimSpace(stringValue(condition["field"]))
 	if field == "" {
-		return true
+		// 无 field 的未知对象结构 fail-closed，避免畸形条件放行节点执行
+		return false
 	}
 	operator := strings.TrimSpace(stringValue(condition["operator"]))
 	if operator == "" {
@@ -136,19 +145,37 @@ func compareConditionValue(left any, right any, operator string) bool {
 		re, err := regexp.Compile(strings.TrimSpace(stringValue(right)))
 		return err == nil && re.MatchString(stringValue(left))
 	case "gt":
-		return compareConditionNumber(left, right) > 0
+		return compareOrderedCondition(left, right, func(cmp int) bool { return cmp > 0 })
 	case "gte":
-		return compareConditionNumber(left, right) >= 0
+		return compareOrderedCondition(left, right, func(cmp int) bool { return cmp >= 0 })
 	case "lt":
-		return compareConditionNumber(left, right) < 0
+		return compareOrderedCondition(left, right, func(cmp int) bool { return cmp < 0 })
 	case "lte":
-		return compareConditionNumber(left, right) <= 0
+		return compareOrderedCondition(left, right, func(cmp int) bool { return cmp <= 0 })
 	case "exists":
 		return left != nil
 	case "not_exists":
 		return left == nil
 	default:
 		return conditionEqual(left, right)
+	}
+}
+
+// compareOrderedCondition 数值比较在任一侧无法解析为数值时安全返回 false，
+// 避免两边都解析失败得 0 后被 gte/lte 误判为相等。对齐 Java 修复：让非法数值条件安全返回 false。
+func compareOrderedCondition(left, right any, ok func(int) bool) bool {
+	leftNumber, leftValid := conditionFloat(left)
+	rightNumber, rightValid := conditionFloat(right)
+	if !leftValid || !rightValid {
+		return false
+	}
+	switch {
+	case leftNumber > rightNumber:
+		return ok(1)
+	case leftNumber < rightNumber:
+		return ok(-1)
+	default:
+		return ok(0)
 	}
 }
 
@@ -348,21 +375,6 @@ func conditionContains(left any, right any) bool {
 		}
 	}
 	return false
-}
-
-func compareConditionNumber(left any, right any) int {
-	leftNumber, leftOK := conditionFloat(left)
-	rightNumber, rightOK := conditionFloat(right)
-	if !leftOK || !rightOK {
-		return 0
-	}
-	if leftNumber > rightNumber {
-		return 1
-	}
-	if leftNumber < rightNumber {
-		return -1
-	}
-	return 0
 }
 
 func conditionFloat(value any) (float64, bool) {

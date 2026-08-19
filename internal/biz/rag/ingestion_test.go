@@ -282,3 +282,68 @@ func TestNoopIngestionNode(t *testing.T) {
 		t.Fatal("noop should succeed and continue")
 	}
 }
+
+// TestConditionEvaluatorFailClosedOnMalformedStructures 验证未知或畸形条件结构 fail-closed：
+// 放行畸形条件会让节点绕过配置意图执行，宁可漏执行不可错执行。
+// 对齐 Java 修复：未知或畸形节点条件结构 fail-closed。
+func TestConditionEvaluatorFailClosedOnMalformedStructures(t *testing.T) {
+	evaluator := NewConditionEvaluator()
+	ctx := &IngestionContext{}
+
+	// 未知键名（应为 field 却写成 fields）
+	if evaluator.Evaluate(ctx, map[string]any{"fields": "rawText", "operator": "eq", "value": "x"}) {
+		t.Fatal("unknown object condition should fail closed")
+	}
+	// any 不是数组
+	if evaluator.Evaluate(ctx, map[string]any{"any": "not-an-array"}) {
+		t.Fatal("non-array any should fail closed")
+	}
+	// any 为空数组
+	if evaluator.Evaluate(ctx, map[string]any{"any": []any{}}) {
+		t.Fatal("empty any array should fail closed")
+	}
+	// all 不是数组
+	if evaluator.Evaluate(ctx, map[string]any{"all": "not-an-array"}) {
+		t.Fatal("non-array all should fail closed")
+	}
+	// not 包内含畸形结构（not 取反后畸形应得 false 的反例：not(malformed)=not(false)=true 是错的，
+	// Java 语义是 not 内部先按 fail-closed 求值为 false，再取反为 true；此处畸形在 not 内层同样先判 false）
+	inner := evaluator.Evaluate(ctx, map[string]any{"fields": "rawText"})
+	if inner {
+		t.Fatal("malformed inner condition should fail closed before negation")
+	}
+	// 未知类型（数字等）
+	if evaluator.Evaluate(ctx, 42) {
+		t.Fatal("unknown condition type should fail closed")
+	}
+	// 合法结构不受影响
+	if !evaluator.Evaluate(ctx, nil) {
+		t.Fatal("nil condition should allow execution")
+	}
+	if !evaluator.Evaluate(ctx, true) {
+		t.Fatal("boolean true should allow execution")
+	}
+}
+
+// TestConditionEvaluatorInvalidNumericComparisonSafeFalse 验证非法数值条件安全返回 false。
+// 对齐 Java 修复：让非法数值条件安全返回 false。
+func TestConditionEvaluatorInvalidNumericComparisonSafeFalse(t *testing.T) {
+	evaluator := NewConditionEvaluator()
+	ctx := &IngestionContext{}
+
+	// 数值字段与非数值比较：不 panic，安全返回 false
+	result := evaluator.Evaluate(ctx, map[string]any{
+		"field": "keywords", "operator": "gt", "value": "not-a-number",
+	})
+	if result {
+		t.Fatal("invalid numeric comparison should safely return false")
+	}
+
+	// 两边都不是数值
+	result = evaluator.Evaluate(ctx, map[string]any{
+		"field": "rawText", "operator": "gte", "value": "abc",
+	})
+	if result {
+		t.Fatal("non-numeric gte comparison should safely return false")
+	}
+}
