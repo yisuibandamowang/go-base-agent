@@ -588,3 +588,28 @@ func TestIntentNodeEffectiveCollectionNamesDedupAndFallback(t *testing.T) {
 		t.Fatalf("expected empty, got %v", empty)
 	}
 }
+
+// TestSortRetrievedChunksByScore 验证通道出口按相关性降序排序，
+// 这是下游 RRF 按名次取分依赖的不变式。对齐 Java ChunkRanking「出口有序」契约。
+func TestSortRetrievedChunksByScore(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{ID: "c1", Score: 0.5}, // 库 A 的弱命中
+		{ID: "c2", Score: 0.9}, // 库 B 的强命中，拼接序错排在前者之后
+		{ID: "c3", Score: 0.7},
+	}
+	sortRetrievedChunksByScore(chunks)
+	want := []string{"c2", "c3", "c1"}
+	for i, id := range want {
+		if chunks[i].ID != id {
+			t.Fatalf("position %d: expected %s, got %s (full: %v)", i, id, chunks[i].ID, chunks)
+		}
+	}
+
+	// 不足两条时不排序也不出错
+	single := []RetrievedChunk{{ID: "only", Score: 0.1}}
+	sortRetrievedChunksByScore(single)
+	if single[0].ID != "only" {
+		t.Fatal("single chunk should pass through")
+	}
+	sortRetrievedChunksByScore(nil)
+}

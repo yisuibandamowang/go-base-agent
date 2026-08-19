@@ -407,7 +407,21 @@ func (c *BackendIntentDirectedSearchChannel) searchIntentVectors(ctx context.Con
 			})
 		}
 	}
+	// 通道出口按相关性降序是下游 RRF 按名次取分依赖的不变式：
+	// 多目标库的结果仅在各自内部有序，拼接序会让某库的弱命中恒排在另一库强命中之前。
+	// 对齐 Java ChunkRanking「出口有序」契约。
+	sortRetrievedChunksByScore(chunks)
 	return chunks, searched
+}
+
+// sortRetrievedChunksByScore 按相关性降序稳定排序，不足两条时原样返回。
+func sortRetrievedChunksByScore(chunks []RetrievedChunk) {
+	if len(chunks) < 2 {
+		return
+	}
+	sort.SliceStable(chunks, func(i, j int) bool {
+		return chunks[i].Score > chunks[j].Score
+	})
 }
 
 type intentDirectedTarget struct {
