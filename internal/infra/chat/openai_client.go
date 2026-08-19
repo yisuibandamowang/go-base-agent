@@ -190,5 +190,9 @@ func extractContent(body []byte, provider string) (string, error) {
 	if content == nil {
 		return "", fmt.Errorf("%s response has no content: %s", provider, string(body))
 	}
+	// 空白 content 视为无效响应并报错，触发上层模型降级
+	if strings.TrimSpace(*content) == "" {
+		return "", fmt.Errorf("%s response content is blank", provider)
+	}
 	return strings.TrimSpace(*content), nil
 }

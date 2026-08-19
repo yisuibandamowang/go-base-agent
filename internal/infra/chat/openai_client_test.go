@@ -391,3 +391,36 @@ func TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse(t *testing.T) {
 		t.Fatalf("expected enable_thinking=false, got %#v", value)
 	}
 }
+
+// TestExtractContent_BlankContentRejected 验证空白 content 视为无效响应，
+// 报错后由上层路由触发模型降级。对齐 Java 修复：拒绝空白 LLM 响应。
+func TestExtractContent_BlankContentRejected(t *testing.T) {
+	cases := []string{
+		`{"choices":[{"message":{"content":""}}]}`,
+		`{"choices":[{"message":{"content":"   "}}]}`,
+		`{"choices":[{"message":{"content":"\n\t"}}]}`,
+	}
+	for _, body := range cases {
+		if _, err := extractContent([]byte(body), "test"); err == nil {
+			t.Fatalf("expected blank content to be rejected, body: %s", body)
+		}
+	}
+}
+
+// TestParseSSELine_BlankContentNotRecognized 验证流式 delta 中的空白 content
+// 不被识别为有效内容，避免被当作首包触发。
+func TestParseSSELine_BlankContentNotRecognized(t *testing.T) {
+	cases := []string{
+		`data: {"choices":[{"delta":{"content":""}}]}`,
+		`data: {"choices":[{"delta":{"content":"   "}}]}`,
+	}
+	for _, line := range cases {
+		event := ParseSSELine(line, false)
+		if event.HasContent() {
+			t.Fatalf("expected blank content to not be recognized, line: %s", line)
+		}
+		if event.Completed() {
+			t.Fatalf("blank content event should not be completed, line: %s", line)
+		}
+	}
+}

@@ -17,8 +17,9 @@ type SSEParsedEvent struct {
 	completed bool
 }
 
-// HasContent reports whether content was extracted.
-func (e SSEParsedEvent) HasContent() bool { return e.content != "" }
+// HasContent reports whether non-blank content was extracted.
+// 空白 content（空串或纯空白）不算有效内容，避免被当作首包触发并跳过模型降级。
+func (e SSEParsedEvent) HasContent() bool { return strings.TrimSpace(e.content) != "" }
 
 // HasReasoning reports whether reasoning content was extracted.
 func (e SSEParsedEvent) HasReasoning() bool { return e.reasoning != "" }
