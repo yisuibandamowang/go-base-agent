@@ -137,7 +137,7 @@ func intentScoreStats(intents []SubQuestionIntent) (float64, int) {
 	maxScore := 0.0
 	for _, subIntent := range intents {
 		for _, nodeScore := range subIntent.NodeScores {
-			if nodeScore.Node.Kind != IntentKindKB || strings.TrimSpace(nodeScore.Node.CollectionName) == "" {
+			if nodeScore.Node.Kind != IntentKindKB || len(nodeScore.Node.EffectiveCollectionNames()) == 0 {
 				continue
 			}
 			if count == 0 || nodeScore.Score > maxScore {
@@ -442,22 +442,25 @@ func intentDirectedTargetsFromContext(sc SearchContext, minScore float64, topKMu
 			if ns.Score < minScore || ns.Node.Kind != IntentKindKB {
 				continue
 			}
-			collectionName := strings.TrimSpace(ns.Node.CollectionName)
-			if collectionName == "" {
+			// 意图可关联多个知识库 Collection，新字段优先、旧单字段兜底
+			collectionNames := ns.Node.EffectiveCollectionNames()
+			if len(collectionNames) == 0 {
 				continue
 			}
 			topK := resolveIntentDirectedTopK(ns, sc.TopK) * topKMultiplier
-			if idx, ok := seen[collectionName]; ok {
-				if topK > targets[idx].topK {
-					targets[idx].topK = topK
+			for _, collectionName := range collectionNames {
+				if idx, ok := seen[collectionName]; ok {
+					if topK > targets[idx].topK {
+						targets[idx].topK = topK
+					}
+					continue
 				}
-				continue
+				seen[collectionName] = len(targets)
+				targets = append(targets, intentDirectedTarget{
+					collectionName: collectionName,
+					topK:           topK,
+				})
 			}
-			seen[collectionName] = len(targets)
-			targets = append(targets, intentDirectedTarget{
-				collectionName: collectionName,
-				topK:           topK,
-			})
 		}
 	}
 	return targets
@@ -492,12 +495,13 @@ func keywordIntentCollections(sc SearchContext) []string {
 			if nodeScore.Node.Kind != IntentKindKB {
 				continue
 			}
-			collectionName := strings.TrimSpace(nodeScore.Node.CollectionName)
-			if collectionName == "" || seen[collectionName] {
-				continue
+			for _, collectionName := range nodeScore.Node.EffectiveCollectionNames() {
+				if seen[collectionName] {
+					continue
+				}
+				seen[collectionName] = true
+				collections = append(collections, collectionName)
 			}
-			seen[collectionName] = true
-			collections = append(collections, collectionName)
 		}
 	}
 	return collections

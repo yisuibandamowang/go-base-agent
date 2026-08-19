@@ -33,6 +33,7 @@ type IntentNode struct {
 	Description         string
 	Examples            string
 	CollectionName      string
+	CollectionNames     []string
 	TopK                int
 	McpToolID           string
 	Kind                IntentKind
@@ -41,6 +42,30 @@ type IntentNode struct {
 	ParamPromptTemplate string
 	SortOrder           int
 	Enabled             int16
+}
+
+// EffectiveCollectionNames 返回当前意图实际参与检索的 Collection 集合。
+// 新字段 CollectionNames 优先，旧的单 CollectionName 字段仅作平滑升级兜底。
+func (n IntentNode) EffectiveCollectionNames() []string {
+	seen := make(map[string]struct{}, len(n.CollectionNames)+1)
+	result := make([]string, 0, len(n.CollectionNames)+1)
+	for _, name := range n.CollectionNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	if fallback := strings.TrimSpace(n.CollectionName); fallback != "" {
+		if _, ok := seen[fallback]; !ok {
+			result = append(result, fallback)
+		}
+	}
+	return result
 }
 
 // NodeScore 表示一个意图节点与问题的匹配分数。
@@ -508,9 +533,22 @@ func scoreIntentNode(question string, node IntentNode) float64 {
 		{normalizeText(node.Name), 0.55},
 		{normalizeText(node.Description), 0.30},
 		{normalizeText(node.Examples), 0.20},
-		{normalizeText(node.CollectionName), 0.18},
 		{normalizeText(node.PromptSnippet), 0.12},
 		{normalizeText(node.McpToolID), 0.10},
+	}
+	// 多库意图匹配任意一个库名即可得分，得分不叠加（多命中不表示意图更强）
+	collectionField := ""
+	for _, collection := range node.EffectiveCollectionNames() {
+		if text := normalizeText(collection); text != "" {
+			collectionField = text
+			break
+		}
+	}
+	if collectionField != "" {
+		fields = append(fields, struct {
+			text string
+			pts  float64
+		}{collectionField, 0.18})
 	}
 	for _, field := range fields {
 		if field.text == "" {
@@ -587,6 +625,7 @@ func toIntentNode(node intentModel.IntentNode) IntentNode {
 		Description:         node.Description,
 		Examples:            node.Examples,
 		CollectionName:      node.CollectionName,
+		CollectionNames:     node.CollectionNames,
 		TopK:                node.TopK,
 		McpToolID:           node.McpToolID,
 		Kind:                kind,

@@ -1049,12 +1049,13 @@ func intentEvidenceCollections(subIntents []SubQuestionIntent) []string {
 			if score.Node.Kind != IntentKindKB {
 				continue
 			}
-			collection := strings.TrimSpace(score.Node.CollectionName)
-			if collection == "" || seen[collection] {
-				continue
+			for _, collection := range score.Node.EffectiveCollectionNames() {
+				if seen[collection] {
+					continue
+				}
+				seen[collection] = true
+				collections = append(collections, collection)
 			}
-			seen[collection] = true
-			collections = append(collections, collection)
 		}
 	}
 	return collections

@@ -495,3 +495,96 @@ func TestParseWebSearchChunksKeepsSourceURL(t *testing.T) {
 		t.Fatalf("expected snippet in text, got %q", chunks[0].Text)
 	}
 }
+
+// TestIntentDirectedTargetsExpandMultipleCollections 验证意图节点关联多个知识库时，
+// 检索目标按 EffectiveCollectionNames 展开到全部绑定库。
+func TestIntentDirectedTargetsExpandMultipleCollections(t *testing.T) {
+	sc := SearchContext{
+		OriginalQuestion:  "问题",
+		RewrittenQuestion: "问题",
+		TopK:              5,
+		Intents: []SubQuestionIntent{
+			{SubQuestion: "问题", NodeScores: []NodeScore{
+				{
+					Node: IntentNode{
+						ID:              "multi-kb-intent",
+						Kind:            IntentKindKB,
+						CollectionName:  "collection_legacy",
+						CollectionNames: []string{"collection_a", "collection_b"},
+					},
+					Score: 0.9,
+				},
+			}},
+		},
+	}
+
+	targets := intentDirectedTargetsFromContext(sc, 0.5, 1)
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.collectionName)
+	}
+	// 新字段 collectionNames 全部生效，旧单字段作为兜底也保留
+	want := []string{"collection_a", "collection_b", "collection_legacy"}
+	if len(names) != len(want) {
+		t.Fatalf("expected targets %v, got %v", want, names)
+	}
+	gotSet := make(map[string]bool, len(names))
+	for _, name := range names {
+		gotSet[name] = true
+	}
+	for _, name := range want {
+		if !gotSet[name] {
+			t.Fatalf("expected target %q missing, got %v", name, names)
+		}
+	}
+}
+
+// TestKeywordIntentCollectionsUsesEffectiveNames 验证关键词通道同样按多库名展开。
+func TestKeywordIntentCollectionsUsesEffectiveNames(t *testing.T) {
+	sc := SearchContext{
+		Intents: []SubQuestionIntent{
+			{SubQuestion: "问题", NodeScores: []NodeScore{
+				{
+					Node: IntentNode{
+						ID:              "intent-1",
+						Kind:            IntentKindKB,
+						CollectionNames: []string{"kb_one", "kb_two"},
+					},
+					Score: 0.9,
+				},
+			}},
+		},
+	}
+	collections := keywordIntentCollections(sc)
+	if len(collections) != 2 {
+		t.Fatalf("expected 2 collections, got %v", collections)
+	}
+}
+
+// TestIntentNodeEffectiveCollectionNamesDedupAndFallback 验证去重与旧字段兜底。
+func TestIntentNodeEffectiveCollectionNamesDedupAndFallback(t *testing.T) {
+	node := IntentNode{
+		CollectionName:  "legacy",
+		CollectionNames: []string{"primary", "  ", "primary", "secondary"},
+	}
+	got := node.EffectiveCollectionNames()
+	want := []string{"primary", "secondary", "legacy"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
+	}
+
+	legacyOnly := IntentNode{CollectionName: "only"}.EffectiveCollectionNames()
+	if len(legacyOnly) != 1 || legacyOnly[0] != "only" {
+		t.Fatalf("expected legacy fallback [only], got %v", legacyOnly)
+	}
+
+	empty := IntentNode{}.EffectiveCollectionNames()
+	if len(empty) != 0 {
+		t.Fatalf("expected empty, got %v", empty)
+	}
+}
