@@ -240,13 +240,20 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
 	codeCtx := p.buildCodeContext(ctx, q)
 
+	// 按库推导意图归属：只有真正贡献了证据的意图才允许参与提示词模板选择，
+	// 区分知识定向检索未命中意图与全局回退场景。对齐 Java 9d80d7a/cf2697c。
+	mergedGroup := MergeIntentGroup(resolvedSubIntents)
+	eligibleIntentIDs := DeriveIntentAttribution(chunks, mergedGroup.KBIntents)
+
 	req := p.prompt.Build(PromptContext{
-		Question:     q,
-		SubQuestions: subQuestions,
-		History:      history,
-		KbContext:    withChunkSources(chunks, kbCtx),
-		McpContext:   mcpCtx,
-		CodeContext:  codeCtx,
+		Question:          q,
+		SubQuestions:      subQuestions,
+		History:           history,
+		KbContext:         withChunkSources(chunks, kbCtx),
+		McpContext:        mcpCtx,
+		CodeContext:       codeCtx,
+		KbIntents:         mergedGroup.KBIntents,
+		EligibleIntentIds: eligibleIntentIDs,
 	})
 	thinkingVal := deepThinking
 	req.Thinking = &thinkingVal

@@ -16,6 +16,11 @@ type PromptContext struct {
 	KbContext    string
 	McpContext   string
 	CodeContext  string
+	// KbIntents KB 通道命中的意图候选（含分数）。
+	KbIntents []NodeScore
+	// EligibleIntentIds 允许参与模板选择的意图 ID：按库推导后真正有证据归属的意图。
+	// 区分"知识定向检索未命中意图"与"全局回退"：定向检索命中但证据为空时该意图不参与模板选择。
+	EligibleIntentIds map[string]struct{}
 }
 
 // PromptBuilder builds a chat.Request from a PromptContext.
@@ -84,6 +89,11 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 }
 
 func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
+	// KB 单意图且该意图有证据归属时，优先使用意图节点配置的提示词模板
+	// 对齐 Java planPrompt：只有有证据支撑的意图才允许贡献模板
+	if tpl := singleKbIntentPromptTemplate(ctx); tpl != "" {
+		return tpl
+	}
 	if b != nil && b.resolver != nil {
 		for _, slotKey := range systemPromptSlotCandidates(ctx, b.engineMode) {
 			if prompt := strings.TrimSpace(b.resolver.Resolve(slotKey)); prompt != "" {
@@ -99,6 +109,37 @@ func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
 		return "你是一个有帮助的AI助手。"
 	}
 	return strings.TrimSpace(sysPrompt)
+}
+
+// singleKbIntentPromptTemplate 返回唯一有证据归属的 KB 意图的提示词模板。
+// 多个意图都有归属或都没有归属时返回空串，走默认槽位解析。
+func singleKbIntentPromptTemplate(ctx PromptContext) string {
+	if len(ctx.EligibleIntentIds) == 0 || len(ctx.KbIntents) == 0 {
+		return ""
+	}
+	var eligible []NodeScore
+	seen := make(map[string]struct{}, len(ctx.KbIntents))
+	for _, ns := range ctx.KbIntents {
+		if ns.Node.Kind != IntentKindKB {
+			continue
+		}
+		id := strings.TrimSpace(ns.Node.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := ctx.EligibleIntentIds[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		eligible = append(eligible, ns)
+	}
+	if len(eligible) != 1 {
+		return ""
+	}
+	return strings.TrimSpace(eligible[0].Node.PromptTemplate)
 }
 
 func systemPromptSlotCandidates(ctx PromptContext, mode string) []string {
@@ -206,4 +247,47 @@ func normalizePromptSubQuestions(subQuestions []string) []string {
 		}
 	}
 	return normalized
+}
+
+// DeriveIntentAttribution 按库推导意图归属：最终存活 chunk 的 collection 属于某命中意图的
+// 绑定库即归属该意图。归属与证据经由哪条通道到达无关；同一库被多个意图绑定时全部归属
+// （确定性多归属）；未命中任何意图绑定库的 chunk（如全局补充路证据）天然无归属。
+// 对齐 Java KnowledgeRetrievalResult.deriveAttribution。
+func DeriveIntentAttribution(chunks []RetrievedChunk, kbIntents []NodeScore) map[string]struct{} {
+	intentIDs := make(map[string]struct{})
+	if len(chunks) == 0 || len(kbIntents) == 0 {
+		return intentIDs
+	}
+
+	// 库名 -> 绑定该库的意图 ID 集合
+	intentIDsByCollection := make(map[string]map[string]struct{})
+	for _, ns := range kbIntents {
+		if ns.Node.Kind != IntentKindKB {
+			continue
+		}
+		intentID := strings.TrimSpace(ns.Node.ID)
+		if intentID == "" {
+			continue
+		}
+		for _, collection := range ns.Node.EffectiveCollectionNames() {
+			if intentIDsByCollection[collection] == nil {
+				intentIDsByCollection[collection] = make(map[string]struct{})
+			}
+			intentIDsByCollection[collection][intentID] = struct{}{}
+		}
+	}
+	if len(intentIDsByCollection) == 0 {
+		return intentIDs
+	}
+
+	for _, chunk := range chunks {
+		collection := strings.TrimSpace(chunk.Metadata["collection_name"])
+		if collection == "" {
+			continue
+		}
+		for intentID := range intentIDsByCollection[collection] {
+			intentIDs[intentID] = struct{}{}
+		}
+	}
+	return intentIDs
 }
