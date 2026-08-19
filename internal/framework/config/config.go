@@ -755,6 +755,12 @@ func validateConfig(cfg *Config) error {
 			mem.HistoryKeepTurns,
 		)
 	}
+	if cfg.RAG.Search.Channels.Graph.IsEnabledByDefaultWith(false) && !strings.EqualFold(strings.TrimSpace(cfg.RAG.Graph.Type), "lightrag") {
+		return fmt.Errorf(
+			"validate rag.search.channels.graph: rag.search.channels.graph.enabled=true requires rag.graph.type=lightrag, got rag.graph.type=%q",
+			cfg.RAG.Graph.Type,
+		)
+	}
 	return nil
 }
 

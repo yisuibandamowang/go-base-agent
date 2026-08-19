@@ -403,6 +403,32 @@ rag:
 	}
 }
 
+func TestLoadRejectsEnabledGraphChannelWithoutLightragBackend(t *testing.T) {
+	yaml := `
+rag:
+  graph:
+    type: none
+  search:
+    channels:
+      graph:
+        enabled: true
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when graph channel is enabled without lightrag backend")
+	}
+	if !strings.Contains(err.Error(), "rag.search.channels.graph.enabled") || !strings.Contains(err.Error(), "rag.graph.type") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
 	yaml := `rag: {}`
 

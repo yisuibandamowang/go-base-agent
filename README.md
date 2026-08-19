@@ -206,7 +206,7 @@ curl http://localhost:9091/metrics
 | `rag.engine.type` | 执行架构档位，默认 `workflow`；可显式切换为 `agent`，用于区分编排管线与 ReAct 主智能体模式，agent 模式下主回答优先使用 `AGENT_MAIN` 槽位 |
 | `rag.vector.type` | 默认 `pg`，预留 `milvus` 切换 |
 | `rag.graph` | 知识图谱后端配置；`type=none` 时不启用，`type=lightrag` 时注册 LightRAG 客户端、图谱检索通道，并在向量写入/文档删除/知识库清理时 best-effort 同步图谱 |
-| `rag.search` | RAG 多通道检索配置；默认 TopK、通道倍数、通道级超时、融合 RRF 与 rerank 候选上限按 Java `SearchChannelProperties` 补齐默认值 |
+| `rag.search` | RAG 多通道检索配置；默认 TopK、通道倍数、通道级超时、融合 RRF 与 rerank 候选上限按 Java `SearchChannelProperties` 补齐默认值；`rag.search.channels.graph.enabled=true` 需要同时开启 `rag.graph.type=lightrag` |
 | `rag.query-rewrite` | 查询改写配置；主链路会先按 `t_query_term_mapping` 做启用规则的术语归一化，启用时走 LLM 改写+拆分，关闭时走规则拆分 |
 | `rag.memory` | 会话记忆配置；存在消息历史时会保留最新摘要作为系统消息，并按 Java 版窗口策略截取最近消息；摘要压缩异步执行并用 Redis 锁串行化，配置会校验 `summary-start-turns > history-keep-turns` |
 | `rag.rate-limit.global` | RAG 聊天全局并发队列限流；默认启用并按 Java 使用 `max-concurrent=50`、`max-wait-seconds=20`、`lease-seconds=600`、`poll-interval-ms=200`；超时会返回 `reject + finish + done` SSE |
