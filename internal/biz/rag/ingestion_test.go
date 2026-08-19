@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -345,5 +346,51 @@ func TestConditionEvaluatorInvalidNumericComparisonSafeFalse(t *testing.T) {
 	})
 	if result {
 		t.Fatal("non-numeric gte comparison should safely return false")
+	}
+}
+
+// TestIngestionEngineRejectsMultipleStartNodes 验证多起点流水线在执行前失败，
+// 而非静默取第一个起始节点导致其余分支永不执行。
+// 对齐 Java 修复：多起点流水线配置执行前失败。
+func TestIngestionEngineRejectsMultipleStartNodes(t *testing.T) {
+	engine := NewIngestionEngine(nil)
+	pipeline := PipelineDefinition{
+		ID: "multi-start",
+		Nodes: []NodeConfig{
+			{NodeID: "fetcher-a", NodeType: NodeFetcher, Enabled: true},
+			{NodeID: "fetcher-b", NodeType: NodeFetcher, Enabled: true},
+			{NodeID: "parser", NodeType: NodeParser, Enabled: true, NextNodeID: ""},
+		},
+	}
+
+	err := engine.Execute(context.Background(), &IngestionContext{}, pipeline)
+	if err == nil {
+		t.Fatal("expected multiple start nodes to fail before execution")
+	}
+	if !strings.Contains(err.Error(), "multiple start nodes") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "fetcher-a") || !strings.Contains(err.Error(), "fetcher-b") {
+		t.Fatalf("error should list all start nodes: %v", err)
+	}
+}
+
+// TestIngestionEngineRejectsNoStartNode 验证无起始节点（成环）同样报错。
+func TestIngestionEngineRejectsNoStartNode(t *testing.T) {
+	engine := NewIngestionEngine(nil)
+	pipeline := PipelineDefinition{
+		ID: "all-referenced",
+		Nodes: []NodeConfig{
+			{NodeID: "a", NodeType: NodeFetcher, Enabled: true, NextNodeID: "b"},
+			{NodeID: "b", NodeType: NodeParser, Enabled: true, NextNodeID: "a"},
+		},
+	}
+
+	err := engine.Execute(context.Background(), &IngestionContext{}, pipeline)
+	if err == nil {
+		t.Fatal("expected cyclic pipeline without start node to fail")
+	}
+	if !strings.Contains(err.Error(), "no start node") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

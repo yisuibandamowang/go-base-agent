@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 )
@@ -168,13 +169,21 @@ func (e *IngestionEngine) Execute(ctx context.Context, ctx2 *IngestionContext, p
 			referenced[n.NextNodeID] = struct{}{}
 		}
 	}
-	startNode := findStartNode(pipeline.Nodes, referenced)
-	if startNode == nil {
-		return fmt.Errorf("pipeline %s has no nodes", pipeline.ID)
+	// 多起点属配置错误：静默取第一个会让其余分支永不执行，执行前直接失败
+	startNodes := findStartNodes(pipeline.Nodes, referenced)
+	if len(startNodes) == 0 {
+		return fmt.Errorf("pipeline %s has no start node", pipeline.ID)
+	}
+	if len(startNodes) > 1 {
+		ids := make([]string, 0, len(startNodes))
+		for _, n := range startNodes {
+			ids = append(ids, n.NodeID)
+		}
+		return fmt.Errorf("pipeline %s has multiple start nodes: %s", pipeline.ID, strings.Join(ids, ", "))
 	}
 
 	visited := make(map[string]bool)
-	current := *startNode
+	current := startNodes[0]
 
 	for {
 		if visited[current.NodeID] {
@@ -348,13 +357,16 @@ func (n *NoopIngestionNode) Execute(ctx context.Context, nodeCtx *IngestionConte
 	return NodeResult{Success: true, ShouldContinue: true}
 }
 
-func findStartNode(nodes []NodeConfig, referenced map[string]struct{}) *NodeConfig {
+// findStartNodes 找到全部起始节点（没有被任何节点引用的节点），按 NodeID 排序保证报错信息稳定。
+func findStartNodes(nodes []NodeConfig, referenced map[string]struct{}) []NodeConfig {
+	var starts []NodeConfig
 	for i := range nodes {
 		if _, ok := referenced[nodes[i].NodeID]; !ok {
-			return &nodes[i]
+			starts = append(starts, nodes[i])
 		}
 	}
-	return nil
+	sort.Slice(starts, func(i, j int) bool { return starts[i].NodeID < starts[j].NodeID })
+	return starts
 }
 
 func nextNode(nodeMap map[string]NodeConfig, current NodeConfig) (*NodeConfig, error) {
