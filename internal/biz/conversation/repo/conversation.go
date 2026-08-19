@@ -118,11 +118,13 @@ func (r *MessageRepo) FindByIDAndUserID(ctx context.Context, messageID, userID s
 }
 
 // LoadHistory 加载会话消息历史。
+// create_time 非唯一排序键：同毫秒写入会产生相同时间戳，追加雪花 id 作为同方向决胜键保证稳定全序。
 func (r *MessageRepo) LoadHistory(ctx context.Context, conversationID, userID string, limit int) ([]model.Message, error) {
 	var msgs []model.Message
 	q := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
-		Order("create_time ASC")
+		Order("create_time ASC").
+		Order("id ASC")
 	if limit > 0 {
 		q = q.Limit(limit)
 	}
@@ -134,6 +136,7 @@ func (r *MessageRepo) LoadHistory(ctx context.Context, conversationID, userID st
 }
 
 // LoadLatestHistory 加载最新的会话消息历史，并按创建时间升序返回。
+// 同毫秒写入时按雪花 id 决胜，DESC 截断与 reverse 后顺序均稳定。
 func (r *MessageRepo) LoadLatestHistory(ctx context.Context, conversationID, userID string, limit int) ([]model.Message, error) {
 	if limit <= 0 {
 		return r.LoadHistory(ctx, conversationID, userID, 0)
@@ -142,6 +145,7 @@ func (r *MessageRepo) LoadLatestHistory(ctx context.Context, conversationID, use
 	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
 		Order("create_time DESC").
+		Order("id DESC").
 		Limit(limit).
 		Find(&msgs).Error
 	if err != nil {
@@ -159,6 +163,7 @@ func (r *MessageRepo) LoadHistorySince(ctx context.Context, conversationID, user
 	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Where("conversation_id = ? AND user_id = ? AND id > ?", conversationID, userID, sinceID).
 		Order("create_time ASC").
+		Order("id ASC").
 		Find(&msgs).Error
 	if err != nil {
 		return nil, fmt.Errorf("load history since: %w", err)
@@ -175,6 +180,7 @@ func (r *MessageRepo) ListLatestUserOnlyMessages(ctx context.Context, conversati
 	err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Where("conversation_id = ? AND user_id = ? AND role = ?", conversationID, userID, "user").
 		Order("create_time DESC").
+		Order("id DESC").
 		Limit(limit).
 		Find(&msgs).Error
 	if err != nil {
