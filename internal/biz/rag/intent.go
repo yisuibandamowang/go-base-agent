@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	intentModel "go-base-agent/internal/biz/intent_tree/model"
@@ -147,6 +148,8 @@ func (r *IntentResolver) SetLLMService(llm chat.LLMService) {
 }
 
 // ResolveQuestions resolves one or more questions into sub-question intents.
+// 多个子问题的意图分类并行执行，对齐 Java IntentResolver 的 intentClassifyExecutor 并行策略；
+// 单个子问题分类失败时降级为启发式打分，不阻断其余子问题。
 func (r *IntentResolver) ResolveQuestions(ctx context.Context, questions []string) ([]SubQuestionIntent, error) {
 	if r == nil || r.lister == nil {
 		return nil, nil
@@ -164,13 +167,28 @@ func (r *IntentResolver) ResolveQuestions(ctx context.Context, questions []strin
 		return []SubQuestionIntent{}, nil
 	}
 
+	type questionResult struct {
+		index  int
+		scores []NodeScore
+	}
+	results := make([][]NodeScore, len(questions))
+	var wg sync.WaitGroup
+	for i, question := range questions {
+		wg.Add(1)
+		go func(idx int, q string) {
+			defer wg.Done()
+			scores, ok := r.classifyWithLLM(ctx, q, leafNodes, nodes)
+			if !ok {
+				scores = scoreIntentNodes(q, leafNodes, r.opts.MinScore, r.opts.MaxIntents)
+			}
+			results[idx] = scores
+		}(i, question)
+	}
+	wg.Wait()
+
 	result := make([]SubQuestionIntent, 0, len(questions))
-	for _, question := range questions {
-		scores, ok := r.classifyWithLLM(ctx, question, leafNodes, nodes)
-		if !ok {
-			scores = scoreIntentNodes(question, leafNodes, r.opts.MinScore, r.opts.MaxIntents)
-		}
-		result = append(result, SubQuestionIntent{SubQuestion: strings.TrimSpace(question), NodeScores: scores})
+	for i, question := range questions {
+		result = append(result, SubQuestionIntent{SubQuestion: strings.TrimSpace(question), NodeScores: results[i]})
 	}
 	return capTotalIntents(result, r.opts.MaxIntents), nil
 }

@@ -3,7 +3,9 @@ package rag
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	intentModel "go-base-agent/internal/biz/intent_tree/model"
 	"go-base-agent/internal/framework/db"
@@ -266,4 +268,54 @@ type recordingAmbiguityChecker struct {
 func (c *recordingAmbiguityChecker) CheckAmbiguity(ctx context.Context, question string, ranked []NodeScore) bool {
 	c.calls++
 	return c.ambiguous
+}
+
+// TestIntentResolver_ResolvesQuestionsConcurrently 验证多个子问题的意图分类并行执行：
+// 串行总耗时约为单次分类耗时之和，并行时应显著小于该值。
+func TestIntentResolver_ResolvesQuestionsConcurrently(t *testing.T) {
+	nodes := []intentModel.IntentNode{
+		{BaseModel: db.BaseModel{ID: "root"}, IntentCode: "member", Name: "会员系统", Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "leaf-1"}, IntentCode: "member_points", ParentCode: "member", Name: "积分查询", Kind: int16(IntentKindKB), Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "leaf-2"}, IntentCode: "member_level", ParentCode: "member", Name: "等级查询", Kind: int16(IntentKindKB), Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "leaf-3"}, IntentCode: "member_profile", ParentCode: "member", Name: "会员画像", Kind: int16(IntentKindKB), Enabled: 1},
+	}
+
+	var mu sync.Mutex
+	inFlight := 0
+	maxInFlight := 0
+	// 每次 LLM 分类耗时 100ms；3 个子问题串行至少 300ms，并行应接近 100ms
+	slowLLM := &fakeLLMService{
+		chatFn: func(ctx context.Context, req chat.Request) (string, error) {
+			mu.Lock()
+			inFlight++
+			if inFlight > maxInFlight {
+				maxInFlight = inFlight
+			}
+			mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return `[{"id":"leaf-1","score":0.9}]`, nil
+		},
+	}
+	resolver := NewIntentResolver(fakeIntentNodeLister{nodes: nodes}, IntentResolverOptions{MinScore: 0.1, MaxIntents: 5})
+	resolver.SetLLMService(slowLLM)
+
+	questions := []string{"问题一", "问题二", "问题三"}
+	start := time.Now()
+	resolved, err := resolver.ResolveQuestions(context.Background(), questions)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ResolveQuestions: %v", err)
+	}
+	if len(resolved) != 3 {
+		t.Fatalf("expected 3 sub intents, got %d", len(resolved))
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("expected concurrent classification, took %v (serial would be >=300ms)", elapsed)
+	}
+	if maxInFlight < 2 {
+		t.Fatalf("expected at least 2 concurrent classifications, max in-flight=%d", maxInFlight)
+	}
 }
