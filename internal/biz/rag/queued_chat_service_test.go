@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/ratelimit"
 	"go-base-agent/internal/infra/chat"
 )
@@ -95,3 +97,39 @@ func (r *queueInnerRecorder) StreamChat(ctx context.Context, question, conversat
 }
 
 func (r *queueInnerRecorder) StopTask(taskID string) {}
+
+// TestQueuedChatService_AcquireCallbackKeepsUserContext 验证排队获取许可后的回调
+// 即使在新 goroutine 执行，携带的用户上下文仍然保留。
+// 对齐 Java 修复：保留排队请求的用户上下文（TtlRunnable 等价物为闭包捕获 ctx）。
+func TestQueuedChatService_AcquireCallbackKeepsUserContext(t *testing.T) {
+	var gotUser *appctx.LoginUser
+	var wg sync.WaitGroup
+	wg.Add(1)
+	limiter := &fakeQueueLimiter{
+		acquire: func(ctx context.Context, req ratelimit.AcquireRequest) error {
+			// 模拟限流器把回调投递到新 goroutine（如 t.req.OnAcquire() 由队列 poller 触发）
+			go func() {
+				defer wg.Done()
+				req.OnAcquire()
+			}()
+			return nil
+		},
+	}
+	mem := &queuedMemoryService{conversation: &Conversation{ID: "conv-1", UserID: "user-1", Title: "标题"}}
+
+	svc := NewQueuedChatService(&queueInnerRecorder{onStream: func(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+		gotUser = appctx.User(ctx)
+	}}, limiter, mem, time.Second)
+
+	userCtx := appctx.WithUser(context.Background(), &appctx.LoginUser{UserID: "user-1", Username: "tester"})
+	s, _ := newTestSSESender(t)
+	svc.StreamChat(userCtx, "问题", "conv-1", "task-1", false, s)
+
+	wg.Wait()
+	if gotUser == nil {
+		t.Fatal("queued acquire callback lost user context")
+	}
+	if gotUser.UserID != "user-1" {
+		t.Fatalf("expected user-1 in callback context, got %q", gotUser.UserID)
+	}
+}
