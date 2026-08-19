@@ -872,3 +872,24 @@ func isAtomicBlock(typ BlockType) bool {
 		return false
 	}
 }
+
+// overlapDivisor 块重叠默认取块大小的几分之一。
+const overlapDivisor = 8
+
+// DefaultOverlapFor 返回给定块大小对应的默认重叠字符数。
+// 重叠不只为冗余，它同时是回退寻找句末标点的最大距离，取小了切口会落在句子中间——
+// 1024 配 64 对中文长句就常常回退不到句号，故按块大小等比给。
+// 对齐 Java ChunkBudget.defaultOverlapFor。
+func DefaultOverlapFor(maxChars int) int {
+	if maxChars <= 0 {
+		return 0
+	}
+	overlap := maxChars / overlapDivisor
+	if overlap > maxChars-1 {
+		overlap = maxChars - 1
+	}
+	if overlap < 0 {
+		return 0
+	}
+	return overlap
+}

@@ -291,3 +291,26 @@ func containsAll(text string, parts ...string) bool {
 	}
 	return true
 }
+
+// TestDefaultOverlapFor 验证块重叠缺省按块大小等比计算（1/8）并封顶在 maxChars-1。
+// 对齐 Java ChunkBudget.defaultOverlapFor。
+func TestDefaultOverlapFor(t *testing.T) {
+	cases := []struct {
+		maxChars int
+		want     int
+	}{
+		{512, 64},
+		{1024, 128},
+		{2048, 256},
+		{8, 1},  // 8/8=1，不超过 maxChars-1
+		{4, 0},  // 4/8=0
+		{1, 0},  // 封顶 maxChars-1=0
+		{0, 0},  // 非法输入
+		{-5, 0}, // 非法输入
+	}
+	for _, c := range cases {
+		if got := DefaultOverlapFor(c.maxChars); got != c.want {
+			t.Fatalf("DefaultOverlapFor(%d) = %d, want %d", c.maxChars, got, c.want)
+		}
+	}
+}

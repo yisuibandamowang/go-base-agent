@@ -1540,6 +1540,9 @@ func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOption
 	}
 	if v := intFromChunkConfig(raw, "chunkSize", "size", "targetChars"); v > 0 {
 		opts.ChunkSize = v
+		// 重叠缺省按块大小等比给（1/8），而不是照搬默认预算里配 512 的 128：
+		// 重叠同时是回退寻找句末标点的最大距离，取小了切口会落在句子中间
+		opts.OverlapSize = rag.DefaultOverlapFor(v)
 	}
 	if v := intFromChunkConfig(raw, "overlapSize", "overlapChars", "overlap"); v >= 0 {
 		opts.OverlapSize = v

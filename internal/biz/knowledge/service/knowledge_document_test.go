@@ -2980,3 +2980,31 @@ func ptrInt16(v int16) *int16 {
 func ptrString(v string) *string {
 	return &v
 }
+
+// TestChunkingOptionsForDocumentOverlapScalesWithSize 验证只配置 chunkSize 时
+// 重叠缺省按块大小等比计算（1/8），而非照搬默认预算的 128。
+// 对齐 Java 修复：块重叠计算及相关配置说明。
+func TestChunkingOptionsForDocumentOverlapScalesWithSize(t *testing.T) {
+	doc := &knowledgeModel.KnowledgeDocument{ChunkConfig: `{"chunkSize":2048}`}
+	opts := chunkingOptionsForDocument(doc)
+	if opts.ChunkSize != 2048 {
+		t.Fatalf("expected chunk size 2048, got %d", opts.ChunkSize)
+	}
+	if opts.OverlapSize != 256 {
+		t.Fatalf("expected overlap 256 (2048/8), got %d", opts.OverlapSize)
+	}
+
+	// 显式配置 overlap 时优先生效
+	doc = &knowledgeModel.KnowledgeDocument{ChunkConfig: `{"chunkSize":2048,"overlapChars":100}`}
+	opts = chunkingOptionsForDocument(doc)
+	if opts.OverlapSize != 100 {
+		t.Fatalf("explicit overlap should win, got %d", opts.OverlapSize)
+	}
+
+	// 未配置任何项时保持默认
+	doc = &knowledgeModel.KnowledgeDocument{}
+	opts = chunkingOptionsForDocument(doc)
+	if opts.ChunkSize != 512 || opts.OverlapSize != 128 {
+		t.Fatalf("unexpected defaults: %+v", opts)
+	}
+}
