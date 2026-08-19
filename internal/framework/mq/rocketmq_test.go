@@ -243,3 +243,56 @@ func TestRocketConsumer_SubscribeMapsMessagesAndRetriesOnHandlerError(t *testing
 		t.Fatalf("expected retry later on handler error, status=%v err=%v", status, err)
 	}
 }
+
+// TestRocketProducer_SendInTransactionCleansUpCallbackOnFailure 验证事务消息发送失败时
+// 按 executionID 清理本地事务回调，持续失败不会让 executions 无界增长。
+// 对齐 Java 修复：事务消息发送失败时清理本地事务回调。
+func TestRocketProducer_SendInTransactionCleansUpCallbackOnFailure(t *testing.T) {
+	txClient := &fakeRocketTransactionProducerClient{err: errors.New("broker unavailable")}
+	producer := NewRocketProducerWithClients(nil, txClient)
+
+	executorCalled := false
+	_, err := producer.SendInTransaction(context.Background(), Message{Topic: "topic-a"}, func(ctx context.Context, msg Message) error {
+		executorCalled = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected send failure")
+	}
+	if executorCalled {
+		t.Fatal("executor should not run when send fails")
+	}
+	producer.txMu.Lock()
+	pending := len(producer.executions)
+	producer.txMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("expected no pending transaction executions after failure, got %d", pending)
+	}
+}
+
+// TestRocketProducer_SendInTransactionCleansUpCallbackOnRollback 验证非 COMMIT 状态同样清理回调。
+func TestRocketProducer_SendInTransactionCleansUpCallbackOnRollback(t *testing.T) {
+	txClient := &fakeRocketTransactionProducerClient{result: &primitive.TransactionSendResult{
+		SendResult: &primitive.SendResult{MsgID: "msg-1", Status: primitive.SendOK},
+		State:      primitive.RollbackMessageState,
+	}}
+	producer := NewRocketProducerWithClients(nil, txClient)
+
+	executorCalled := false
+	_, err := producer.SendInTransaction(context.Background(), Message{Topic: "topic-a"}, func(ctx context.Context, msg Message) error {
+		executorCalled = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected rollback to surface as error")
+	}
+	if executorCalled {
+		t.Fatal("executor should not run on rollback result")
+	}
+	producer.txMu.Lock()
+	pending := len(producer.executions)
+	producer.txMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("expected no pending transaction executions after rollback, got %d", pending)
+	}
+}

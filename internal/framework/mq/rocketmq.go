@@ -141,12 +141,17 @@ func (p *RocketProducer) SendInTransaction(ctx context.Context, msg Message, exe
 
 	result, err := p.txClient.SendMessageInTransaction(ctx, rocketMsg)
 	if err != nil {
+		// 同步异常时本地事务监听器不会被调用，先注销尚未消费的回调，避免持续故障时 executions 无界增长
+		p.removeTransactionExecution(executionID)
 		return nil, fmt.Errorf("rocketmq send transaction: %w", err)
 	}
 	if result == nil || result.SendResult == nil {
+		p.removeTransactionExecution(executionID)
 		return nil, fmt.Errorf("rocketmq send transaction: empty result")
 	}
 	if result.State != primitive.CommitMessageState {
+		// 非 SEND_OK/COMMIT 结果同样可能跳过本地事务监听器，按同一 executionID 清理
+		p.removeTransactionExecution(executionID)
 		return nil, fmt.Errorf("rocketmq transaction state: %v", result.State)
 	}
 	return &SendResult{MsgID: result.MsgID, Status: rocketSendStatusText(result.Status)}, nil
