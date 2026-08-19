@@ -268,3 +268,32 @@ func TestMetadataWithSourcesUsesDocumentNameFromDatabase(t *testing.T) {
 		t.Fatalf("expected source url from database, got %+v", meta)
 	}
 }
+
+// TestPgRetrieverReusesQueryEmbeddingPerModel 验证同一 query 在相同 embedding 模型下只向量化一次，
+// 多个库共用同一向量。对齐 Java 复用并行检索 Query Embedding 优化。
+func TestPgRetrieverReusesQueryEmbeddingPerModel(t *testing.T) {
+	emb := &recordingEmbeddingService{}
+	searcher := &recordingVectorSearcher{}
+	retriever := &PgRetriever{
+		vectorSearch: searcher,
+		emb:          emb,
+		kbRepo: fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "kb-1", EmbeddingModel: "model-a", CollectionName: "collection_a"},
+			{Name: "kb-2", EmbeddingModel: "model-a", CollectionName: "collection_b"},
+			{Name: "kb-3", EmbeddingModel: "model-b", CollectionName: "collection_c"},
+		}},
+		topK: 10,
+	}
+
+	_, err := retriever.Retrieve(context.Background(), "问题", 10)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	// 3 个库只有 2 个不同模型，Embedding 只应各调用一次
+	if len(emb.modelIDs) != 2 {
+		t.Fatalf("expected 2 embedding calls (one per model), got %d: %v", len(emb.modelIDs), emb.modelIDs)
+	}
+	if len(searcher.collections) != 3 {
+		t.Fatalf("expected 3 collections searched, got %d: %v", len(searcher.collections), searcher.collections)
+	}
+}

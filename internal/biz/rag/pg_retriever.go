@@ -77,8 +77,25 @@ func (r *PgRetriever) Retrieve(ctx context.Context, question string, topK int) (
 	var embeddingErrors []error
 	embeddingSucceeded := false
 
+	// 同一 query 在相同 embedding 模型下只向量化一次，多个库共用同一向量
+	// 对齐 Java AbstractParallelRetriever 的 Query Embedding 复用
+	vecByModel := make(map[string][]float32)
+	embedQuery := func(model string) ([]float32, error) {
+		if vec, ok := vecByModel[model]; ok {
+			return vec, nil
+		}
+		vec, err := r.emb.EmbedWithModel(ctx, question, model)
+		if err != nil {
+			// 缓存失败标记（nil）避免同模型多库时重复请求
+			vecByModel[model] = nil
+			return nil, err
+		}
+		vecByModel[model] = vec
+		return vec, nil
+	}
+
 	for _, kb := range kbs {
-		vec, err := r.emb.EmbedWithModel(ctx, question, kb.EmbeddingModel)
+		vec, err := embedQuery(kb.EmbeddingModel)
 		if err != nil {
 			slog.Warn("pg retriever: embed question failed", "kb", kb.Name, "model", kb.EmbeddingModel, "err", err)
 			embeddingErrors = append(embeddingErrors, fmt.Errorf("%s(%s): %w", kb.Name, kb.EmbeddingModel, err))

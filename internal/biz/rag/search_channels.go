@@ -362,6 +362,22 @@ func (c *BackendIntentDirectedSearchChannel) searchIntentVectors(ctx context.Con
 		}
 	}
 
+	// 同一 query 在相同 embedding 模型下只向量化一次，多个目标库共用同一向量
+	// 对齐 Java AbstractParallelRetriever 的 Query Embedding 复用
+	vecByModel := make(map[string][]float32)
+	embedQuery := func(model string) ([]float32, bool) {
+		if vec, ok := vecByModel[model]; ok {
+			return vec, true
+		}
+		vec, err := c.emb.EmbedWithModel(ctx, query, model)
+		if err != nil {
+			vecByModel[model] = nil
+			return nil, false
+		}
+		vecByModel[model] = vec
+		return vec, true
+	}
+
 	chunks := make([]RetrievedChunk, 0)
 	searched := false
 	for _, target := range targets {
@@ -374,8 +390,8 @@ func (c *BackendIntentDirectedSearchChannel) searchIntentVectors(ctx context.Con
 		if topK <= 0 {
 			topK = 10
 		}
-		vec, err := c.emb.EmbedWithModel(ctx, query, kb.EmbeddingModel)
-		if err != nil {
+		vec, ok := embedQuery(kb.EmbeddingModel)
+		if !ok {
 			continue
 		}
 		vectorChunks, err := c.vectorSearch.Search(ctx, target.collectionName, vec, topK)
