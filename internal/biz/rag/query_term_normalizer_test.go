@@ -187,3 +187,25 @@ type staticQueryNormalizer struct {
 func (n *staticQueryNormalizer) Normalize(ctx context.Context, text string) (string, error) {
 	return n.value, nil
 }
+
+// TestQueryTermMappingEmptyCacheStillHits 验证一条规则都没配时缓存仍然命中，
+// 不会每次提问都白读一次数据库。对齐 Java 修复：QueryTermMapping 缓存判断逻辑优化。
+func TestQueryTermMappingEmptyCacheStillHits(t *testing.T) {
+	cache := &fakeQueryTermMappingCache{loadHit: true, loadMappings: []intentModel.QueryTermMapping{}}
+	lister := &testTermMappingLister{}
+	normalizer := NewDBQueryTermNormalizer(lister)
+	normalizer.SetCacheManager(cache)
+
+	if _, err := normalizer.Normalize(context.Background(), "问题"); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if _, err := normalizer.Normalize(context.Background(), "问题"); err != nil {
+		t.Fatalf("Normalize again: %v", err)
+	}
+	if lister.calls != 0 {
+		t.Fatalf("empty cached mappings should not hit database, got %d db calls", lister.calls)
+	}
+	if cache.loadCalls != 2 {
+		t.Fatalf("expected 2 cache loads, got %d", cache.loadCalls)
+	}
+}

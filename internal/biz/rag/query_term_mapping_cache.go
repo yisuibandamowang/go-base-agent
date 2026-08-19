@@ -43,24 +43,34 @@ func queryTermMappingCacheKey(domain string) string {
 }
 
 // LoadMappings loads mappings from Redis.
+// 一条规则都没配也要认缓存（hit=true 且 mappings 为空切片），
+// 否则每次提问都会白读一次数据库；规则增删改各自会清缓存。
 func (m *RedisQueryTermMappingCacheManager) LoadMappings(ctx context.Context, domain string) ([]intentModel.QueryTermMapping, bool, error) {
 	if m == nil || m.cache == nil {
+		return nil, false, nil
+	}
+	exists, err := m.cache.Exists(ctx, queryTermMappingCacheKey(domain))
+	if err != nil {
+		return nil, false, fmt.Errorf("check query term mappings cache: %w", err)
+	}
+	if !exists {
 		return nil, false, nil
 	}
 	var mappings []intentModel.QueryTermMapping
 	if err := m.cache.GetJSON(ctx, queryTermMappingCacheKey(domain), &mappings); err != nil {
 		return nil, false, fmt.Errorf("load query term mappings from cache: %w", err)
 	}
-	if len(mappings) == 0 {
-		return nil, false, nil
-	}
 	return mappings, true, nil
 }
 
 // SaveMappings stores mappings in Redis.
+// 空列表也写入：配合 LoadMappings 的 exists 判断，让"没配规则"同样走缓存而不回源数据库。
 func (m *RedisQueryTermMappingCacheManager) SaveMappings(ctx context.Context, domain string, mappings []intentModel.QueryTermMapping) error {
 	if m == nil || m.cache == nil {
 		return nil
+	}
+	if mappings == nil {
+		mappings = []intentModel.QueryTermMapping{}
 	}
 	if err := m.cache.SetJSON(ctx, queryTermMappingCacheKey(domain), mappings, queryTermMappingCacheTTL); err != nil {
 		return fmt.Errorf("save query term mappings to cache: %w", err)
