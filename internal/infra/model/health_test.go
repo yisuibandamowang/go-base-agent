@@ -148,3 +148,75 @@ func TestHealthStore_MarkSuccessUnknownID(t *testing.T) {
 		t.Fatal("should allow after MarkSuccess on unknown")
 	}
 }
+
+func TestHealthStore_ReleaseHalfOpenPermit(t *testing.T) {
+	s := NewHealthStore(config.AISelectionConfig{
+		FailureThreshold: 1,
+		OpenDurationMs:   1,
+	})
+
+	s.MarkFailure("m1")
+	time.Sleep(2 * time.Millisecond)
+
+	permit := s.AcquirePermit("m1")
+	if permit == nil {
+		t.Fatal("half-open should grant permit")
+	}
+	if !permit.HasHalfOpenSlot() {
+		t.Fatal("half-open permit should carry slot token")
+	}
+
+	// 名额被占用时第二次探测应被拒绝
+	if s.AcquirePermit("m1") != nil {
+		t.Fatal("second half-open call should be denied while inflight")
+	}
+
+	// 持有者释放名额后，状态仍是半开但允许下一次探测
+	s.ReleaseHalfOpenPermit(permit)
+	if s.AcquirePermit("m1") == nil {
+		t.Fatal("permit should be reusable after release")
+	}
+}
+
+func TestHealthStore_ReleaseHalfOpenPermitStaleToken(t *testing.T) {
+	s := NewHealthStore(config.AISelectionConfig{
+		FailureThreshold: 1,
+		OpenDurationMs:   1,
+	})
+
+	s.MarkFailure("m1")
+	time.Sleep(2 * time.Millisecond)
+
+	first := s.AcquirePermit("m1")
+	if first == nil {
+		t.Fatal("half-open should grant permit")
+	}
+	// 模拟旧调用先失败转 OPEN 再进入新一轮探测
+	s.MarkFailure("m1")
+	time.Sleep(2 * time.Millisecond)
+	second := s.AcquirePermit("m1")
+	if second == nil {
+		t.Fatal("new probe round should grant permit")
+	}
+
+	// 旧凭证释放不得影响新一轮探测的占用状态
+	s.ReleaseHalfOpenPermit(first)
+	if s.AcquirePermit("m1") != nil {
+		t.Fatal("stale permit release must not free the new probe slot")
+	}
+}
+
+func TestHealthStore_ReleaseHalfOpenPermitNoop(t *testing.T) {
+	s := newTestHealthStore()
+
+	// 普通许可（非半开）释放应是 no-op
+	permit := s.AcquirePermit("m1")
+	if permit == nil {
+		t.Fatal("closed state should grant permit")
+	}
+	if permit.HasHalfOpenSlot() {
+		t.Fatal("closed state permit should not carry slot")
+	}
+	s.ReleaseHalfOpenPermit(permit)
+	s.ReleaseHalfOpenPermit(nil)
+}

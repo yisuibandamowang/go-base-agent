@@ -15,10 +15,25 @@ const (
 	stateHalfOpen
 )
 
+// CallPermit 一次模型调用的许可凭证。
+// halfOpenToken 非 0 时表示本次调用持有半开探测名额，取消/中断后只允许释放该名额，
+// 避免旧调用误标记新一轮探测的结果。
+// 对齐 Java ModelHealthStore.CallPermit。
+type CallPermit struct {
+	ModelID      string
+	halfOpenToken int64
+}
+
+// HasHalfOpenSlot 报告本次许可是否持有半开探测名额。
+func (p CallPermit) HasHalfOpenSlot() bool {
+	return p.halfOpenToken > 0
+}
+
 type health struct {
 	consecutiveFailures int
 	openUntil           time.Time
 	halfOpenInFlight    bool
+	halfOpenToken       int64
 	state               healthState
 }
 
@@ -28,6 +43,8 @@ type HealthStore struct {
 	mu   sync.Mutex
 	data map[string]*health
 	cfg  config.AISelectionConfig
+
+	probeTokenSeq int64
 }
 
 // NewHealthStore creates a new HealthStore.
@@ -61,8 +78,14 @@ func (s *HealthStore) IsUnavailable(id string) bool {
 // Returns false if id is empty, the model is OPEN, or HALF_OPEN with an in-flight probe.
 // On successful HALF_OPEN check, marks the probe as in-flight.
 func (s *HealthStore) AllowCall(id string) bool {
+	return s.AcquirePermit(id) != nil
+}
+
+// AcquirePermit 获取一次模型调用许可，返回 nil 表示拒绝调用。
+// 持有半开探测名额时返回带 token 的凭证，调用方在取消/中断场景应调用 ReleaseHalfOpenPermit 而非 MarkFailure。
+func (s *HealthStore) AcquirePermit(id string) *CallPermit {
 	if id == "" {
-		return false
+		return nil
 	}
 
 	s.mu.Lock()
@@ -70,7 +93,7 @@ func (s *HealthStore) AllowCall(id string) bool {
 
 	h := s.data[id]
 	if h == nil {
-		return true
+		return &CallPermit{ModelID: id}
 	}
 
 	now := time.Now()
@@ -78,19 +101,23 @@ func (s *HealthStore) AllowCall(id string) bool {
 	switch h.state {
 	case stateOpen:
 		if h.openUntil.After(now) {
-			return false
+			return nil
 		}
 		h.state = stateHalfOpen
 		h.halfOpenInFlight = true
-		return true
+		s.probeTokenSeq++
+		h.halfOpenToken = s.probeTokenSeq
+		return &CallPermit{ModelID: id, halfOpenToken: h.halfOpenToken}
 	case stateHalfOpen:
 		if h.halfOpenInFlight {
-			return false
+			return nil
 		}
 		h.halfOpenInFlight = true
-		return true
+		s.probeTokenSeq++
+		h.halfOpenToken = s.probeTokenSeq
+		return &CallPermit{ModelID: id, halfOpenToken: h.halfOpenToken}
 	default:
-		return true
+		return &CallPermit{ModelID: id}
 	}
 }
 
@@ -145,5 +172,26 @@ func (s *HealthStore) MarkFailure(id string) {
 		h.state = stateOpen
 		h.openUntil = now.Add(time.Duration(s.cfg.OpenDurationMs) * time.Millisecond)
 		h.consecutiveFailures = 0
+	}
+}
+
+// ReleaseHalfOpenPermit 仅释放当前凭证持有的半开探测名额。
+// 用于首包探测等待期间请求被取消/中断的场景：名额归还后允许下一次探测，
+// 但不改变熔断状态（不标记失败也不标记成功）。
+// 对齐 Java releaseHalfOpenPermit。
+func (s *HealthStore) ReleaseHalfOpenPermit(permit *CallPermit) {
+	if permit == nil || permit.halfOpenToken <= 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	h, ok := s.data[permit.ModelID]
+	if !ok {
+		return
+	}
+	if h.state == stateHalfOpen && h.halfOpenInFlight && h.halfOpenToken == permit.halfOpenToken {
+		h.halfOpenInFlight = false
 	}
 }

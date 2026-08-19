@@ -27,6 +27,7 @@ type ProbeResult struct {
 type ProbeBridge struct {
 	inner StreamCallback
 	once  sync.Once
+	ctx   context.Context
 
 	received bool
 	ch       chan ProbeResult
@@ -38,6 +39,22 @@ func NewProbeBridge(inner StreamCallback) *ProbeBridge {
 		inner: inner,
 		ch:    make(chan ProbeResult, 1),
 	}
+}
+
+// NewProbeBridgeWithContext creates a ProbeBridge bound to a request context,
+// so first-packet probes can observe cancellation.
+func NewProbeBridgeWithContext(ctx context.Context, inner StreamCallback) *ProbeBridge {
+	bridge := NewProbeBridge(inner)
+	bridge.ctx = ctx
+	return bridge
+}
+
+// Context returns the bound request context, or nil when unbound.
+func (b *ProbeBridge) Context() context.Context {
+	if b == nil {
+		return nil
+	}
+	return b.ctx
 }
 
 func (b *ProbeBridge) OnContent(content string) {
@@ -171,13 +188,19 @@ func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb Stre
 		if !ok {
 			continue
 		}
-		if !s.health.AllowCall(target.ID) {
+		permit := s.health.AcquirePermit(target.ID)
+		if permit == nil {
 			continue
 		}
 
-		bridge := NewProbeBridge(cb)
+		bridge := NewProbeBridgeWithContext(ctx, cb)
 		handle, err := client.StreamChat(ctx, req, bridge, target)
 		if err != nil {
+			if ctx.Err() != nil {
+				// 请求取消属于客户端行为，不算模型失败：持有者只释放探测名额
+				s.health.ReleaseHalfOpenPermit(permit)
+				return nil, ctx.Err()
+			}
 			s.health.MarkFailure(target.ID)
 			last = err
 			continue
@@ -190,6 +213,11 @@ func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb Stre
 		result, err := s.firstPacketProbe.AwaitFirstPacket(bridge, s.firstPacketTimeout)
 		if err != nil {
 			handle.Cancel()
+			if ctx.Err() != nil {
+				// 等待首包时请求被取消：探测名额由持有者释放，避免半开名额被占用
+				s.health.ReleaseHalfOpenPermit(permit)
+				return nil, ctx.Err()
+			}
 			s.health.MarkFailure(target.ID)
 			last = err
 			continue

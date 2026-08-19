@@ -11,6 +11,11 @@ import (
 )
 
 func testRoutingService(clients []ChatClient) *RoutingLLMService {
+	_, svc := testRoutingServiceWithHealth(clients)
+	return svc
+}
+
+func testRoutingServiceWithHealth(clients []ChatClient) (*model.HealthStore, *RoutingLLMService) {
 	cfg := config.AIConfig{
 		Providers: config.AIProvidersConfig{
 			"openai":  {URL: "https://api.openai.com", Protocol: "openai-compatible"},
@@ -29,7 +34,7 @@ func testRoutingService(clients []ChatClient) *RoutingLLMService {
 
 	health := model.NewHealthStore(config.AISelectionConfig{FailureThreshold: 2, OpenDurationMs: 100})
 
-	return NewRoutingLLMService(
+	return health, NewRoutingLLMService(
 		model.NewSelector(cfg, health),
 		health,
 		model.NewRoutingExecutor(health),
@@ -37,6 +42,29 @@ func testRoutingService(clients []ChatClient) *RoutingLLMService {
 		&noopFirstPacketProbe{},
 		60*time.Second,
 	)
+}
+
+// ctxAwareFirstPacketProbe 在 ctx 取消时返回 ctx 错误，否则返回成功。
+type ctxAwareFirstPacketProbe struct{}
+
+func (p *ctxAwareFirstPacketProbe) AwaitFirstPacket(bridge *ProbeBridge, timeout time.Duration) (ProbeResult, error) {
+	ctx := bridge.Context()
+	if ctx != nil {
+		select {
+		case result := <-bridge.AwaitResult():
+			return result, nil
+		case <-ctx.Done():
+			return ProbeResult{}, ctx.Err()
+		case <-time.After(timeout):
+			return ProbeResult{Success: false, Error: errors.New("first packet timeout")}, nil
+		}
+	}
+	select {
+	case result := <-bridge.AwaitResult():
+		return result, nil
+	case <-time.After(timeout):
+		return ProbeResult{Success: false, Error: errors.New("first packet timeout")}, nil
+	}
 }
 
 type noopFirstPacketProbe struct{}
@@ -118,6 +146,43 @@ func TestLLMService_StreamChat_Success(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for stream content")
+	}
+}
+
+// TestLLMService_StreamChat_CancelReleasesHalfOpenSlot 验证首包探测期间请求被取消时，
+// 持有者只释放半开探测名额：不标记失败、不占用后续探测。
+// 对齐 Java RoutingLLMServiceHalfOpenRecoveryTest。
+func TestLLMService_StreamChat_CancelReleasesHalfOpenSlot(t *testing.T) {
+	health, svc := testRoutingServiceWithHealth([]ChatClient{
+		&fakeChatClient{name: "openai", streamFn: func(ctx context.Context, req Request, cb StreamCallback, target model.Target) (StreamHandle, error) {
+			// 启动成功但不发首包，让探测等待期间 ctx 取消
+			return &noopStreamHandle{}, nil
+		}},
+	})
+	svc.firstPacketProbe = &ctxAwareFirstPacketProbe{}
+
+	// 先把模型打进 OPEN，再等冷却进入半开
+	health.MarkFailure("gpt-4")
+	health.MarkFailure("gpt-4")
+	if !health.IsUnavailable("gpt-4") {
+		t.Fatal("model should be open after threshold failures")
+	}
+	time.Sleep(120 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := svc.StreamChat(ctx, SimpleRequest("hello"), &captureCallback{})
+	if err == nil {
+		t.Fatal("cancelled request should return error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	// 名额应已释放：半开状态仍允许下一次探测
+	if !health.AllowCall("gpt-4") {
+		t.Fatal("half-open probe slot should be reusable after cancellation")
 	}
 }
 
