@@ -365,3 +365,29 @@ func TestStreamError_Error(t *testing.T) {
 		t.Fatal("expected non-empty error")
 	}
 }
+
+// TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse 验证 Thinking 未显式设置时
+// 也显式传递 enable_thinking=false：Qwen3 系列在百炼 API 上默认开启思考，缺省会误触发深度思考。
+// 对齐 Java 修复：未开启思考时显式传递 enable_thinking=false。
+func TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse(t *testing.T) {
+	client := NewOpenAICompatibleChatClient("test", nil)
+	req := SimpleRequest("hello")
+	if req.Thinking != nil {
+		t.Fatal("precondition: Thinking should be nil")
+	}
+	target := model.Target{
+		ID: "test-model",
+		Candidate: config.AICandidateConfig{
+			Model: "test-model",
+		},
+	}
+
+	body := client.buildRequestBody(req, target, false)
+	value, ok := body["enable_thinking"]
+	if !ok {
+		t.Fatal("expected enable_thinking to be set even when Thinking is nil")
+	}
+	if enabled, ok := value.(bool); !ok || enabled {
+		t.Fatalf("expected enable_thinking=false, got %#v", value)
+	}
+}

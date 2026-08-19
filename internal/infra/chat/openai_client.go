@@ -118,8 +118,11 @@ func (c *OpenAICompatibleChatClient) buildRequestBody(req Request, target model.
 
 	if c.CustomizeBody != nil {
 		c.CustomizeBody(body, req)
-	} else if req.Thinking != nil {
-		body["enable_thinking"] = *req.Thinking
+	} else {
+		// Qwen3 系列在百炼 API 上默认 enable_thinking=true，
+		// 未开启思考时必须显式传 false，否则模型每次都默认深度思考
+		thinking := req.Thinking != nil && *req.Thinking
+		body["enable_thinking"] = thinking
 	}
 
 	return body
