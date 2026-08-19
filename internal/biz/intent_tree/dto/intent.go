@@ -67,6 +67,7 @@ type IntentNodeResp struct {
 	Description         string            `json:"description"`
 	Examples            string            `json:"examples"`
 	CollectionName      string            `json:"collectionName"`
+	CollectionNames     []string          `json:"collectionNames"`
 	TopK                int               `json:"topK"`
 	McpToolID           string            `json:"mcpToolId"`
 	Kind                int16             `json:"kind"`
@@ -90,6 +91,7 @@ type CreateIntentReq struct {
 	Description         string         `json:"description"`
 	Examples            IntentExamples `json:"examples"`
 	CollectionName      string         `json:"collectionName"`
+	CollectionNames     []string       `json:"collectionNames"`
 	TopK                int            `json:"topK"`
 	McpToolID           string         `json:"mcpToolId"`
 	Kind                int16          `json:"kind"`
@@ -102,7 +104,7 @@ type CreateIntentReq struct {
 	EnabledSet          bool           `json:"-"`
 }
 
-// UnmarshalJSON 记录 topK 是否由请求显式传入。
+// UnmarshalJSON 记录 topK 是否由请求显式传入，同时兼容 collectionNames 数组。
 func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		KbID                string         `json:"kbId"`
@@ -113,6 +115,7 @@ func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 		Description         string         `json:"description"`
 		Examples            IntentExamples `json:"examples"`
 		CollectionName      string         `json:"collectionName"`
+		CollectionNames     []string       `json:"collectionNames"`
 		TopK                *int           `json:"topK"`
 		McpToolID           string         `json:"mcpToolId"`
 		Kind                int16          `json:"kind"`
@@ -133,6 +136,10 @@ func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 	r.Description = raw.Description
 	r.Examples = raw.Examples
 	r.CollectionName = raw.CollectionName
+	r.CollectionNames = raw.CollectionNames
+	if raw.CollectionName == "" && len(raw.CollectionNames) > 0 {
+		r.CollectionName = raw.CollectionNames[0]
+	}
 	if raw.TopK != nil {
 		r.TopK = *raw.TopK
 		r.TopKSet = true
@@ -165,6 +172,7 @@ type UpdateIntentReq struct {
 	Description         *string         `json:"description"`
 	Examples            *IntentExamples `json:"examples"`
 	CollectionName      *string         `json:"collectionName"`
+	CollectionNames     []string        `json:"collectionNames"`
 	TopK                *int            `json:"topK"`
 	McpToolID           *string         `json:"mcpToolId"`
 	Kind                *int16          `json:"kind"`

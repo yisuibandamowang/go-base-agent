@@ -125,6 +125,21 @@ func TestIntentService_CreateNodeResolvesCollectionNameFromKBIDLikeJava(t *testi
 	}
 }
 
+func TestIntentService_CreateNodeSupportsMultipleCollectionNamesLikeJava(t *testing.T) {
+	svc := newIntentValidationService(t)
+	var req dto.CreateIntentReq
+	if err := json.Unmarshal([]byte(`{"intentCode":"member.multi-collection","name":"多库意图","level":1,"collectionNames":["collection-a","collection-b"]}`), &req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	created, err := svc.CreateNode(context.Background(), req, "user-1")
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	if created.CollectionName != "collection-a" {
+		t.Fatalf("expected first collection name to be persisted, got %s", created.CollectionName)
+	}
+}
+
 func TestIntentService_CreateNodeDefaultsEnabledToOneLikeJava(t *testing.T) {
 	svc := newIntentValidationService(t)
 	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{

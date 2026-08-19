@@ -13,7 +13,8 @@ type IntentNode struct {
 	ParentCode          string `gorm:"column:parent_code;type:varchar(64)" json:"parentCode"`
 	Description         string `gorm:"column:description;type:varchar(512)" json:"description"`
 	Examples            string `gorm:"column:examples;type:text" json:"examples"`
-	CollectionName      string `gorm:"column:collection_name;type:varchar(128)" json:"collectionName"`
+	CollectionName      string   `gorm:"column:collection_name;type:varchar(128)" json:"collectionName"`
+	CollectionNames     []string `gorm:"column:collection_names;type:jsonb;serializer:json" json:"collectionNames"`
 	TopK                int    `gorm:"column:top_k;type:integer" json:"topK"`
 	McpToolID           string `gorm:"column:mcp_tool_id;type:varchar(128)" json:"mcpToolId"`
 	Kind                int16  `gorm:"column:kind;type:smallint;not null;default:0" json:"kind"`

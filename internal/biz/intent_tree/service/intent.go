@@ -67,6 +67,10 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 	if err != nil {
 		return nil, err
 	}
+	collectionNames := req.CollectionNames
+	if len(collectionNames) == 0 && collectionName != "" {
+		collectionNames = []string{collectionName}
+	}
 	node := &model.IntentNode{
 		KbID:                req.KbID,
 		IntentCode:          req.IntentCode,
@@ -76,6 +80,7 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 		Description:         req.Description,
 		Examples:            string(req.Examples),
 		CollectionName:      collectionName,
+		CollectionNames:     collectionNames,
 		TopK:                topK,
 		McpToolID:           req.McpToolID,
 		Kind:                req.Kind,
@@ -389,6 +394,7 @@ func toIntentResp(node *model.IntentNode) *dto.IntentNodeResp {
 		Description:         node.Description,
 		Examples:            node.Examples,
 		CollectionName:      node.CollectionName,
+		CollectionNames:     node.CollectionNames,
 		TopK:                node.TopK,
 		McpToolID:           node.McpToolID,
 		Kind:                node.Kind,
@@ -430,9 +436,15 @@ func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
 	if req.Examples != nil {
 		node.Examples = string(*req.Examples)
 	}
-	if req.CollectionName != nil {
-		node.CollectionName = *req.CollectionName
-	}
+if req.CollectionName != nil {
+			node.CollectionName = *req.CollectionName
+		}
+		if len(req.CollectionNames) > 0 {
+			node.CollectionNames = req.CollectionNames
+			if req.CollectionName == nil {
+				node.CollectionName = req.CollectionNames[0]
+			}
+		}
 	if req.TopK != nil {
 		if err := validateTopK(*req.TopK); err != nil {
 			return err
