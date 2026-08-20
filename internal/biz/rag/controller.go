@@ -27,6 +27,9 @@ type Service interface {
 type Controller struct {
 	svc   Service
 	guard *idempotent.Guard
+	// evalEnabled 评测模式旁路幂等提交：评测工具高频重复提问会被幂等锁拦截。
+	// 对齐 Java IdempotentSubmitAspect 的 app.eval.enabled 开关。
+	evalEnabled bool
 }
 
 // NewController creates a new RAG chat controller.
@@ -37,6 +40,11 @@ func NewController(svc Service) *Controller {
 // SetIdempotentGuard configures an optional idempotency guard for chat and stop routes.
 func (ctl *Controller) SetIdempotentGuard(guard *idempotent.Guard) {
 	ctl.guard = guard
+}
+
+// SetEvalEnabled toggles the idempotency bypass for evaluation mode.
+func (ctl *Controller) SetEvalEnabled(enabled bool) {
+	ctl.evalEnabled = enabled
 }
 
 // Chat handles GET /rag/v3/chat — SSE streaming chat.
@@ -97,7 +105,7 @@ func (ctl *Controller) Stop(c *gin.Context) {
 }
 
 func (ctl *Controller) acquireSubmitLock(c *gin.Context, key string, ttl time.Duration, duplicateMessage string) bool {
-	if ctl.guard == nil {
+	if ctl.guard == nil || ctl.evalEnabled {
 		return true
 	}
 	ok, err := ctl.guard.Check(c.Request.Context(), key, ttl)
@@ -112,7 +120,7 @@ func (ctl *Controller) acquireSubmitLock(c *gin.Context, key string, ttl time.Du
 }
 
 func (ctl *Controller) releaseSubmitLock(key string) {
-	if ctl.guard == nil {
+	if ctl.guard == nil || ctl.evalEnabled {
 		return
 	}
 	_ = ctl.guard.Clear(context.Background(), key)

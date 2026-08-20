@@ -458,6 +458,7 @@ func main() {
 	)
 	ragCtl := rag.NewController(ragChatService)
 	ragCtl.SetIdempotentGuard(idempotentGuard)
+	ragCtl.SetEvalEnabled(cfg.App.Eval.Enabled)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

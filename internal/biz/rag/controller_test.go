@@ -387,3 +387,36 @@ func (s *blockingRagService) StopTask(taskID string) {
 		<-s.stopRelease
 	}
 }
+
+// TestController_EvalModeBypassesIdempotentGuard 验证评测模式下幂等提交被旁路：
+// 评测工具高频重复提问不应被幂等锁拦截。对齐 Java app.eval.enabled 开关。
+func TestController_EvalModeBypassesIdempotentGuard(t *testing.T) {
+	calls := 0
+	svc := &chatServiceRecorder{onStream: func(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+		calls++
+	}}
+	ctl := NewController(svc)
+	ctl.SetEvalEnabled(true)
+
+	for range 3 {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/rag/v3/chat?question=重复问题", nil)
+		ctl.Chat(c)
+	}
+	if calls != 3 {
+		t.Fatalf("eval mode should bypass idempotency, got %d/3 calls", calls)
+	}
+}
+
+type chatServiceRecorder struct {
+	onStream func(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender)
+}
+
+func (r *chatServiceRecorder) StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender) {
+	if r.onStream != nil {
+		r.onStream(ctx, question, conversationID, taskID, deepThinking, sender)
+	}
+}
+
+func (r *chatServiceRecorder) StopTask(taskID string) {}
