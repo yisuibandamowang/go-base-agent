@@ -40,6 +40,7 @@ type DefaultPromptBuilder struct {
 	systemFile string // e.g. "default_system.txt"
 	resolver   RuntimePromptResolver
 	engineMode string
+	citationOn bool
 }
 
 const citationRulesFile = "answer_citation_rules.txt"
@@ -69,6 +70,13 @@ func (b *DefaultPromptBuilder) SetEngineMode(mode string) {
 		return
 	}
 	b.engineMode = strings.ToUpper(strings.TrimSpace(mode))
+}
+
+// SetCitationEnabled 设置知识库回答的行内引用规则开关。
+func (b *DefaultPromptBuilder) SetCitationEnabled(enabled bool) {
+	if b != nil {
+		b.citationOn = enabled
+	}
 }
 
 // Build constructs a chat.Request from the prompt context.
@@ -162,7 +170,7 @@ func systemPromptSlotCandidates(ctx PromptContext, mode string) []string {
 }
 
 func (b *DefaultPromptBuilder) appendCitationRulesIfNeeded(ctx PromptContext, sysPrompt string) string {
-	if strings.TrimSpace(ctx.KbContext) == "" {
+	if b == nil || !b.citationOn || strings.TrimSpace(ctx.KbContext) == "" {
 		return sysPrompt
 	}
 	if b == nil || b.loader == nil {

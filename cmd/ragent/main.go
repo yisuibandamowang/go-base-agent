@@ -432,6 +432,7 @@ func main() {
 		func() *rag.DefaultPromptBuilder {
 			builder := rag.NewDefaultPromptBuilder(agentPromptResolver)
 			builder.SetEngineMode(resolveEngineType(cfg))
+			builder.SetCitationEnabled(cfg.RAG.Citation.IsEnabledByDefault())
 			return builder
 		}(),
 		llmRewriter,
@@ -442,6 +443,7 @@ func main() {
 	ragPipeline.SetStreamTimeout(cfg.RAG.Default.SSETimeoutDuration())
 	ragPipeline.SetDefaultTopK(cfg.RAG.Search.DefaultTopK)
 	ragPipeline.SetCodeRepoPath(cfg.RAG.Code.RepoPath)
+	ragPipeline.SetCitationEnabled(cfg.RAG.Citation.IsEnabledByDefault())
 	ragPipeline.SetPreferredLLMService(preferredLLMService)
 	ragPipeline.SetAnswerCache(rag.NewRedisAnswerCacheManager(rdb), cfg.RAG.AnswerCache.IsEnabledByDefault(), cfg.RAG.AnswerCache.TTLDuration())
 	ragPipeline.SetMcpContextProvider(mcpContextProvider)

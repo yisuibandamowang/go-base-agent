@@ -411,6 +411,65 @@ func HandleThing() {}
 	}
 }
 
+func TestPipeline_StreamChat_DoesNotExposeCitationRefsWhenDisabled(t *testing.T) {
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+	prompt := &recordingPromptBuilder{}
+	retriever := staticRetriever{chunks: []RetrievedChunk{{
+		ID:    "chunk-1",
+		Text:  "知识库片段",
+		Score: 0.9,
+		Metadata: map[string]string{
+			"doc_id":   "doc-1",
+			"doc_name": "资料.md",
+		},
+	}}}
+	sender, _ := newTestSSESender(t)
+	p := NewPipeline(llm, prompt, &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.StreamChat(context.Background(), "查询资料", "conv-1", "task-1", false, sender)
+
+	if strings.Contains(prompt.last.KbContext, `ref="1"`) {
+		t.Fatalf("expected citation ref to stay out of context when disabled, got %q", prompt.last.KbContext)
+	}
+	if strings.Contains(prompt.last.KbContext, "data-ragent-doc-id") || strings.Contains(prompt.last.KbContext, "doc-1") {
+		t.Fatalf("expected internal document id to be removed from context, got %q", prompt.last.KbContext)
+	}
+}
+
+func TestPipeline_StreamChat_InjectsCitationRefsWhenEnabled(t *testing.T) {
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+	prompt := &recordingPromptBuilder{}
+	retriever := staticRetriever{chunks: []RetrievedChunk{{
+		ID:    "chunk-1",
+		Text:  "知识库片段",
+		Score: 0.9,
+		Metadata: map[string]string{
+			"doc_id":   "doc-1",
+			"doc_name": "资料.md",
+		},
+	}}}
+	sender, _ := newTestSSESender(t)
+	p := NewPipeline(llm, prompt, &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.SetCitationEnabled(true)
+	p.StreamChat(context.Background(), "查询资料", "conv-1", "task-1", false, sender)
+
+	if !strings.Contains(prompt.last.KbContext, `<content ref="1">`) {
+		t.Fatalf("expected source ref in context when enabled, got %q", prompt.last.KbContext)
+	}
+	if strings.Contains(prompt.last.KbContext, "data-ragent-doc-id") || strings.Contains(prompt.last.KbContext, "doc-1") {
+		t.Fatalf("expected internal document id to stay hidden, got %q", prompt.last.KbContext)
+	}
+}
+
 func TestPipeline_StreamChat_UsesConfiguredTimeout(t *testing.T) {
 	mem := &timeoutMemoryService{started: make(chan struct{})}
 	llm := &fakeLLMService{
@@ -1027,14 +1086,11 @@ func TestWithChunkSourcesGroupsByDocumentAndOrdersWithinDocByIndex(t *testing.T)
 	if strings.Index(result, "B-idx0正文") > strings.Index(result, "孤块正文") {
 		t.Fatalf("expected chunks without doc_id to remain as their own late group, got: %s", result)
 	}
-	if !strings.Contains(result, `source="员工手册"`) || !strings.Contains(result, `source="报销政策"`) {
-		t.Fatalf("expected source anchors without extensions, got: %s", result)
+	if !strings.Contains(result, `data-ragent-doc-id="docA"`) || !strings.Contains(result, `data-ragent-doc-id="docB"`) {
+		t.Fatalf("expected internal document id anchors, got: %s", result)
 	}
-	if strings.Contains(result, "员工手册.pdf") {
-		t.Fatalf("expected source title to strip extension, got: %s", result)
-	}
-	if strings.Contains(result, "员工手册旧标题") {
-		t.Fatalf("expected source title to come from first-hit chunk before index sorting, got: %s", result)
+	if strings.Contains(result, "员工手册") || strings.Contains(result, "报销政策") {
+		t.Fatalf("expected document titles to stay out of model context, got: %s", result)
 	}
 	if !strings.Contains(result, "<content>\n孤块正文\n</content>") {
 		t.Fatalf("expected chunk without doc_id to render without source, got: %s", result)

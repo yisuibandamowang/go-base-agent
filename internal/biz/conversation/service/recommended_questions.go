@@ -76,6 +76,7 @@ func NewLLMRecommendedQuestionGenerator(llm chat.LLMService, externalPromptDir s
 func (g *LLMRecommendedQuestionGenerator) Generate(ctx context.Context, question, answer string) RecommendedQuestionsPayload {
 	question = strings.TrimSpace(question)
 	answer = strings.TrimSpace(stripRecommendationCitations(answer))
+	answer = strings.TrimSpace(rag.StripInlineCitations(answer))
 	if question == "" || answer == "" {
 		return RecommendedQuestionsEmpty()
 	}

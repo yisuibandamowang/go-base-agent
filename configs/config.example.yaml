@@ -54,6 +54,9 @@ rag:
     enrich:
       enabled: true
 
+  citation:
+    enabled: false
+
   query-rewrite:
     enabled: true
     max-history-messages: 4

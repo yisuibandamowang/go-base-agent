@@ -424,7 +424,7 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 	for _, m := range normalizeMemoryMessages(msgs) {
 		result = append(result, chat.Message{
 			Role:             chat.Role(m.Role),
-			Content:          m.Content,
+			Content:          rag.StripInlineCitations(m.Content),
 			ThinkingContent:  m.ThinkingContent,
 			ThinkingDuration: m.ThinkingDuration,
 		})
@@ -443,6 +443,9 @@ func normalizeMemoryMessages(msgs []model.Message) []model.Message {
 		}
 		if !strings.EqualFold(msg.Role, string(chat.RoleUser)) && !strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
 			continue
+		}
+		if strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
+			msg.Content = rag.StripInlineCitations(msg.Content)
 		}
 		filtered = append(filtered, msg)
 	}
@@ -768,7 +771,7 @@ func toChatMessages(msgs []model.Message) []chat.Message {
 	for _, m := range msgs {
 		result = append(result, chat.Message{
 			Role:             chat.Role(m.Role),
-			Content:          m.Content,
+			Content:          rag.StripInlineCitations(m.Content),
 			ThinkingContent:  m.ThinkingContent,
 			ThinkingDuration: m.ThinkingDuration,
 		})

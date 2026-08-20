@@ -7,6 +7,7 @@ import (
 	"go-base-agent/internal/biz/conversation/dto"
 	"go-base-agent/internal/biz/conversation/model"
 	"go-base-agent/internal/biz/conversation/service"
+	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/framework/convention"
 	"go-base-agent/internal/framework/middleware"
 
@@ -149,6 +150,7 @@ func (h *ConversationHandler) Messages(c *gin.Context) {
 			ThinkingContent:  m.ThinkingContent,
 			ThinkingDuration: m.ThinkingDuration,
 			Vote:             vote,
+			Sources:          rag.ParseSources(m.Sources),
 			CreateTime:       m.CreateTime,
 		})
 	}

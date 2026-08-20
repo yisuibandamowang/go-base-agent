@@ -47,6 +47,7 @@ func TestDefaultPromptBuilder_Basic(t *testing.T) {
 
 func TestDefaultPromptBuilder_WithKbContext(t *testing.T) {
 	b := NewDefaultPromptBuilder()
+	b.SetCitationEnabled(true)
 	req := b.Build(PromptContext{
 		Question:  "什么是RAG",
 		KbContext: "RAG是检索增强生成技术。",

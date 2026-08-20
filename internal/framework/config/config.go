@@ -100,6 +100,7 @@ type RAGConfig struct {
 	Default      RAGDefaultConfig      `mapstructure:"default"`
 	Code         RAGCodeConfig         `mapstructure:"code"`
 	Context      RAGContextConfig      `mapstructure:"context"`
+	Citation     RAGCitationConfig     `mapstructure:"citation"`
 	QueryRewrite RAGQueryRewriteConfig `mapstructure:"query-rewrite"`
 	Rerank       RAGRerankConfig       `mapstructure:"rerank"`
 	RateLimit    RAGRateLimitConfig    `mapstructure:"rate-limit"`
@@ -155,6 +156,14 @@ func (c RAGDefaultConfig) SSETimeoutDuration() time.Duration {
 
 type RAGContextConfig struct {
 	Enrich RAGContextEnrichConfig `mapstructure:"enrich"`
+}
+
+type RAGCitationConfig struct {
+	Enabled *bool `mapstructure:"enabled"`
+}
+
+func (c RAGCitationConfig) IsEnabledByDefault() bool {
+	return c.Enabled != nil && *c.Enabled
 }
 
 type RAGContextEnrichConfig struct {

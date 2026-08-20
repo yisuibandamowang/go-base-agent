@@ -136,3 +136,8 @@ func unmarshalSources(raw string) []SourceRef {
 	}
 	return sources
 }
+
+// ParseSources 解析消息中保存的来源 JSON。
+func ParseSources(raw string) []SourceRef {
+	return unmarshalSources(raw)
+}

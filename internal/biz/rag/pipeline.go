@@ -35,6 +35,7 @@ type Pipeline struct {
 	streamTimeout    time.Duration
 	defaultTopK      int
 	codeRepoPath     string
+	citationEnabled  bool
 }
 
 // NewPipeline creates a new RAG pipeline.
@@ -80,6 +81,13 @@ func (p *Pipeline) SetDefaultTopK(topK int) {
 // SetCodeRepoPath sets an optional code repository path for code Q&A evidence.
 func (p *Pipeline) SetCodeRepoPath(repoPath string) {
 	p.codeRepoPath = strings.TrimSpace(repoPath)
+}
+
+// SetCitationEnabled 设置知识库回答的行内引用开关。
+func (p *Pipeline) SetCitationEnabled(enabled bool) {
+	if p != nil {
+		p.citationEnabled = enabled
+	}
 }
 
 // SetPreferredLLMService sets the lightweight LLM used for non-RAG responses.
@@ -244,12 +252,14 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	// 区分知识定向检索未命中意图与全局回退场景。对齐 Java 9d80d7a/cf2697c。
 	mergedGroup := MergeIntentGroup(resolvedSubIntents)
 	eligibleIntentIDs := DeriveIntentAttribution(chunks, mergedGroup.KBIntents)
+	sources := AssembleSources(chunks)
+	kbContext := EnrichCitationContext(withChunkSources(chunks, kbCtx), sources, p.citationEnabled)
 
 	req := p.prompt.Build(PromptContext{
 		Question:          q,
 		SubQuestions:      subQuestions,
 		History:           history,
-		KbContext:         withChunkSources(chunks, kbCtx),
+		KbContext:         kbContext,
 		McpContext:        mcpCtx,
 		CodeContext:       codeCtx,
 		KbIntents:         mergedGroup.KBIntents,
@@ -272,7 +282,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		memory:              p.memory,
 		sender:              sender,
 		citations:           formatCitations(chunks),
-		sources:             AssembleSources(chunks),
+		sources:             sources,
 		task:                task,
 		traceRecorder:       p.trace,
 		traceRun:            traceRun,
@@ -1001,10 +1011,10 @@ func withChunkSources(chunks []RetrievedChunk, fallback string) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		title := sanitizeContextSource(group.title)
-		if title != "" {
-			b.WriteString(`<content source="`)
-			b.WriteString(title)
+		docID := sanitizeContextSource(resolveContextSourceID(group.chunks))
+		if docID != "" {
+			b.WriteString(`<content data-ragent-doc-id="`)
+			b.WriteString(docID)
 			b.WriteString(`">`)
 			b.WriteString("\n")
 		} else {
@@ -1298,6 +1308,18 @@ func resolveContextSourceTitle(chunks []RetrievedChunk) string {
 			continue
 		}
 		return stripContextSourceExtension(name)
+	}
+	return ""
+}
+
+func resolveContextSourceID(chunks []RetrievedChunk) string {
+	for _, chunk := range chunks {
+		if len(chunk.Metadata) == 0 {
+			continue
+		}
+		if docID := strings.TrimSpace(chunk.Metadata["doc_id"]); docID != "" {
+			return docID
+		}
 	}
 	return ""
 }
