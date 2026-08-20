@@ -305,6 +305,115 @@ func (e *LLMMcpParameterExtractor) ExtractParameters(ctx context.Context, questi
 	return e.ExtractParametersWithTemplate(ctx, question, tool, "")
 }
 
+// ExtractParametersValidated 按三态校验提取参数。
+// 区分三类结局：JSON 解析失败/值类型枚举非法＝FAILED；必填无默认参数缺失＝NEED_CLARIFICATION；
+// 其余正常提取＝SUCCESS。值非法一律判 FAILED（含可选/有默认），杜绝静默丢弃导致过滤条件被无声移除。
+// 对齐 Java LLMMcpParameterExtractor.validateMcpParams。
+func (e *LLMMcpParameterExtractor) ExtractParametersValidated(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) McpExtractionResult {
+	if e == nil || e.llm == nil || len(tool.Parameters) == 0 {
+		return McpExtractionSucceeded(map[string]interface{}{})
+	}
+
+	systemPrompt := "你是一个MCP参数提取器。只返回严格 JSON 对象，不要返回解释、代码块或多余文本。"
+	if strings.TrimSpace(customPromptTemplate) != "" {
+		systemPrompt = strings.TrimSpace(customPromptTemplate)
+	}
+
+	req := chat.Request{
+		Messages: []chat.Message{
+			chat.NewSystemMessage(systemPrompt),
+			chat.NewUserMessage(buildMcpParameterPrompt(question, tool)),
+		},
+		Temperature: floatPtr(0.1),
+		TopP:        floatPtr(0.3),
+	}
+
+	raw, err := e.llm.Chat(ctx, req)
+	if err != nil {
+		slog.Warn("mcp param extraction llm failed", "tool", tool.Name, "err", err)
+		return McpExtractionFailedResult()
+	}
+	parsed, err := parseJSONMap(raw)
+	if err != nil {
+		slog.Warn("mcp param extraction response parse failed", "tool", tool.Name, "err", err)
+		return McpExtractionFailedResult()
+	}
+
+	params := make(map[string]interface{}, len(tool.Parameters))
+	var userMissing []string
+	for _, param := range tool.Parameters {
+		value, present := parsed[param.Name]
+		if !present || value == nil {
+			// 必填无默认且缺失或为 null：视为用户未提供该必填信息，触发澄清
+			if param.Required && param.DefaultValue == nil {
+				userMissing = append(userMissing, param.Name)
+			}
+			continue
+		}
+		coerced, ok := coerceAndValidateMcpValue(value, param)
+		if !ok {
+			// 字段存在但值类型/枚举非法：无论必填与否都判 FAILED，不静默丢弃
+			slog.Warn("mcp param extraction invalid value", "tool", tool.Name, "param", param.Name)
+			return McpExtractionFailedResult()
+		}
+		params[param.Name] = coerced
+	}
+	if len(userMissing) > 0 {
+		slog.Warn("mcp param extraction missing required params", "tool", tool.Name, "missing", userMissing)
+		return McpExtractionNeedsClarification(params, userMissing)
+	}
+	// 非必填/有默认的缺失项由默认值兜底，仅 SUCCESS 态填充
+	fillMcpParamDefaults(params, tool)
+	return McpExtractionSucceeded(params)
+}
+
+// fillMcpParamDefaults 为缺失的可选参数填入 schema 默认值。
+func fillMcpParamDefaults(params map[string]interface{}, tool ToolDefinition) {
+	for _, param := range tool.Parameters {
+		if _, ok := params[param.Name]; ok {
+			continue
+		}
+		if param.DefaultValue != nil {
+			params[param.Name] = coerceMcpValue(param.DefaultValue, param.Type)
+		}
+	}
+}
+
+// coerceAndValidateMcpValue 按 schema type/enum 校验并转换值，非法时返回 ok=false。
+func coerceAndValidateMcpValue(value interface{}, param ToolParam) (interface{}, bool) {
+	if len(param.Enum) > 0 {
+		text, ok := value.(string)
+		if !ok {
+			return nil, false
+		}
+		for _, item := range param.Enum {
+			if item == text {
+				return text, true
+			}
+		}
+		return nil, false
+	}
+	typ := strings.ToLower(strings.TrimSpace(param.Type))
+	coerced := coerceMcpValue(value, typ)
+	switch typ {
+	case "integer", "int", "long":
+		if _, ok := coerced.(int); !ok {
+			return nil, false
+		}
+	case "number", "float", "double":
+		switch coerced.(type) {
+		case float64, float32:
+		default:
+			return nil, false
+		}
+	case "boolean", "bool":
+		if _, ok := coerced.(bool); !ok {
+			return nil, false
+		}
+	}
+	return coerced, true
+}
+
 // ExtractParametersWithTemplate asks the LLM for tool parameters using an optional custom system prompt.
 func (e *LLMMcpParameterExtractor) ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error) {
 	if e == nil || e.llm == nil || len(tool.Parameters) == 0 {

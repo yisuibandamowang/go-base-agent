@@ -191,31 +191,8 @@ func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, questi
 			}
 
 			tool := exec.GetToolDefinition()
-			params := map[string]interface{}{}
-			var err error
-			if p.extractor != nil {
-				customPrompt := ""
-				if len(promptTemplates) > 0 {
-					customPrompt = strings.TrimSpace(promptTemplates[tool.Name])
-				}
-				if customPrompt != "" {
-					if templateAware, ok := p.extractor.(interface {
-						ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error)
-					}); ok {
-						params, err = templateAware.ExtractParametersWithTemplate(ctx, question, tool, customPrompt)
-					} else {
-						params, err = p.extractor.ExtractParameters(ctx, question, tool)
-					}
-				} else {
-					params, err = p.extractor.ExtractParameters(ctx, question, tool)
-				}
-				if params == nil {
-					params = map[string]interface{}{}
-				}
-			}
-
-			if err != nil {
-				results[idx].errorText = formatMcpToolError(err.Error())
+			params, proceed := p.extractToolParams(ctx, question, tool, promptTemplates, idx, &results[idx])
+			if !proceed {
 				return
 			}
 
@@ -239,6 +216,70 @@ func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, questi
 	}
 	wg.Wait()
 	return results
+}
+
+// extractToolParams 提取工具参数并按三态分流：
+// 仅 SUCCESS 才返回 proceed=true 让调用方真正执行工具；
+// NEED_CLARIFICATION 注入澄清提示（作为正文进上下文，便于 LLM 据此向用户追问）；
+// FAILED 注入失败提示进「工具调用失败」段。
+// 对齐 Java RetrievalEngine 的按提参结局分流。
+func (p *DefaultMcpContextProvider) extractToolParams(ctx context.Context, question string, tool ToolDefinition, promptTemplates map[string]string, idx int, result *mcpToolExecutionResult) (map[string]interface{}, bool) {
+	customPrompt := ""
+	if len(promptTemplates) > 0 {
+		customPrompt = strings.TrimSpace(promptTemplates[tool.Name])
+	}
+
+	if p.extractor == nil {
+		return map[string]interface{}{}, true
+	}
+
+	// 优先走三态校验提取
+	if validator, ok := p.extractor.(McpParameterExtractionValidator); ok {
+		extraction := validator.ExtractParametersValidated(ctx, question, tool, customPrompt)
+		switch extraction.Status {
+		case McpExtractionSuccess:
+			return extraction.Params, true
+		case McpExtractionNeedClarification:
+			result.successText = mcpClarificationNote(tool.Name, extraction.MissingRequired)
+			return nil, false
+		default:
+			result.errorText = formatMcpToolError("未能为工具【" + tool.Name + "】提取到有效参数，已跳过调用。")
+			return nil, false
+		}
+	}
+
+	// 兼容旧两态提取器
+	var params map[string]interface{}
+	var err error
+	if customPrompt != "" {
+		if templateAware, ok := p.extractor.(interface {
+			ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error)
+		}); ok {
+			params, err = templateAware.ExtractParametersWithTemplate(ctx, question, tool, customPrompt)
+		} else {
+			params, err = p.extractor.ExtractParameters(ctx, question, tool)
+		}
+	} else {
+		params, err = p.extractor.ExtractParameters(ctx, question, tool)
+	}
+	if err != nil {
+		result.errorText = formatMcpToolError(err.Error())
+		return nil, false
+	}
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	return params, true
+}
+
+// mcpClarificationNote 构造缺少必填参数的澄清提示。
+// isError=false 使其作为正文进入上下文（而非「工具调用失败」段），便于 LLM 直接据此追问。
+func mcpClarificationNote(toolName string, missingRequired []string) string {
+	missing := "必要信息"
+	if len(missingRequired) > 0 {
+		missing = strings.Join(missingRequired, "、")
+	}
+	return fmt.Sprintf("调用工具【%s】需要参数：%s，但用户问题中未提供。请在回答中主动向用户询问这些信息，不要编造。", toolName, missing)
 }
 
 func buildMcpParameterPromptTemplates(subIntents []SubQuestionIntent) map[string]string {
@@ -408,4 +449,54 @@ type McpToolResult struct {
 	ToolName string
 	Result   map[string]interface{}
 	Error    error
+}
+
+// McpExtractionStatus 枚举 MCP 参数提取结局。
+type McpExtractionStatus int
+
+const (
+	// McpExtractionSuccess 参数已就绪，可调用工具。
+	McpExtractionSuccess McpExtractionStatus = iota
+	// McpExtractionNeedClarification 缺少必填参数（用户未提供），不调用工具、需向用户追问。
+	McpExtractionNeedClarification
+	// McpExtractionFailed 无法提取到有效参数（协议畸形 / 值非法），不调用工具。
+	McpExtractionFailed
+)
+
+// McpExtractionResult MCP 参数提取结局。
+// 区分三态供消费端决定是否调用工具。对齐 Java McpExtractionResult。
+type McpExtractionResult struct {
+	Status McpExtractionStatus
+	// Params 已提取的有效参数（SUCCESS 用于调用；其余态仅作记录）。
+	Params map[string]interface{}
+	// MissingRequired 用户未提供的必填参数名（仅 NEED_CLARIFICATION 非空）。
+	MissingRequired []string
+}
+
+// McpExtractionSucceeded 构造成功结局。
+func McpExtractionSucceeded(params map[string]interface{}) McpExtractionResult {
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	return McpExtractionResult{Status: McpExtractionSuccess, Params: params}
+}
+
+// McpExtractionNeedsClarification 构造缺少必填参数结局。
+func McpExtractionNeedsClarification(params map[string]interface{}, missingRequired []string) McpExtractionResult {
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	return McpExtractionResult{Status: McpExtractionNeedClarification, Params: params, MissingRequired: missingRequired}
+}
+
+// McpExtractionFailedResult 构造提取失败结局。
+func McpExtractionFailedResult() McpExtractionResult {
+	return McpExtractionResult{Status: McpExtractionFailed}
+}
+
+// McpParameterExtractionValidator 支持三态校验的参数提取器。
+// SUCCESS / NEED_CLARIFICATION / FAILED 的判定规则与 Java validateMcpParams 一致：
+// JSON 解析失败或值类型/枚举非法＝FAILED；必填无默认参数缺失＝NEED_CLARIFICATION。
+type McpParameterExtractionValidator interface {
+	ExtractParametersValidated(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) McpExtractionResult
 }

@@ -229,3 +229,108 @@ func (e *recordingMcpPromptExtractor) ExtractParametersWithTemplate(ctx context.
 	e.systemPrompt = customPromptTemplate
 	return map[string]interface{}{"city": "北京"}, nil
 }
+
+// validatedReplyExtractor 返回固定 LLM 响应的三态校验提取器测试替身。
+type validatedReplyExtractor struct {
+	reply string
+}
+
+func (e *validatedReplyExtractor) ExtractParameters(ctx context.Context, question string, tool ToolDefinition) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
+func (e *validatedReplyExtractor) ExtractParametersWithTemplate(ctx context.Context, question string, tool ToolDefinition, customPromptTemplate string) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
+func (e *validatedReplyExtractor) Chat(ctx context.Context, req chat.Request) (string, error) {
+	return e.reply, nil
+}
+
+func (e *validatedReplyExtractor) ChatWithModel(ctx context.Context, req chat.Request, modelID string) (string, error) {
+	return e.reply, nil
+}
+
+func (e *validatedReplyExtractor) StreamChat(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+	return nil, fmt.Errorf("not implemented in test")
+}
+
+// TestMcpExtractionValidatedThreeStates 验证三态校验提取的判定规则：
+// SUCCESS / NEED_CLARIFICATION / FAILED。对齐 Java validateMcpParams。
+func TestMcpExtractionValidatedThreeStates(t *testing.T) {
+	tool := ToolDefinition{
+		Name: "ticket_query",
+		Parameters: []ToolParam{
+			{Name: "employeeId", Type: "string", Required: true},
+			{Name: "status", Type: "string", Enum: []string{"open", "closed"}, Required: true},
+			{Name: "limit", Type: "integer", DefaultValue: 10},
+		},
+	}
+
+	t.Run("success fills defaults", func(t *testing.T) {
+		e := &LLMMcpParameterExtractor{llm: &validatedReplyExtractor{reply: `{"employeeId":"E001","status":"open","limit":5}`}}
+		result := e.ExtractParametersValidated(context.Background(), "查工单", tool, "")
+		if result.Status != McpExtractionSuccess {
+			t.Fatalf("expected SUCCESS, got %v", result.Status)
+		}
+		if result.Params["employeeId"] != "E001" || result.Params["limit"] != 5 {
+			t.Fatalf("unexpected params: %+v", result.Params)
+		}
+	})
+
+	t.Run("missing required triggers clarification", func(t *testing.T) {
+		e := &LLMMcpParameterExtractor{llm: &validatedReplyExtractor{reply: `{"status":"open"}`}}
+		result := e.ExtractParametersValidated(context.Background(), "查工单", tool, "")
+		if result.Status != McpExtractionNeedClarification {
+			t.Fatalf("expected NEED_CLARIFICATION, got %v", result.Status)
+		}
+		if len(result.MissingRequired) != 1 || result.MissingRequired[0] != "employeeId" {
+			t.Fatalf("unexpected missing: %v", result.MissingRequired)
+		}
+		// 有默认值的必填缺失不触发澄清
+		defaultedTool := ToolDefinition{
+			Name: "t",
+			Parameters: []ToolParam{
+				{Name: "limit", Type: "integer", Required: true, DefaultValue: 10},
+			},
+		}
+		e2 := &LLMMcpParameterExtractor{llm: &validatedReplyExtractor{reply: `{}`}}
+		if got := e2.ExtractParametersValidated(context.Background(), "q", defaultedTool, "").Status; got != McpExtractionSuccess {
+			t.Fatalf("required-with-default missing should stay SUCCESS, got %v", got)
+		}
+	})
+
+	t.Run("invalid enum fails", func(t *testing.T) {
+		e := &LLMMcpParameterExtractor{llm: &validatedReplyExtractor{reply: `{"employeeId":"E001","status":"bogus"}`}}
+		result := e.ExtractParametersValidated(context.Background(), "查工单", tool, "")
+		if result.Status != McpExtractionFailed {
+			t.Fatalf("expected FAILED for invalid enum, got %v", result.Status)
+		}
+	})
+
+	t.Run("invalid type fails", func(t *testing.T) {
+		e := &LLMMcpParameterExtractor{llm: &validatedReplyExtractor{reply: `{"employeeId":"E001","status":"open","limit":"not-a-number"}`}}
+		result := e.ExtractParametersValidated(context.Background(), "查工单", tool, "")
+		if result.Status != McpExtractionFailed {
+			t.Fatalf("expected FAILED for invalid type, got %v", result.Status)
+		}
+	})
+
+	t.Run("malformed response fails", func(t *testing.T) {
+		e := &LLMMcpParameterExtractor{llm: &validatedReplyExtractor{reply: "not json"}}
+		result := e.ExtractParametersValidated(context.Background(), "查工单", tool, "")
+		if result.Status != McpExtractionFailed {
+			t.Fatalf("expected FAILED for malformed response, got %v", result.Status)
+		}
+	})
+}
+
+// TestMcpClarificationNoteInjectsPrompt 验证缺少必填参数时注入澄清提示而非调用工具。
+func TestMcpClarificationNoteInjectsPrompt(t *testing.T) {
+	note := mcpClarificationNote("ticket_query", []string{"employeeId", "status"})
+	for _, want := range []string{"ticket_query", "employeeId", "status", "询问"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("expected note to contain %q, got %q", want, note)
+		}
+	}
+}
