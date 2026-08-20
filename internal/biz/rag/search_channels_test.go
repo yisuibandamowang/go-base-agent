@@ -523,8 +523,8 @@ func TestIntentDirectedTargetsExpandMultipleCollections(t *testing.T) {
 	for _, target := range targets {
 		names = append(names, target.collectionName)
 	}
-	// 新字段 collectionNames 全部生效，旧单字段作为兜底也保留
-	want := []string{"collection_a", "collection_b", "collection_legacy"}
+	// 新字段 collectionNames 非空时优先使用列表，旧单字段仅作空列表兜底。
+	want := []string{"collection_a", "collection_b"}
 	if len(names) != len(want) {
 		t.Fatalf("expected targets %v, got %v", want, names)
 	}
@@ -568,7 +568,7 @@ func TestIntentNodeEffectiveCollectionNamesDedupAndFallback(t *testing.T) {
 		CollectionNames: []string{"primary", "  ", "primary", "secondary"},
 	}
 	got := node.EffectiveCollectionNames()
-	want := []string{"primary", "secondary", "legacy"}
+	want := []string{"primary", "secondary"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}

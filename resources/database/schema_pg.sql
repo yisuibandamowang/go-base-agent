@@ -374,6 +374,7 @@ CREATE TABLE t_intent_node (
     description           VARCHAR(512),
     examples              TEXT,
     collection_name       VARCHAR(128),
+    collection_names      JSONB        NOT NULL DEFAULT '[]'::jsonb,
     top_k                 INTEGER,
     mcp_tool_id           VARCHAR(128),
     kind                  SMALLINT     NOT NULL DEFAULT 0,
@@ -758,6 +759,7 @@ COMMENT ON COLUMN t_intent_node.parent_code IS '父节点标识';
 COMMENT ON COLUMN t_intent_node.description IS '语义描述';
 COMMENT ON COLUMN t_intent_node.examples IS '示例问题';
 COMMENT ON COLUMN t_intent_node.collection_name IS '关联的Collection名称';
+COMMENT ON COLUMN t_intent_node.collection_names IS '关联的Collection名称列表；同一意图共享一个TopK总预算';
 COMMENT ON COLUMN t_intent_node.top_k IS '知识库检索TopK';
 COMMENT ON COLUMN t_intent_node.mcp_tool_id IS 'MCP工具ID';
 COMMENT ON COLUMN t_intent_node.kind IS '类型 0：RAG知识库类 1：SYSTEM系统交互类';

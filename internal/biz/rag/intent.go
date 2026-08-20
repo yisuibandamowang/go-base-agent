@@ -60,8 +60,8 @@ func (n IntentNode) EffectiveCollectionNames() []string {
 		seen[name] = struct{}{}
 		result = append(result, name)
 	}
-	if fallback := strings.TrimSpace(n.CollectionName); fallback != "" {
-		if _, ok := seen[fallback]; !ok {
+	if len(result) == 0 {
+		if fallback := strings.TrimSpace(n.CollectionName); fallback != "" {
 			result = append(result, fallback)
 		}
 	}

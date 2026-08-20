@@ -92,7 +92,7 @@ func TestIntentService_CreateTopicKBNodeRequiresKBIDLikeJava(t *testing.T) {
 		Level:      2,
 		Kind:       0,
 	}, "user-1")
-	if err == nil || !strings.Contains(err.Error(), "TOPIC级别的RAG检索节点必须指定目标知识库") {
+	if err == nil || !strings.Contains(err.Error(), "TOPIC级别的RAG检索节点必须至少指定一个目标知识库") {
 		t.Fatalf("expected topic KB node kbId validation error, got %v", err)
 	}
 }
@@ -126,7 +126,23 @@ func TestIntentService_CreateNodeResolvesCollectionNameFromKBIDLikeJava(t *testi
 }
 
 func TestIntentService_CreateNodeSupportsMultipleCollectionNamesLikeJava(t *testing.T) {
-	svc := newIntentValidationService(t)
+	svc, gdb := newIntentValidationServiceWithDB(t)
+	if err := gdb.Create(&knowledgeModel.KnowledgeBase{
+		Name:           "知识库 A",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection-a",
+		CreatedBy:      "tester",
+	}).Error; err != nil {
+		t.Fatalf("seed collection-a: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeBase{
+		Name:           "知识库 B",
+		EmbeddingModel: "emb-1",
+		CollectionName: "collection-b",
+		CreatedBy:      "tester",
+	}).Error; err != nil {
+		t.Fatalf("seed collection-b: %v", err)
+	}
 	var req dto.CreateIntentReq
 	if err := json.Unmarshal([]byte(`{"intentCode":"member.multi-collection","name":"多库意图","level":1,"collectionNames":["collection-a","collection-b"]}`), &req); err != nil {
 		t.Fatalf("decode request: %v", err)
@@ -135,8 +151,66 @@ func TestIntentService_CreateNodeSupportsMultipleCollectionNamesLikeJava(t *test
 	if err != nil {
 		t.Fatalf("create node: %v", err)
 	}
-	if created.CollectionName != "collection-a" {
+	if created.CollectionName != "collection-a" || !reflect.DeepEqual(created.CollectionNames, []string{"collection-a", "collection-b"}) {
 		t.Fatalf("expected first collection name to be persisted, got %s", created.CollectionName)
+	}
+}
+
+func TestIntentService_CreateTopicKBNodeAcceptsCollectionNamesWithoutKBIDLikeJava(t *testing.T) {
+	svc, gdb := newIntentValidationServiceWithDB(t)
+	for _, collectionName := range []string{"collection-a", "collection-b"} {
+		if err := gdb.Create(&knowledgeModel.KnowledgeBase{
+			Name:           collectionName,
+			EmbeddingModel: "emb-1",
+			CollectionName: collectionName,
+			CreatedBy:      "tester",
+		}).Error; err != nil {
+			t.Fatalf("seed %s: %v", collectionName, err)
+		}
+	}
+	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode:      "member.topic.multi-collection",
+		Name:            "多库主题",
+		Level:           2,
+		Kind:            0,
+		CollectionNames: []string{"collection-a", "collection-b"},
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create topic node: %v", err)
+	}
+	if !reflect.DeepEqual(created.CollectionNames, []string{"collection-a", "collection-b"}) {
+		t.Fatalf("expected collection names, got %v", created.CollectionNames)
+	}
+}
+
+func TestIntentService_CreateNodeRejectsUnknownCollectionNameLikeJava(t *testing.T) {
+	svc := newIntentValidationService(t)
+	_, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode:      "member.unknown-collection",
+		Name:            "未知库意图",
+		Level:           1,
+		CollectionNames: []string{"missing-collection"},
+	}, "user-1")
+	if err == nil || !strings.Contains(err.Error(), "知识库 Collection 不存在或已删除") {
+		t.Fatalf("expected unknown collection validation error, got %v", err)
+	}
+}
+
+func TestIntentService_CreateNonKBNodeClearsCollectionBindingLikeJava(t *testing.T) {
+	svc := newIntentValidationService(t)
+	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode:      "system.help",
+		Name:            "系统帮助",
+		Level:           2,
+		Kind:            1,
+		KbID:            "missing-kb",
+		CollectionNames: []string{"missing-collection"},
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create non-KB node: %v", err)
+	}
+	if created.KbID != "" || created.CollectionName != "" || len(created.CollectionNames) != 0 {
+		t.Fatalf("expected non-KB node to have no collection binding, got kb=%q collection=%q names=%v", created.KbID, created.CollectionName, created.CollectionNames)
 	}
 }
 

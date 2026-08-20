@@ -56,23 +56,23 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 	if exists {
 		return nil, fmt.Errorf("意图标识已存在: %s", req.IntentCode)
 	}
-	if err := validateTopicKBNode(req.Level, req.Kind, req.KbID); err != nil {
-		return nil, err
-	}
 	topK, err := normalizeCreateTopK(req.TopK, req.TopKSet)
 	if err != nil {
 		return nil, err
 	}
-	collectionName, err := s.resolveCollectionName(ctx, req.KbID, req.CollectionName)
-	if err != nil {
+	var collectionNames []string
+	var collectionName, kbID string
+	if req.Kind == 0 {
+		collectionNames, collectionName, kbID, err = s.resolveCollectionBinding(ctx, req.KbID, req.CollectionName, req.CollectionNames)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := validateTopicKBNode(req.Level, req.Kind, collectionNames); err != nil {
 		return nil, err
 	}
-	collectionNames := req.CollectionNames
-	if len(collectionNames) == 0 && collectionName != "" {
-		collectionNames = []string{collectionName}
-	}
 	node := &model.IntentNode{
-		KbID:                req.KbID,
+		KbID:                kbID,
 		IntentCode:          req.IntentCode,
 		Name:                req.Name,
 		Level:               req.Level,
@@ -129,7 +129,7 @@ func (s *IntentService) UpdateNode(ctx context.Context, id string, req dto.Updat
 		return nil, err
 	}
 	before := toIntentResp(node)
-	if err := applyIntentUpdate(node, req); err != nil {
+	if err := s.applyIntentUpdate(ctx, node, req); err != nil {
 		return nil, err
 	}
 	node.UpdateBy = userID
@@ -394,7 +394,7 @@ func toIntentResp(node *model.IntentNode) *dto.IntentNodeResp {
 		Description:         node.Description,
 		Examples:            node.Examples,
 		CollectionName:      node.CollectionName,
-		CollectionNames:     node.CollectionNames,
+		CollectionNames:     effectiveCollectionNames(node),
 		TopK:                node.TopK,
 		McpToolID:           node.McpToolID,
 		Kind:                node.Kind,
@@ -420,7 +420,7 @@ func buildTree(nodes []model.IntentNode, parentCode string) []*dto.IntentNodeRes
 	return result
 }
 
-func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
+func (s *IntentService) applyIntentUpdate(ctx context.Context, node *model.IntentNode, req dto.UpdateIntentReq) error {
 	if req.Name != nil {
 		node.Name = *req.Name
 	}
@@ -436,14 +436,20 @@ func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
 	if req.Examples != nil {
 		node.Examples = string(*req.Examples)
 	}
-	if req.CollectionName != nil {
-		node.CollectionName = *req.CollectionName
-	}
-	if len(req.CollectionNames) > 0 {
-		node.CollectionNames = req.CollectionNames
-		if req.CollectionName == nil {
-			node.CollectionName = req.CollectionNames[0]
+	if req.CollectionNames != nil || req.CollectionName != nil {
+		var requested []string
+		if req.CollectionNames != nil {
+			requested = req.CollectionNames
+		} else if strings.TrimSpace(*req.CollectionName) != "" {
+			requested = []string{*req.CollectionName}
 		}
+		collectionNames, collectionName, kbID, err := s.resolveCollectionBinding(ctx, node.KbID, "", requested)
+		if err != nil {
+			return err
+		}
+		node.CollectionNames = collectionNames
+		node.CollectionName = collectionName
+		node.KbID = kbID
 	}
 	if req.TopK != nil {
 		if err := validateTopK(*req.TopK); err != nil {
@@ -453,6 +459,14 @@ func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
 	}
 	if req.Kind != nil {
 		node.Kind = *req.Kind
+	}
+	if node.Kind != 0 {
+		node.CollectionNames = nil
+		node.CollectionName = ""
+		node.KbID = ""
+	}
+	if err := validateTopicKBNode(node.Level, node.Kind, effectiveCollectionNames(node)); err != nil {
+		return err
 	}
 	if req.PromptSnippet != nil {
 		node.PromptSnippet = *req.PromptSnippet
@@ -482,9 +496,9 @@ func normalizeCreateTopK(topK int, topKSet bool) (int, error) {
 	return topK, nil
 }
 
-func validateTopicKBNode(level int16, kind int16, kbID string) error {
-	if level == 2 && kind == 0 && strings.TrimSpace(kbID) == "" {
-		return fmt.Errorf("TOPIC级别的RAG检索节点必须指定目标知识库")
+func validateTopicKBNode(level int16, kind int16, collectionNames []string) error {
+	if level == 2 && kind == 0 && len(collectionNames) == 0 {
+		return fmt.Errorf("TOPIC级别的RAG检索节点必须至少指定一个目标知识库")
 	}
 	return nil
 }
@@ -658,18 +672,72 @@ func normalizeCreateEnabled(enabled int16, enabledSet bool) int16 {
 	return enabled
 }
 
-func (s *IntentService) resolveCollectionName(ctx context.Context, kbID, fallback string) (string, error) {
-	kbID = strings.TrimSpace(kbID)
-	if kbID == "" {
-		return fallback, nil
+func (s *IntentService) resolveCollectionBinding(ctx context.Context, kbID, fallback string, requested []string) ([]string, string, string, error) {
+	var collectionNames []string
+	if requested != nil {
+		collectionNames = normalizeCollectionNames(requested)
+	} else if strings.TrimSpace(kbID) != "" {
+		var kb knowledgeModel.KnowledgeBase
+		if err := s.db.WithContext(ctx).Scopes(frameworkDB.NotDeletedScope()).
+			Where("id = ?", strings.TrimSpace(kbID)).First(&kb).Error; err != nil {
+			return nil, "", "", fmt.Errorf("查询知识库失败: %w", err)
+		}
+		collectionNames = []string{strings.TrimSpace(kb.CollectionName)}
+	} else {
+		collectionNames = normalizeCollectionNames([]string{fallback})
 	}
-	var kb knowledgeModel.KnowledgeBase
+	if len(collectionNames) == 0 {
+		return nil, "", "", nil
+	}
+
+	var knowledgeBases []knowledgeModel.KnowledgeBase
 	if err := s.db.WithContext(ctx).Scopes(frameworkDB.NotDeletedScope()).
-		Where("id = ?", kbID).
-		First(&kb).Error; err != nil {
-		return "", fmt.Errorf("查询知识库失败: %w", err)
+		Where("collection_name IN ?", collectionNames).Find(&knowledgeBases).Error; err != nil {
+		return nil, "", "", fmt.Errorf("查询知识库失败: %w", err)
 	}
-	return kb.CollectionName, nil
+	byCollection := make(map[string]knowledgeModel.KnowledgeBase, len(knowledgeBases))
+	for _, kb := range knowledgeBases {
+		byCollection[strings.TrimSpace(kb.CollectionName)] = kb
+	}
+	missing := make([]string, 0)
+	for _, name := range collectionNames {
+		if _, ok := byCollection[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, "", "", fmt.Errorf("知识库 Collection 不存在或已删除: %v", missing)
+	}
+	primary := byCollection[collectionNames[0]]
+	return collectionNames, collectionNames[0], primary.ID, nil
+}
+
+func normalizeCollectionNames(collectionNames []string) []string {
+	seen := make(map[string]struct{}, len(collectionNames))
+	result := make([]string, 0, len(collectionNames))
+	for _, name := range collectionNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return result
+}
+
+func effectiveCollectionNames(node *model.IntentNode) []string {
+	if node == nil {
+		return nil
+	}
+	collectionNames := normalizeCollectionNames(node.CollectionNames)
+	if len(collectionNames) > 0 {
+		return collectionNames
+	}
+	return normalizeCollectionNames([]string{node.CollectionName})
 }
 
 func toTermResp(m *model.QueryTermMapping) *dto.TermMappingResp {
