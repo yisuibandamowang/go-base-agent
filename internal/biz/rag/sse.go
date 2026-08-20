@@ -37,10 +37,11 @@ const (
 )
 
 // CompletionPayload is sent when the model finishes generating.
-// Aligns with Java CompletionPayload(messageId, title) — title is omitempty.
+// Aligns with Java CompletionPayload(messageId, title, sources) — 命中知识库时携带文档级来源列表。
 type CompletionPayload struct {
-	MessageID string `json:"messageId,omitempty"`
-	Title     string `json:"title,omitempty"`
+	MessageID string      `json:"messageId,omitempty"`
+	Title     string      `json:"title,omitempty"`
+	Sources   []SourceRef `json:"sources,omitempty"`
 }
 
 // DonePayload is the final "[DONE]" marker.
@@ -82,9 +83,15 @@ func (s *SSESender) SendMessage(msgType, delta string) error {
 
 // SendFinish sends the completion event.
 func (s *SSESender) SendFinish(messageID, title string) error {
+	return s.SendFinishWithSources(messageID, title, nil)
+}
+
+// SendFinishWithSources sends the completion event with document-level sources.
+func (s *SSESender) SendFinishWithSources(messageID, title string, sources []SourceRef) error {
 	return s.sendEvent(EventFinish, CompletionPayload{
 		MessageID: messageID,
 		Title:     title,
+		Sources:   sources,
 	})
 }
 

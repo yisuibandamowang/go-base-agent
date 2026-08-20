@@ -20,7 +20,7 @@ const (
 // 避免旧调用误标记新一轮探测的结果。
 // 对齐 Java ModelHealthStore.CallPermit。
 type CallPermit struct {
-	ModelID      string
+	ModelID       string
 	halfOpenToken int64
 }
 

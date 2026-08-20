@@ -272,6 +272,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		memory:              p.memory,
 		sender:              sender,
 		citations:           formatCitations(chunks),
+		sources:             AssembleSources(chunks),
 		task:                task,
 		traceRecorder:       p.trace,
 		traceRun:            traceRun,
@@ -375,6 +376,7 @@ func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, quest
 		sender:              sender,
 		answerPrefix:        cached.Content,
 		citations:           cached.Citations,
+		sources:             unmarshalSources(cached.SourcesJSON),
 		sendTitleOnComplete: sendTitleOnComplete,
 		thinkingDuration:    cached.ThinkingDuration,
 	}
@@ -383,6 +385,7 @@ func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, quest
 		Content:          cached.fullContent(),
 		ThinkingContent:  cached.ThinkingContent,
 		ThinkingDuration: cached.ThinkingDuration,
+		Sources:          cached.SourcesJSON,
 	}
 	messageID, err := appendConversationMessage(ctx, p.memory, conversationID, msg)
 	if err != nil {
@@ -393,7 +396,7 @@ func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, quest
 	if cached.Citations != "" {
 		_ = sender.SendMessage(MsgTypeResponse, cached.Citations)
 	}
-	sender.SendFinish(messageID, cb.resolveConversationTitle())
+	sender.SendFinishWithSources(messageID, cb.resolveConversationTitle(), cb.sources)
 	sender.SendDone()
 	sender.Close()
 }
@@ -611,6 +614,7 @@ type pipelineCallback struct {
 	thinking            strings.Builder
 	answerPrefix        string
 	citations           string
+	sources             []SourceRef
 	task                *streamTask
 	traceRecorder       TraceRecorder
 	traceRun            *TraceRunRecord
@@ -660,7 +664,7 @@ func (c *pipelineCallback) OnComplete() {
 	if c.citations != "" {
 		_ = c.sender.SendMessage(MsgTypeResponse, c.citations)
 	}
-	c.sender.SendFinish(messageID, title)
+	c.sender.SendFinishWithSources(messageID, title, c.sources)
 	c.sender.SendDone()
 	c.sender.Close()
 }
@@ -740,17 +744,20 @@ func (c *pipelineCallback) saveCompletedAssistantMessage() string {
 	if c == nil || c.memory == nil {
 		return ""
 	}
+	sourcesJSON := marshalSources(c.sources)
 	answer := CachedAnswer{
 		Content:          c.answerPrefix + c.answer.String(),
 		ThinkingContent:  c.thinking.String(),
 		ThinkingDuration: c.resolveThinkingDuration(),
 		Citations:        c.citations,
+		SourcesJSON:      sourcesJSON,
 	}
 	msg := chat.Message{
 		Role:             chat.RoleAssistant,
 		Content:          answer.fullContent(),
 		ThinkingContent:  answer.ThinkingContent,
 		ThinkingDuration: answer.ThinkingDuration,
+		Sources:          sourcesJSON,
 	}
 	id, err := appendConversationMessage(c.ctx, c.memory, c.conversationID, msg)
 	if err != nil {

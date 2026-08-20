@@ -489,6 +489,7 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 		Content:          msg.Content,
 		ThinkingContent:  msg.ThinkingContent,
 		ThinkingDuration: msg.ThinkingDuration,
+		Sources:          msg.Sources,
 	}
 	m.CreateTime = time.Now()
 	if err := s.msgRepo.Create(ctx, m); err != nil {

@@ -30,6 +30,8 @@ type Message struct {
 	Content          string `gorm:"column:content;type:text;not null" json:"content"`
 	ThinkingContent  string `gorm:"column:thinking_content;type:text" json:"thinkingContent"`
 	ThinkingDuration int    `gorm:"column:thinking_duration;type:integer" json:"thinkingDuration"`
+	// Sources 回答来源（JSONB 文档级来源列表，命中知识库的助手消息携带）。
+	Sources string `gorm:"column:sources;type:jsonb" json:"sources"`
 }
 
 func (Message) TableName() string {

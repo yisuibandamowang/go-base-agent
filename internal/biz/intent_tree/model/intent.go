@@ -6,25 +6,25 @@ import "go-base-agent/internal/framework/db"
 type IntentNode struct {
 	db.BaseModel
 
-	KbID                string `gorm:"column:kb_id;type:varchar(20)" json:"kbId"`
-	IntentCode          string `gorm:"column:intent_code;type:varchar(64);not null" json:"intentCode"`
-	Name                string `gorm:"column:name;type:varchar(64);not null" json:"name"`
-	Level               int16  `gorm:"column:level;type:smallint;not null" json:"level"`
-	ParentCode          string `gorm:"column:parent_code;type:varchar(64)" json:"parentCode"`
-	Description         string `gorm:"column:description;type:varchar(512)" json:"description"`
-	Examples            string `gorm:"column:examples;type:text" json:"examples"`
+	KbID                string   `gorm:"column:kb_id;type:varchar(20)" json:"kbId"`
+	IntentCode          string   `gorm:"column:intent_code;type:varchar(64);not null" json:"intentCode"`
+	Name                string   `gorm:"column:name;type:varchar(64);not null" json:"name"`
+	Level               int16    `gorm:"column:level;type:smallint;not null" json:"level"`
+	ParentCode          string   `gorm:"column:parent_code;type:varchar(64)" json:"parentCode"`
+	Description         string   `gorm:"column:description;type:varchar(512)" json:"description"`
+	Examples            string   `gorm:"column:examples;type:text" json:"examples"`
 	CollectionName      string   `gorm:"column:collection_name;type:varchar(128)" json:"collectionName"`
 	CollectionNames     []string `gorm:"column:collection_names;type:jsonb;serializer:json" json:"collectionNames"`
-	TopK                int    `gorm:"column:top_k;type:integer" json:"topK"`
-	McpToolID           string `gorm:"column:mcp_tool_id;type:varchar(128)" json:"mcpToolId"`
-	Kind                int16  `gorm:"column:kind;type:smallint;not null;default:0" json:"kind"`
-	PromptSnippet       string `gorm:"column:prompt_snippet;type:text" json:"promptSnippet"`
-	PromptTemplate      string `gorm:"column:prompt_template;type:text" json:"promptTemplate"`
-	ParamPromptTemplate string `gorm:"column:param_prompt_template;type:text" json:"paramPromptTemplate"`
-	SortOrder           int    `gorm:"column:sort_order;type:integer;not null;default:0" json:"sortOrder"`
-	Enabled             int16  `gorm:"column:enabled;type:smallint;not null;default:1" json:"enabled"`
-	CreateBy            string `gorm:"column:create_by;type:varchar(20)" json:"createBy"`
-	UpdateBy            string `gorm:"column:update_by;type:varchar(20)" json:"updateBy"`
+	TopK                int      `gorm:"column:top_k;type:integer" json:"topK"`
+	McpToolID           string   `gorm:"column:mcp_tool_id;type:varchar(128)" json:"mcpToolId"`
+	Kind                int16    `gorm:"column:kind;type:smallint;not null;default:0" json:"kind"`
+	PromptSnippet       string   `gorm:"column:prompt_snippet;type:text" json:"promptSnippet"`
+	PromptTemplate      string   `gorm:"column:prompt_template;type:text" json:"promptTemplate"`
+	ParamPromptTemplate string   `gorm:"column:param_prompt_template;type:text" json:"paramPromptTemplate"`
+	SortOrder           int      `gorm:"column:sort_order;type:integer;not null;default:0" json:"sortOrder"`
+	Enabled             int16    `gorm:"column:enabled;type:smallint;not null;default:1" json:"enabled"`
+	CreateBy            string   `gorm:"column:create_by;type:varchar(20)" json:"createBy"`
+	UpdateBy            string   `gorm:"column:update_by;type:varchar(20)" json:"updateBy"`
 }
 
 func (IntentNode) TableName() string {

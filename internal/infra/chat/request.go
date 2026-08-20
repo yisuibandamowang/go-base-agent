@@ -17,6 +17,8 @@ type Message struct {
 	Content          string `json:"content"`
 	ThinkingContent  string `json:"thinkingContent,omitempty"`
 	ThinkingDuration int    `json:"thinkingDuration,omitempty"`
+	// Sources 回答来源（JSON 序列化的文档级来源列表），仅随助手消息落库与回显，不参与模型请求。
+	Sources string `json:"sources,omitempty"`
 }
 
 // NewSystemMessage creates a system message.

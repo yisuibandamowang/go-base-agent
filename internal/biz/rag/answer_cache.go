@@ -22,6 +22,8 @@ type CachedAnswer struct {
 	ThinkingContent  string `json:"thinkingContent,omitempty"`
 	ThinkingDuration int    `json:"thinkingDuration,omitempty"`
 	Citations        string `json:"citations,omitempty"`
+	// SourcesJSON 文档级来源列表的 JSON 序列化，缓存命中时随 finish 事件回放。
+	SourcesJSON string `json:"sources,omitempty"`
 }
 
 func (a CachedAnswer) fullContent() string {

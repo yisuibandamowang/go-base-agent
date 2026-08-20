@@ -436,15 +436,15 @@ func applyIntentUpdate(node *model.IntentNode, req dto.UpdateIntentReq) error {
 	if req.Examples != nil {
 		node.Examples = string(*req.Examples)
 	}
-if req.CollectionName != nil {
-			node.CollectionName = *req.CollectionName
+	if req.CollectionName != nil {
+		node.CollectionName = *req.CollectionName
+	}
+	if len(req.CollectionNames) > 0 {
+		node.CollectionNames = req.CollectionNames
+		if req.CollectionName == nil {
+			node.CollectionName = req.CollectionNames[0]
 		}
-		if len(req.CollectionNames) > 0 {
-			node.CollectionNames = req.CollectionNames
-			if req.CollectionName == nil {
-				node.CollectionName = req.CollectionNames[0]
-			}
-		}
+	}
 	if req.TopK != nil {
 		if err := validateTopK(*req.TopK); err != nil {
 			return err
