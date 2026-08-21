@@ -652,7 +652,7 @@ func applyDefaults(cfg *Config) {
 		mem.SummaryStartTurns = 9
 	}
 	if mem.SummaryMaxChars <= 0 {
-		mem.SummaryMaxChars = 200
+		mem.SummaryMaxChars = 400
 	}
 	if mem.TitleMaxLength <= 0 {
 		mem.TitleMaxLength = 30

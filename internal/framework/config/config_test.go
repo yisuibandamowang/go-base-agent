@@ -820,6 +820,26 @@ rag:
 	}
 }
 
+func TestLoadAppliesCurrentMemoryDefaults(t *testing.T) {
+	yaml := `rag: {}`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Memory.HistoryKeepTurns != 8 ||
+		cfg.RAG.Memory.SummaryStartTurns != 9 ||
+		cfg.RAG.Memory.SummaryMaxChars != 400 {
+		t.Fatalf("unexpected memory defaults: %+v", cfg.RAG.Memory)
+	}
+}
+
 func TestLoadRejectsInvalidMemoryBounds(t *testing.T) {
 	tests := []struct {
 		name    string
