@@ -342,9 +342,13 @@ func (r *IntentResolver) classifyWithLLM(ctx context.Context, question string, l
 
 func buildIntentClassifierPrompt(leafNodes []IntentNode, rawNodes []intentModel.IntentNode) string {
 	var b strings.Builder
-	b.WriteString("你是企业内部知识库意图分类助手，负责将用户问题路由到正确的知识分类叶子节点。\n")
+	b.WriteString("你是企业内部助手的意图分类器，负责将用户输入路由到正确的分类叶子节点。\n")
 	b.WriteString("只输出 JSON 数组，例如 [{\"id\":\"node-id\",\"score\":0.9,\"reason\":\"...\"}]；没有匹配时输出 []。\n")
-	b.WriteString("实体导向问题必须命中关键实体名称；问题明确提到某系统时，只在该系统分类下选择；不要为了有结果强行选择弱相关分类。\n\n")
+	b.WriteString("分类判断规则：\n")
+	b.WriteString("- 交互导向：问候、询问助手身份或能力、致谢、评价上一轮回答等没有新业务问题的输入，只在 type=SYSTEM 节点中选择。\n")
+	b.WriteString("- 实体导向：包含具体系统、产品、模块或客户名称时，必须命中关键实体名称；问题明确提到某系统时，只在该系统分类下选择。\n")
+	b.WriteString("- 主题导向：没有具体实体名称时，匹配分类 path 和 description 中的主题词。\n")
+	b.WriteString("不要为了有结果强行选择弱相关分类；所有候选分数都低于 0.6 时返回 []。交互导向输入与某个 type=SYSTEM 节点的交际行为一致时按强匹配打分。\n\n")
 	b.WriteString("分类列表：\n")
 	nodeIndex := make(map[string]IntentNode, len(rawNodes))
 	for _, node := range rawNodes {

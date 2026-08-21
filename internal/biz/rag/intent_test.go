@@ -102,6 +102,26 @@ func TestBuildIntentClassifierPromptUnwrapsJSONExamples(t *testing.T) {
 	}
 }
 
+func TestBuildIntentClassifierPromptIncludesInteractionRoutingRules(t *testing.T) {
+	prompt := buildIntentClassifierPrompt([]IntentNode{{
+		ID:          "sys-feedback",
+		IntentCode:  "sys-feedback",
+		Name:        "评价反馈",
+		Description: "用户对上一轮回答做出评价",
+		Kind:        IntentKindSystem,
+	}}, nil)
+
+	for _, fragment := range []string{
+		"交互导向",
+		"只在 type=SYSTEM 节点中选择",
+		"交际行为一致时按强匹配打分",
+	} {
+		if !strings.Contains(prompt, fragment) {
+			t.Fatalf("expected interaction routing rule %q in prompt, got %q", fragment, prompt)
+		}
+	}
+}
+
 func TestIntentResolverFallsBackToHeuristicWhenLLMFails(t *testing.T) {
 	resolver := NewIntentResolver(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
 		{BaseModel: db.BaseModel{ID: "root"}, IntentCode: "member", Name: "会员系统", Enabled: 1},

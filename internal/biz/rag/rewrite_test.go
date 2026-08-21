@@ -86,7 +86,7 @@ func TestLLMRewriter_PromptProtectsEllipticalFollowUps(t *testing.T) {
 		t.Fatal("expected rewrite prompt")
 	}
 	prompt := capturedReq.Messages[0].Content
-	for _, want := range []string{"省略续问", "不得将历史 Assistant 回答中的答案", "非查询轮次"} {
+	for _, want := range []string{"省略续问", "不得将历史 Assistant 回答中的答案", "非查询轮次", "保持为查询", "保持原问题的语言"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected rewrite prompt to contain %q, got %q", want, prompt)
 		}

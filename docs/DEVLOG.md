@@ -788,3 +788,6 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 - `VectorGlobalSearch` 已补 `candidate-budget` 单次全局检索预算：pgvector 后端会在多个 collection 范围内执行一次总预算 TopN 召回，并按 `collection_name` 补回知识库 metadata；不支持全局检索的后端继续保持逐库 fan-out。
 - PgVector 检索前会在同一连接事务中尽力设置 `hnsw.ef_search=200` 和 `hnsw.iterative_scan=relaxed_order`，提升 collection 过滤后的召回稳定性，对齐 Java `PgRetrieverService` 的查询调优语义。
 - Rerank 后新增最终候选 metadata 富化 wrapper，会按 chunk ID 批量回查 `t_knowledge_chunk` / `t_knowledge_document`，补齐 `doc_id/chunk_index/doc_name` 且不改变相关性顺序，对齐 Java `MetadataEnrichmentPostProcessor`。
+# 2026-08-21
+
+- 对齐 Java `60436e3` 的意图分类和查询改写提示策略：将问候、身份询问、致谢和回答评价识别为交互导向，只允许选择 `SYSTEM` 意图；实体导向与主题导向继续分别按关键实体和分类路径/描述匹配，并保留低分返回空数组的规则；查询改写明确保持查询意图、原语言和历史用户上下文边界，不把 Assistant 答案写入改写结果。
