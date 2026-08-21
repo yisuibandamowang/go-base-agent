@@ -41,7 +41,18 @@ func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string, opti
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	profile := strings.ToLower(strings.TrimSpace(options["parseProfile"]))
+	if profile == "fidelity" {
+		for _, p := range r.parsers {
+			if p.Type() == rag.ParserMinerU && p.Supports(mimeType) {
+				return p.Parse(ctx, data, mimeType, options)
+			}
+		}
+	}
 	for _, p := range r.parsers {
+		if profile == "fast" && p.Type() == rag.ParserMinerU {
+			continue
+		}
 		if p.Supports(mimeType) {
 			return p.Parse(ctx, data, mimeType, options)
 		}

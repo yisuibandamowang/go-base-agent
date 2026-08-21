@@ -120,6 +120,17 @@ func TestStructureAwareChunkerWholeDocumentSentinel(t *testing.T) {
 	}
 }
 
+func TestStructureAwareChunkerHonorsToleranceSizeForCompleteSection(t *testing.T) {
+	chunker := &StructureAwareChunker{}
+	chunks := chunker.ChunkBlocks([]Block{
+		{Type: BlockParagraph, Content: "第一段内容"},
+		{Type: BlockParagraph, Content: "第二段内容"},
+	}, ChunkingOptions{ChunkSize: 6, OverlapSize: 0, ToleranceSize: 20})
+	if len(chunks) != 1 {
+		t.Fatalf("expected complete section within tolerance to stay together, got %+v", chunks)
+	}
+}
+
 func TestStructureAwareChunkerAddsHeadingOutlineToFollowingChunks(t *testing.T) {
 	chunker := &StructureAwareChunker{}
 	chunks := chunker.ChunkBlocks([]Block{

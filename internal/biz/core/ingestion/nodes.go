@@ -524,6 +524,7 @@ func (n *ChunkerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 	opts := rag.DefaultChunkingOptions()
 	if settings.ChunkSize != nil {
 		opts.ChunkSize = *settings.ChunkSize
+		opts.ToleranceSize = *settings.ChunkSize
 	}
 	if settings.OverlapSize != nil {
 		opts.OverlapSize = *settings.OverlapSize

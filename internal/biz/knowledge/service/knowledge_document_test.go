@@ -606,6 +606,36 @@ func TestDocumentService_CreateDocumentRejectsInvalidProcessMode(t *testing.T) {
 	}
 }
 
+func TestDocumentService_CreateDocumentPersistsIngestionSpec(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+
+	created, err := svc.CreateDocument(context.Background(), kb.ID, knowledgeDto.CreateDocumentReq{
+		DocName:       "会员Agent说明.md",
+		FileURL:       "upload://会员Agent说明.md",
+		FileType:      "md",
+		SourceType:    "file",
+		ProcessMode:   "chunk",
+		IngestionSpec: `{"parseProfile":"fidelity","maxChars":256,"overlapChars":32,"rowsPerChunk":7,"toleranceFactor":2}`,
+	}, "admin-1")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if !strings.Contains(created.IngestionSpec, `"parseProfile":"fidelity"`) || !strings.Contains(created.IngestionSpec, `"maxChars":256`) {
+		t.Fatalf("unexpected response ingestion spec: %s", created.IngestionSpec)
+	}
+
+	var stored knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&stored, "id = ?", created.ID).Error; err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if stored.IngestionSpec != created.IngestionSpec {
+		t.Fatalf("ingestion spec not persisted: stored=%q response=%q", stored.IngestionSpec, created.IngestionSpec)
+	}
+	if opts := chunkingOptionsForDocument(&stored); opts.ChunkSize != 256 || opts.OverlapSize != 32 || opts.RowsPerChunk != 7 || opts.ToleranceSize != 512 {
+		t.Fatalf("ingestion budget not consumed: %+v", opts)
+	}
+}
+
 func TestDocumentService_CreateDocumentRejectsInvalidChunkConfig(t *testing.T) {
 	_, kb, svc := newDocumentServiceTestContext(t)
 

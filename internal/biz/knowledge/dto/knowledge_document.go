@@ -19,6 +19,7 @@ type CreateDocumentReq struct {
 	ProcessMode        string `json:"processMode"`
 	ChunkStrategy      string `json:"chunkStrategy"`
 	ChunkConfig        string `json:"chunkConfig"`
+	IngestionSpec      string `json:"ingestionSpec"`
 	PipelineID         string `json:"pipelineId"`
 }
 
@@ -32,6 +33,7 @@ type UpdateDocumentReq struct {
 	ProcessMode     string  `json:"processMode"`
 	ChunkStrategy   string  `json:"chunkStrategy"`
 	ChunkConfig     string  `json:"chunkConfig"`
+	IngestionSpec   string  `json:"ingestionSpec"`
 	PipelineID      string  `json:"pipelineId"`
 }
 
@@ -59,6 +61,7 @@ type DocumentResp struct {
 	ScheduleCron       string `json:"scheduleCron"`
 	ChunkStrategy      string `json:"chunkStrategy"`
 	ChunkConfig        string `json:"chunkConfig"`
+	IngestionSpec      string `json:"ingestionSpec"`
 	PipelineID         string `json:"pipelineId"`
 	CreatedBy          string `json:"createdBy"`
 	UpdatedBy          string `json:"updatedBy"`

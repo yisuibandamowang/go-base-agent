@@ -53,6 +53,7 @@ knowledge-base.refs=group,biz
 knowledge-base.group.name=集团信息化
 knowledge-base.group.collection-name=tutorial_group
 knowledge-base.group.embedding-model=qwen-emb-8b
+knowledge-base.group.ingestion-spec={"parseProfile":"fast","maxChars":256}
 knowledge-base.group.documents=docs/knowledge/group
 knowledge-base.biz.name=业务系统
 knowledge-base.biz.collection-name=tutorial_biz
@@ -113,6 +114,9 @@ question.q01.follow-ups=回答得不错，谢谢|还有别的建议吗
 	}
 	if dataset.KnowledgeBases[0].CollectionName != "tutorial_group" {
 		t.Fatalf("unexpected collection name: %s", dataset.KnowledgeBases[0].CollectionName)
+	}
+	if dataset.KnowledgeBases[0].IngestionSpec != `{"parseProfile":"fast","maxChars":256}` {
+		t.Fatalf("unexpected ingestion spec: %q", dataset.KnowledgeBases[0].IngestionSpec)
 	}
 	if len(dataset.Intents) != 2 {
 		t.Fatalf("expected 2 intents, got %d", len(dataset.Intents))
@@ -296,6 +300,9 @@ func TestInitDocumentsUploadsChunksAndWaitsForSuccess(t *testing.T) {
 			if got := r.FormValue("processMode"); got != "chunk" {
 				t.Errorf("expected chunk process mode, got %q", got)
 			}
+			if got := r.FormValue("ingestionSpec"); got != `{"parseProfile":"fast","maxChars":256}` {
+				t.Errorf("expected ingestion spec, got %q", got)
+			}
 			if _, header, err := r.FormFile("file"); err != nil || header.Filename != "会员手册.md" {
 				t.Errorf("unexpected uploaded file: %v, header=%v", err, header)
 			}
@@ -321,7 +328,7 @@ func TestInitDocumentsUploadsChunksAndWaitsForSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	dataset := &Dataset{KnowledgeBases: []KnowledgeBase{{Ref: "kb", Name: "知识库", CollectionName: "collection", DocumentsDir: dir}}}
+	dataset := &Dataset{KnowledgeBases: []KnowledgeBase{{Ref: "kb", Name: "知识库", CollectionName: "collection", DocumentsDir: dir, IngestionSpec: `{"parseProfile":"fast","maxChars":256}`}}}
 	if err := initDocuments(context.Background(), c, dataset, false, time.Second, time.Millisecond); err != nil {
 		t.Fatalf("initDocuments: %v", err)
 	}

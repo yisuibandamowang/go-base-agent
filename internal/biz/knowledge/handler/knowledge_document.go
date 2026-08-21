@@ -209,6 +209,9 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	if vals, ok := form.Value["chunkConfig"]; ok && len(vals) > 0 {
 		req.ChunkConfig = vals[0]
 	}
+	if vals, ok := form.Value["ingestionSpec"]; ok && len(vals) > 0 {
+		req.IngestionSpec = vals[0]
+	}
 	if vals, ok := form.Value["pipelineId"]; ok && len(vals) > 0 && req.PipelineID == "" {
 		req.PipelineID = vals[0]
 	}
@@ -810,6 +813,7 @@ func internalURLProcessingChanged(existing *dto.DocumentResp, req dto.CreateDocu
 		existing.ProcessMode,
 		existing.ChunkStrategy,
 		existing.ChunkConfig,
+		existing.IngestionSpec,
 		existing.PipelineID,
 		req,
 	)
@@ -819,6 +823,7 @@ func internalURLHasProcessingConfig(req dto.CreateDocumentReq) bool {
 	return strings.TrimSpace(req.ProcessMode) != "" ||
 		strings.TrimSpace(req.ChunkStrategy) != "" ||
 		strings.TrimSpace(req.ChunkConfig) != "" ||
+		strings.TrimSpace(req.IngestionSpec) != "" ||
 		strings.TrimSpace(req.PipelineID) != ""
 }
 

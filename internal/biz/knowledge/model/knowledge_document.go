@@ -26,6 +26,7 @@ type KnowledgeDocument struct {
 	ScheduleCron       string `gorm:"column:schedule_cron;type:varchar(64)" json:"scheduleCron"`
 	ChunkStrategy      string `gorm:"column:chunk_strategy;type:varchar(32)" json:"chunkStrategy"`
 	ChunkConfig        string `gorm:"column:chunk_config;type:jsonb" json:"chunkConfig"`
+	IngestionSpec      string `gorm:"column:ingestion_spec;type:jsonb" json:"ingestionSpec"`
 	PipelineID         string `gorm:"column:pipeline_id;type:varchar(20)" json:"pipelineId"`
 	CreatedBy          string `gorm:"column:created_by;type:varchar(20);not null" json:"createdBy"`
 	UpdatedBy          string `gorm:"column:updated_by;type:varchar(20)" json:"updatedBy"`

@@ -18,6 +18,7 @@ const (
 type ChunkingOptions struct {
 	ChunkSize         int // target chunk size in characters
 	OverlapSize       int // overlap between chunks in characters
+	ToleranceSize     int // maximum size for keeping a structured block intact
 	MinChunkSize      int // minimum chunk size (shorter chunks merged)
 	RowsPerChunk      int // maximum table rows per chunk
 	MaxListItems      int // short-list atomic threshold
@@ -29,6 +30,7 @@ func DefaultChunkingOptions() ChunkingOptions {
 	return ChunkingOptions{
 		ChunkSize:         512,
 		OverlapSize:       128,
+		ToleranceSize:     512,
 		MinChunkSize:      100,
 		RowsPerChunk:      50,
 		MaxListItems:      15,
@@ -51,6 +53,9 @@ func (f *FixedSizeChunker) Mode() ChunkingMode { return ChunkModeFixedSize }
 func (f *FixedSizeChunker) Chunk(text string, opts ChunkingOptions) []VectorChunk {
 	if opts.ChunkSize <= 0 {
 		opts = DefaultChunkingOptions()
+	}
+	if opts.ToleranceSize <= 0 {
+		opts.ToleranceSize = opts.ChunkSize
 	}
 	runes := []rune(text)
 	total := len(runes)
@@ -157,6 +162,9 @@ func (s *StructureAwareChunker) ChunkBlocks(blocks []Block, opts ChunkingOptions
 	if opts.ChunkSize <= 0 {
 		opts = DefaultChunkingOptions()
 	}
+	if opts.ToleranceSize <= 0 {
+		opts.ToleranceSize = opts.ChunkSize
+	}
 
 	var chunks []VectorChunk
 	var current []string
@@ -230,7 +238,7 @@ func (s *StructureAwareChunker) ChunkBlocks(blocks []Block, opts ChunkingOptions
 			continue
 		}
 		contentLen := len([]rune(content))
-		if currentLen > 0 && currentLen+contentLen > opts.ChunkSize {
+		if currentLen > 0 && currentLen+contentLen > opts.ToleranceSize {
 			flush()
 		}
 		current = append(current, content)
@@ -239,7 +247,11 @@ func (s *StructureAwareChunker) ChunkBlocks(blocks []Block, opts ChunkingOptions
 		currentLen += contentLen
 	}
 	flush()
-	return packMergeableChunks(chunks, opts.ChunkSize, opts.OverlapSize)
+	packSize := opts.ToleranceSize
+	if packSize <= 0 {
+		packSize = opts.ChunkSize
+	}
+	return packMergeableChunks(chunks, packSize, opts.OverlapSize)
 }
 
 func chunkTableBlock(block Block, opts ChunkingOptions, startIndex int, outlinePath []string, sourceBlockID string) []VectorChunk {
@@ -251,6 +263,10 @@ func chunkTableBlock(block Block, opts ChunkingOptions, startIndex int, outlineP
 	budget := opts.ChunkSize
 	if budget <= 0 {
 		budget = DefaultChunkingOptions().ChunkSize
+	}
+	tolerance := opts.ToleranceSize
+	if tolerance < budget {
+		tolerance = budget
 	}
 	maxRows := opts.RowsPerChunk
 	if maxRows <= 0 {
@@ -295,6 +311,10 @@ func chunkTableBlock(block Block, opts ChunkingOptions, startIndex int, outlineP
 		rowCost := len([]rune(renderKeyValueTableRow(headers, row)))
 		overCap := len(group) >= maxRows
 		overBudget := len(group) > 0 && groupCost+rowCost > budget
+		if len(group) == 0 && len(rows) <= maxRows && rowCost <= tolerance {
+			budget = tolerance
+			overBudget = false
+		}
 		if overCap || overBudget {
 			flushGroup()
 		}

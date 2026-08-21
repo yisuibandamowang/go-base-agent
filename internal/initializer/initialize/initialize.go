@@ -60,6 +60,7 @@ type KnowledgeBase struct {
 	CollectionName string
 	EmbeddingModel string
 	DocumentsDir   string
+	IngestionSpec  string
 }
 
 // Intent 数据集中的一条意图节点定义。
@@ -397,6 +398,7 @@ func loadKnowledgeBases(dir string) ([]KnowledgeBase, error) {
 			CollectionName: strings.TrimSpace(props["knowledge-base."+ref+".collection-name"]),
 			EmbeddingModel: strings.TrimSpace(props["knowledge-base."+ref+".embedding-model"]),
 			DocumentsDir:   docDir,
+			IngestionSpec:  strings.TrimSpace(props["knowledge-base."+ref+".ingestion-spec"]),
 		})
 	}
 	if len(result) == 0 {
@@ -727,7 +729,7 @@ func (c *client) postEmpty(ctx context.Context, path string) error {
 	return c.doJSON(req, nil)
 }
 
-func (c *client) uploadDocument(ctx context.Context, kbID, filePath string) (string, error) {
+func (c *client) uploadDocument(ctx context.Context, kbID, filePath, ingestionSpec string) (string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("读取文档失败: %w", err)
@@ -742,6 +744,11 @@ func (c *client) uploadDocument(ctx context.Context, kbID, filePath string) (str
 	}
 	if err := writer.WriteField("scheduleEnabled", "0"); err != nil {
 		return "", fmt.Errorf("写入文档调度配置失败: %w", err)
+	}
+	if strings.TrimSpace(ingestionSpec) != "" {
+		if err := writer.WriteField("ingestionSpec", ingestionSpec); err != nil {
+			return "", fmt.Errorf("写入文档摄取配置失败: %w", err)
+		}
 	}
 	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
 	if err != nil {

@@ -201,7 +201,7 @@ func initDocumentsWithReplace(ctx context.Context, c *client, dataset *Dataset, 
 					}
 				}
 			}
-			docID, err := c.uploadDocument(ctx, kbID, filePath)
+			docID, err := c.uploadDocument(ctx, kbID, filePath, definition.IngestionSpec)
 			if err != nil {
 				return err
 			}

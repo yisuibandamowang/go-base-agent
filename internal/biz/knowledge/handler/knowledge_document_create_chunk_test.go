@@ -65,6 +65,9 @@ func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
 	if err := writer.WriteField("chunkStrategy", "fixed_size"); err != nil {
 		t.Fatalf("write chunkStrategy: %v", err)
 	}
+	if err := writer.WriteField("ingestionSpec", `{"parseProfile":"fast","maxChars":256}`); err != nil {
+		t.Fatalf("write ingestionSpec: %v", err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close multipart writer: %v", err)
 	}
@@ -102,6 +105,9 @@ func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
 	}
 	if storedDoc.FileURL != "upload://kb_collection/guide.md" {
 		t.Fatalf("expected upload file url to carry collection hint, got %q", storedDoc.FileURL)
+	}
+	if !strings.Contains(storedDoc.IngestionSpec, `"maxChars":256`) {
+		t.Fatalf("expected ingestion spec to be persisted, got %q", storedDoc.IngestionSpec)
 	}
 	stored, err := fileStore.ReadWithCollection(context.Background(), kb.CollectionName, resp.Data.ID)
 	if err != nil {

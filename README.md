@@ -156,6 +156,7 @@ make initialize AGENT_TYPE_DIR=/path/to/agent-type-dir
 初始化流程会依次执行预检、清理、知识库创建、文档上传与分块、意图树、示例问题、结果校验和预热。
 正式初始化要求数据集目录提供 `checksums.sha256`，启动前会校验目录内声明文件的 SHA-256；开发测试场景直接调用初始化包时仍保持兼容。
 意图 properties 支持 Java 数据集的 `mcp-tool-id`、`prompt-snippet-file`、`prompt-template-file` 和 `param-prompt-template-file` 字段。
+知识库 properties 支持 `knowledge-base.<ref>.ingestion-spec`，初始化上传时会透传文档级 `fast/fidelity` 解析档位及 `maxChars`、`overlapChars`、`rowsPerChunk`、`toleranceFactor` 分块预算；服务端归一化后写入 `t_knowledge_document.ingestion_spec` 并在实际解析、分块时使用。现有 `chunkStrategy/chunkConfig` 仍保留兼容。
 初始化结果校验还会确认每个绑定知识库的意图节点实际包含对应 Collection，避免意图树创建成功但检索范围错误。
 默认同名文档会按 Java 初始化器行为替换，单份文档分块最多等待 `20m`，每 `3s` 轮询一次；可用
 `--replace-existing=false`、`--document-timeout` 和 `--document-poll-interval` 调整。只查看计划时加
