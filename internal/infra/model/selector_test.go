@@ -116,6 +116,67 @@ func TestSelector_ChatCandidates_PriorityOrder(t *testing.T) {
 	}
 }
 
+func TestSelector_ChatCandidates_UsesConfiguredTierOrderAndTimeout(t *testing.T) {
+	selector := NewSelector(config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"openai": {URL: "https://api.openai.com", Protocol: "openai-compatible"},
+		},
+		Chat: config.AIChatConfig{
+			DefaultModel: "priority-first",
+			DefaultTier:  "fast",
+			Tiers: map[string]config.AIChatTierConfig{
+				"fast": {Candidates: []string{"tier-first", "priority-first"}, TimeoutMs: 5000},
+			},
+			Candidates: []config.AICandidateConfig{
+				{ID: "priority-first", Provider: "openai", Model: "gpt-4.1", Priority: 0},
+				{ID: "tier-first", Provider: "openai", Model: "gpt-4.1-mini", Priority: 10},
+			},
+		},
+	}, NewHealthStore(config.AISelectionConfig{}))
+
+	targets := selector.SelectChatCandidates(false)
+	if len(targets) != 2 {
+		t.Fatalf("expected two tier candidates, got %d", len(targets))
+	}
+	if targets[0].ID != "tier-first" || targets[1].ID != "priority-first" {
+		t.Fatalf("expected configured tier order, got %q then %q", targets[0].ID, targets[1].ID)
+	}
+	if targets[0].TimeoutMs != 5000 || targets[1].TimeoutMs != 5000 {
+		t.Fatalf("expected tier timeout to propagate, got %d and %d", targets[0].TimeoutMs, targets[1].TimeoutMs)
+	}
+}
+
+func TestSelector_ChatCandidates_TierPreferredModelAndThinkingFilter(t *testing.T) {
+	enabled := true
+	selector := NewSelector(config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"openai": {URL: "https://api.openai.com", Protocol: "openai-compatible"},
+		},
+		Chat: config.AIChatConfig{
+			DefaultTier:      "standard",
+			DeepThinkingTier: "deep",
+			Tiers: map[string]config.AIChatTierConfig{
+				"standard": {Candidates: []string{"standard"}, TimeoutMs: 30000},
+				"deep":     {Candidates: []string{"deep"}, TimeoutMs: 120000},
+			},
+			Candidates: []config.AICandidateConfig{
+				{ID: "standard", Provider: "openai", Model: "gpt-4.1", SupportsThinking: true},
+				{ID: "deep", Provider: "openai", Model: "o3", SupportsThinking: true, Enabled: &enabled},
+			},
+		},
+	}, NewHealthStore(config.AISelectionConfig{}))
+
+	targets := selector.SelectChatCandidatesForTier(false, "standard", "deep")
+	if len(targets) != 2 || targets[0].ID != "deep" || targets[1].ID != "standard" {
+		t.Fatalf("expected preferred model before tier candidates, got %+v", targets)
+	}
+
+	targets = selector.SelectChatCandidates(true)
+	if len(targets) != 1 || targets[0].ID != "deep" || targets[0].TimeoutMs != 120000 {
+		t.Fatalf("expected deep tier with thinking support, got %+v", targets)
+	}
+}
+
 func TestSelector_EmbeddingCandidates(t *testing.T) {
 	s := testSelector()
 	targets := s.SelectEmbeddingCandidates()

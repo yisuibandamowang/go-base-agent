@@ -14,3 +14,29 @@ type LLMService interface {
 	// StreamChat performs a streaming chat with the default model.
 	StreamChat(ctx context.Context, req Request, cb StreamCallback) (StreamHandle, error)
 }
+
+// TieredLLMService is optionally implemented by model routers that support
+// explicit chat tiers. Keeping it separate preserves the small business-layer
+// LLMService contract used by tests and integrations.
+type TieredLLMService interface {
+	ChatWithTier(ctx context.Context, req Request, tier string) (string, error)
+	ChatWithTierAndModel(ctx context.Context, req Request, tier, modelID string) (string, error)
+	StreamChatWithTier(ctx context.Context, req Request, cb StreamCallback, tier string) (StreamHandle, error)
+}
+
+// ChatWithTier routes through an explicit tier when the service supports it.
+// Older lightweight test doubles transparently retain their default behavior.
+func ChatWithTier(ctx context.Context, service LLMService, req Request, tier string) (string, error) {
+	if tiered, ok := service.(TieredLLMService); ok {
+		return tiered.ChatWithTier(ctx, req, tier)
+	}
+	return service.Chat(ctx, req)
+}
+
+// StreamChatWithTier routes a stream through an explicit tier when supported.
+func StreamChatWithTier(ctx context.Context, service LLMService, req Request, cb StreamCallback, tier string) (StreamHandle, error) {
+	if tiered, ok := service.(TieredLLMService); ok {
+		return tiered.StreamChatWithTier(ctx, req, cb, tier)
+	}
+	return service.StreamChat(ctx, req, cb)
+}

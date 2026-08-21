@@ -888,3 +888,30 @@ func TestLoadRejectsInvalidMemoryBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadRejectsInvalidChatTierReference(t *testing.T) {
+	yaml := `
+ai:
+  chat:
+    default-tier: standard
+    deep-thinking-tier: deep
+    tiers:
+      standard:
+        candidates: [model-a]
+        timeout-ms: 30000
+    candidates:
+      - id: model-a
+        provider: noop
+        model: noop
+`
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "deep-thinking-tier") {
+		t.Fatalf("expected invalid chat tier reference error, got: %v", err)
+	}
+}

@@ -55,12 +55,12 @@ func (g *LLMTitleGenerator) Generate(ctx context.Context, question string) (stri
 	temperature := 0.7
 	topP := 0.3
 	thinking := false
-	title, err := g.llm.Chat(ctx, chat.Request{
+	title, err := chat.ChatWithTier(ctx, g.llm, chat.Request{
 		Messages:    []chat.Message{chat.NewUserMessage(prompt)},
 		Temperature: &temperature,
 		TopP:        &topP,
 		Thinking:    &thinking,
-	})
+	}, "fast")
 	if err != nil {
 		slog.Warn("conversation title llm failed", "err", err)
 		return "新对话", nil

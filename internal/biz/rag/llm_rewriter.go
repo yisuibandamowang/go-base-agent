@@ -80,7 +80,7 @@ func (r *LLMRewriter) Rewrite(ctx context.Context, question string, history []ch
 	req := chat.Request{Messages: messages, Thinking: &falseVal}
 
 	var builder strings.Builder
-	handle, err := r.llm.StreamChat(ctx, req, &rewriteCallback{builder: &builder})
+	handle, err := chat.StreamChatWithTier(ctx, r.llm, req, &rewriteCallback{builder: &builder}, "fast")
 	if err != nil {
 		slog.Warn("llm rewriter: stream chat failed", "err", err)
 		return &RewriteResult{RewrittenQuestion: question}, nil

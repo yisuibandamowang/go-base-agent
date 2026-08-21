@@ -50,9 +50,9 @@ func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Messa
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
 	}
 
-	summary, err := g.llm.Chat(ctx, chat.Request{
+	summary, err := chat.ChatWithTier(ctx, g.llm, chat.Request{
 		Messages: []chat.Message{chat.NewUserMessage(prompt)},
-	})
+	}, "fast")
 	if err != nil {
 		slog.Warn("conversation summary llm failed", "err", err)
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil

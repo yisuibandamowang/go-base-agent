@@ -22,7 +22,23 @@ func NewSelector(cfg config.AIConfig, health *HealthStore) *Selector {
 
 // SelectChatCandidates returns sorted chat model targets.
 func (s *Selector) SelectChatCandidates(deepThinking bool) []Target {
+	return s.SelectChatCandidatesForTier(deepThinking, "", "")
+}
+
+// SelectChatCandidatesForTier returns chat targets from an explicit tier.
+// An empty tier uses deep-thinking-tier/default-tier according to the request.
+func (s *Selector) SelectChatCandidatesForTier(deepThinking bool, tierName, preferredModelID string) []Target {
 	group := s.cfg.Chat
+	resolvedTier := strings.TrimSpace(tierName)
+	if deepThinking && strings.TrimSpace(group.DeepThinkingTier) != "" {
+		resolvedTier = strings.TrimSpace(group.DeepThinkingTier)
+	} else if resolvedTier == "" {
+		resolvedTier = strings.TrimSpace(group.DefaultTier)
+	}
+	if resolvedTier != "" && len(group.Tiers) > 0 {
+		return s.buildTierChatTargets(group, resolvedTier, preferredModelID, deepThinking)
+	}
+
 	firstChoice := group.DefaultModel
 	if deepThinking && group.DeepThinkingModel != "" {
 		firstChoice = group.DeepThinkingModel
@@ -44,6 +60,50 @@ func (s *Selector) SelectChatCandidates(deepThinking bool) []Target {
 	}, firstChoice)
 
 	return s.buildChatTargets(candidates)
+}
+
+func (s *Selector) buildTierChatTargets(group config.AIChatConfig, tierName, preferredModelID string, deepThinking bool) []Target {
+	registry := make(map[string]config.AICandidateConfig, len(group.Candidates))
+	for _, candidate := range group.Candidates {
+		id := modelID(candidate.ID, candidate.Provider, candidate.Model)
+		if _, exists := registry[id]; !exists {
+			registry[id] = candidate
+		}
+	}
+
+	tier, ok := group.Tiers[tierName]
+	if !ok {
+		return nil
+	}
+	orderedIDs := make([]string, 0, len(tier.Candidates)+1)
+	if preferred := strings.TrimSpace(preferredModelID); preferred != "" {
+		if candidate, exists := registry[preferred]; exists && (!deepThinking || candidate.SupportsThinking) {
+			orderedIDs = append(orderedIDs, preferred)
+		}
+	}
+	for _, id := range tier.Candidates {
+		if !slices.Contains(orderedIDs, id) {
+			orderedIDs = append(orderedIDs, id)
+		}
+	}
+
+	targets := make([]Target, 0, len(orderedIDs))
+	for _, id := range orderedIDs {
+		candidate, exists := registry[id]
+		if !exists || !candidate.IsEnabled() || (deepThinking && !candidate.SupportsThinking) {
+			continue
+		}
+		if !s.passFilter(candidate.ID, candidate.Provider, candidate.Model) {
+			continue
+		}
+		targets = append(targets, Target{
+			ID:        id,
+			Candidate: candidate,
+			Provider:  s.cfg.Providers[candidate.Provider],
+			TimeoutMs: tier.TimeoutMs,
+		})
+	}
+	return targets
 }
 
 // SelectEmbeddingCandidates returns sorted embedding model targets.

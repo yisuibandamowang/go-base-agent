@@ -129,6 +129,50 @@ func TestLLMService_Chat_Fallback(t *testing.T) {
 	}
 }
 
+func TestLLMService_ChatWithTierUsesTierCandidatesAndTimeout(t *testing.T) {
+	var gotTarget model.Target
+	var hasDeadline bool
+	client := &fakeChatClient{name: "openai", chatFn: func(ctx context.Context, req Request, target model.Target) (string, error) {
+		gotTarget = target
+		_, hasDeadline = ctx.Deadline()
+		return "tier-response", nil
+	}}
+	cfg := config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"openai": {URL: "https://api.openai.com", Protocol: "openai-compatible"},
+		},
+		Chat: config.AIChatConfig{
+			DefaultModel: "priority-first",
+			DefaultTier:  "standard",
+			Tiers: map[string]config.AIChatTierConfig{
+				"fast":     {Candidates: []string{"fast-first"}, TimeoutMs: 5000},
+				"standard": {Candidates: []string{"standard-first"}, TimeoutMs: 30000},
+			},
+			Candidates: []config.AICandidateConfig{
+				{ID: "priority-first", Provider: "openai", Model: "gpt-4.1", Priority: 0},
+				{ID: "fast-first", Provider: "openai", Model: "gpt-4.1-mini", Priority: 10},
+				{ID: "standard-first", Provider: "openai", Model: "gpt-4.1", Priority: 10},
+			},
+		},
+	}
+	health := model.NewHealthStore(config.AISelectionConfig{})
+	svc := NewRoutingLLMService(
+		model.NewSelector(cfg, health), health, model.NewRoutingExecutor(health),
+		[]ChatClient{client}, &noopFirstPacketProbe{}, time.Second,
+	)
+
+	result, err := svc.ChatWithTier(context.Background(), SimpleRequest("hello"), "fast")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "tier-response" || gotTarget.ID != "fast-first" || gotTarget.TimeoutMs != 5000 {
+		t.Fatalf("unexpected tier route: result=%q target=%+v", result, gotTarget)
+	}
+	if !hasDeadline {
+		t.Fatal("expected tier timeout to be applied to model context")
+	}
+}
+
 func TestLLMService_StreamChat_Success(t *testing.T) {
 	svc := testRoutingService([]ChatClient{&fakeChatClient{name: "openai"}})
 	done := make(chan string, 1)

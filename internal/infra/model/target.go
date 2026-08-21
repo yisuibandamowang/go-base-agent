@@ -8,4 +8,5 @@ type Target struct {
 	ID        string
 	Candidate config.AICandidateConfig
 	Provider  config.AIProviderConfig
+	TimeoutMs int
 }

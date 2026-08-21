@@ -774,7 +774,61 @@ func validateConfig(cfg *Config) error {
 			cfg.RAG.Graph.Type,
 		)
 	}
+	if err := validateChatTiers(cfg.AI.Chat); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateChatTiers(chatCfg AIChatConfig) error {
+	if len(chatCfg.Tiers) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(chatCfg.DefaultTier) == "" {
+		return fmt.Errorf("validate ai.chat: default-tier is required when tiers are configured")
+	}
+	if _, ok := chatCfg.Tiers[chatCfg.DefaultTier]; !ok {
+		return fmt.Errorf("validate ai.chat: default-tier %q does not reference a configured tier", chatCfg.DefaultTier)
+	}
+	if strings.TrimSpace(chatCfg.DeepThinkingTier) == "" {
+		return fmt.Errorf("validate ai.chat: deep-thinking-tier is required when tiers are configured")
+	}
+	if _, ok := chatCfg.Tiers[chatCfg.DeepThinkingTier]; !ok {
+		return fmt.Errorf("validate ai.chat: deep-thinking-tier %q does not reference a configured tier", chatCfg.DeepThinkingTier)
+	}
+
+	registry := make(map[string]AICandidateConfig, len(chatCfg.Candidates))
+	for _, candidate := range chatCfg.Candidates {
+		id := candidate.ID
+		if strings.TrimSpace(id) == "" {
+			id = fmt.Sprintf("%s::%s", candidate.Provider, candidate.Model)
+		}
+		if _, exists := registry[id]; exists {
+			return fmt.Errorf("validate ai.chat: duplicate candidate id %q", id)
+		}
+		registry[id] = candidate
+	}
+	for name, tier := range chatCfg.Tiers {
+		if tier.TimeoutMs <= 0 {
+			return fmt.Errorf("validate ai.chat: tier %q timeout-ms must be positive", name)
+		}
+		if len(tier.Candidates) == 0 {
+			return fmt.Errorf("validate ai.chat: tier %q candidates must not be empty", name)
+		}
+		for _, id := range tier.Candidates {
+			if _, ok := registry[id]; !ok {
+				return fmt.Errorf("validate ai.chat: tier %q references unknown candidate %q", name, id)
+			}
+		}
+	}
+	deep := chatCfg.Tiers[chatCfg.DeepThinkingTier]
+	for _, id := range deep.Candidates {
+		candidate := registry[id]
+		if candidate.IsEnabled() && candidate.SupportsThinking {
+			return nil
+		}
+	}
+	return fmt.Errorf("validate ai.chat: deep-thinking-tier %q has no enabled thinking candidate", chatCfg.DeepThinkingTier)
 }
 
 // expandEnv 替换字符串中的环境变量占位符。

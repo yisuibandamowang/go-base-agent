@@ -970,7 +970,7 @@ func (c *LLMAmbiguityChecker) CheckAmbiguity(ctx context.Context, question strin
 		TopP:        floatPtr(0.3),
 		Thinking:    boolPtr(false),
 	}
-	raw, err := c.llm.Chat(ctx, req)
+	raw, err := chat.ChatWithTier(ctx, c.llm, req, "fast")
 	if err != nil {
 		slog.Warn("ambiguity check llm failed, fallback to clarify", "err", err)
 		return true

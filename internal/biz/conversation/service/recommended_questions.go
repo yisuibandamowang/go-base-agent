@@ -94,13 +94,13 @@ func (g *LLMRecommendedQuestionGenerator) Generate(ctx context.Context, question
 	temperature := 0.7
 	topP := 0.8
 	thinking := false
-	raw, err := g.llm.Chat(ctx, chat.Request{
+	raw, err := chat.ChatWithTier(ctx, g.llm, chat.Request{
 		Messages:    []chat.Message{chat.NewUserMessage(prompt)},
 		Temperature: &temperature,
 		TopP:        &topP,
 		Thinking:    &thinking,
 		MaxTokens:   intPtr(256),
-	})
+	}, "fast")
 	if err != nil {
 		slog.Warn("recommended questions llm failed", "err", err)
 		return RecommendedQuestionsFailed()

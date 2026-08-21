@@ -129,8 +129,13 @@ func NewRoutingLLMService(
 }
 
 func (s *RoutingLLMService) Chat(ctx context.Context, req Request) (string, error) {
+	return s.ChatWithTier(ctx, req, "")
+}
+
+// ChatWithTier performs synchronous chat using an explicit configured tier.
+func (s *RoutingLLMService) ChatWithTier(ctx context.Context, req Request, tier string) (string, error) {
 	deepThinking := req.Thinking != nil && *req.Thinking
-	targets := s.selector.SelectChatCandidates(deepThinking)
+	targets := s.selector.SelectChatCandidatesForTier(deepThinking, tier, "")
 
 	return model.ExecuteWithFallback(
 		s.executor,
@@ -141,7 +146,29 @@ func (s *RoutingLLMService) Chat(ctx context.Context, req Request) (string, erro
 			return c, ok
 		},
 		func(client ChatClient, t model.Target) (string, error) {
-			return client.Chat(ctx, req, t)
+			callCtx, cancel := modelCallContext(ctx, t)
+			defer cancel()
+			return client.Chat(callCtx, req, t)
+		},
+	)
+}
+
+// ChatWithTierAndModel routes a preferred model first, then the tier fallback.
+func (s *RoutingLLMService) ChatWithTierAndModel(ctx context.Context, req Request, tier, modelID string) (string, error) {
+	deepThinking := req.Thinking != nil && *req.Thinking
+	targets := s.selector.SelectChatCandidatesForTier(deepThinking, tier, modelID)
+	return model.ExecuteWithFallback(
+		s.executor,
+		model.CapabilityChat,
+		targets,
+		func(t model.Target) (ChatClient, bool) {
+			client, ok := s.clients[t.Candidate.Provider]
+			return client, ok
+		},
+		func(client ChatClient, t model.Target) (string, error) {
+			callCtx, cancel := modelCallContext(ctx, t)
+			defer cancel()
+			return client.Chat(callCtx, req, t)
 		},
 	)
 }
@@ -174,9 +201,20 @@ func (s *RoutingLLMService) ChatWithModel(ctx context.Context, req Request, mode
 	return "", errors.New("specified model not found: " + modelID)
 }
 
+func modelCallContext(ctx context.Context, target model.Target) (context.Context, context.CancelFunc) {
+	if target.TimeoutMs <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, time.Duration(target.TimeoutMs)*time.Millisecond)
+}
+
 func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb StreamCallback) (StreamHandle, error) {
+	return s.streamChatWithTier(ctx, req, cb, "")
+}
+
+func (s *RoutingLLMService) streamChatWithTier(ctx context.Context, req Request, cb StreamCallback, tier string) (StreamHandle, error) {
 	deepThinking := req.Thinking != nil && *req.Thinking
-	targets := s.selector.SelectChatCandidates(deepThinking)
+	targets := s.selector.SelectChatCandidatesForTier(deepThinking, tier, "")
 
 	if len(targets) == 0 {
 		return nil, errors.New("no available chat model")
@@ -194,8 +232,10 @@ func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb Stre
 		}
 
 		bridge := NewProbeBridgeWithContext(ctx, cb)
-		handle, err := client.StreamChat(ctx, req, bridge, target)
+		callCtx, cancel := modelCallContext(ctx, target)
+		handle, err := client.StreamChat(callCtx, req, bridge, target)
 		if err != nil {
+			cancel()
 			if ctx.Err() != nil {
 				// 请求取消属于客户端行为，不算模型失败：持有者只释放探测名额
 				s.health.ReleaseHalfOpenPermit(permit)
@@ -206,12 +246,18 @@ func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb Stre
 			continue
 		}
 		if handle == nil {
+			cancel()
 			s.health.MarkFailure(target.ID)
 			continue
 		}
 
-		result, err := s.firstPacketProbe.AwaitFirstPacket(bridge, s.firstPacketTimeout)
+		probeTimeout := s.firstPacketTimeout
+		if target.TimeoutMs > 0 && (probeTimeout <= 0 || time.Duration(target.TimeoutMs)*time.Millisecond < probeTimeout) {
+			probeTimeout = time.Duration(target.TimeoutMs) * time.Millisecond
+		}
+		result, err := s.firstPacketProbe.AwaitFirstPacket(bridge, probeTimeout)
 		if err != nil {
+			cancel()
 			handle.Cancel()
 			if ctx.Err() != nil {
 				// 等待首包时请求被取消：探测名额由持有者释放，避免半开名额被占用
@@ -225,10 +271,11 @@ func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb Stre
 
 		if result.Success {
 			s.health.MarkSuccess(target.ID)
-			return handle, nil
+			return &timedStreamHandle{inner: handle, cancel: cancel}, nil
 		}
 
 		handle.Cancel()
+		cancel()
 		s.health.MarkFailure(target.ID)
 		last = result.Error
 	}
@@ -237,4 +284,37 @@ func (s *RoutingLLMService) StreamChat(ctx context.Context, req Request, cb Stre
 		return nil, last
 	}
 	return nil, errors.New("all chat models failed")
+}
+
+type timedStreamHandle struct {
+	inner  StreamHandle
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (h *timedStreamHandle) Cancel() {
+	if h == nil {
+		return
+	}
+	h.once.Do(func() {
+		if h.cancel != nil {
+			h.cancel()
+		}
+		if h.inner != nil {
+			h.inner.Cancel()
+		}
+	})
+}
+
+func (h *timedStreamHandle) Wait() {
+	if h == nil || h.inner == nil {
+		return
+	}
+	h.inner.Wait()
+	h.Cancel()
+}
+
+// StreamChatWithTier starts a streaming chat using an explicit configured tier.
+func (s *RoutingLLMService) StreamChatWithTier(ctx context.Context, req Request, cb StreamCallback, tier string) (StreamHandle, error) {
+	return s.streamChatWithTier(ctx, req, cb, tier)
 }

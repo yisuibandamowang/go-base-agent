@@ -37,7 +37,7 @@ func (s *LLMMcpToolSelector) SelectTools(ctx context.Context, question string, t
 		TopP:        floatPtr(0.3),
 	}
 
-	raw, err := s.llm.Chat(ctx, req)
+	raw, err := chat.ChatWithTier(ctx, s.llm, req, "fast")
 	if err != nil {
 		return nil, fmt.Errorf("select mcp tools: %w", err)
 	}

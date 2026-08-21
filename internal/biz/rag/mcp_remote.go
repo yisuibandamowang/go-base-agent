@@ -328,7 +328,7 @@ func (e *LLMMcpParameterExtractor) ExtractParametersValidated(ctx context.Contex
 		TopP:        floatPtr(0.3),
 	}
 
-	raw, err := e.llm.Chat(ctx, req)
+	raw, err := chat.ChatWithTier(ctx, e.llm, req, "fast")
 	if err != nil {
 		slog.Warn("mcp param extraction llm failed", "tool", tool.Name, "err", err)
 		return McpExtractionFailedResult()
@@ -434,7 +434,7 @@ func (e *LLMMcpParameterExtractor) ExtractParametersWithTemplate(ctx context.Con
 		TopP:        floatPtr(0.3),
 	}
 
-	raw, err := e.llm.Chat(ctx, req)
+	raw, err := chat.ChatWithTier(ctx, e.llm, req, "fast")
 	if err != nil {
 		return nil, fmt.Errorf("extract mcp parameters for %s: %w", tool.Name, err)
 	}

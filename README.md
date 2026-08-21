@@ -42,7 +42,7 @@
 - 文档入库：上传、解析、分块、向量化、入库
 - RAG 问答：SSE 流式输出、查询改写、多问句拆分、术语归一化、意图路由、多通道融合检索、重排序、记忆压缩，并按 KB / MCP / 混合场景优先读取对应提示词槽位；检索会区分知识定向未命中与全局回退，只有真实召回归属的定向意图参与提示词选择；KB 场景会额外注入引用规则提示
 - 知识图谱：`rag.graph.type=lightrag` 时启用 LightRAG 图谱后端，并可通过 `rag.search.channels.graph.enabled` 参与检索召回；图谱按 KB 意图置信度共享全局/定向作用域，定向时剔除失效 Collection 并扩大召回预算；同时向量写入、文档删除和知识库清理会 best-effort 同步图谱数据，后台提供 `/admin/kg/graph` 与 `/admin/kg/labels` 用于图谱浏览
-- 模型路由：多 provider 候选、首包探测、故障切换、三态熔断；RAG 主回答优先走云端候选，rewrite、摘要、标题和 MCP 选择/抽参、普通非 RAG 回答优先走本地 Ollama `qwen3.6:latest`，本地不可用再降级云端路由
+- 模型路由：多 provider 候选、首包探测、故障切换、三态熔断和 chat 档位候选/超时预算；RAG 主回答优先走云端候选，rewrite、摘要、标题和 MCP 选择/抽参、普通非 RAG 回答优先走本地 Ollama `qwen3.6:latest`，本地不可用再降级云端路由
 - 管理后台：仪表盘、追踪、示例问题、用户管理、审计日志
 - 会话增强：标题生成、摘要压缩和推荐追问生成
 - 系统设置快照：`/rag/settings` 返回引擎、后端选型、检索管线、AI 档位（含 chat tiers）、SSE 超时与上传配置的只读展示
@@ -238,7 +238,7 @@ curl http://localhost:9091/metrics
 | `app.intent-tree.init-from-factory` | 默认 `false`；开启后主服务启动时会按 Java `IntentTreeFactory` 初始化默认意图树，已存在的 `intentCode` 会跳过；仅在 `rag.engine.type` 未显式配置时作为兼容兜底 |
 | `ai.stream.message-chunk-size` | SSE 消息分块粒度；主链路会按 rune 数批量发送 `message` 事件 |
 | `ai.providers.*` | Chat / Embedding / Rerank provider 配置 |
-| `ai.chat.default-tier` / `ai.chat.deep-thinking-tier` / `ai.chat.tiers` | Chat 档位展示与路由配置 |
+| `ai.chat.default-tier` / `ai.chat.deep-thinking-tier` / `ai.chat.tiers` | Chat 档位路由配置；按档位候选顺序和 `timeout-ms` 执行，深度思考请求使用 `deep-thinking-tier`，档位配置不完整时兼容旧的模型候选排序 |
 | `sa-token` | JWT 认证配置，包含 token 名称和过期时间 |
 | `rustfs` | 对象存储配置 |
 

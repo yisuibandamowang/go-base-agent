@@ -802,16 +802,22 @@ func decodeSettings(settings map[string]any, dst any) error {
 
 func (n *EnhancerNode) callChat(ctx context.Context, modelID string, req chat.Request) (string, error) {
 	if strings.TrimSpace(modelID) != "" {
+		if tiered, ok := n.llm.(chat.TieredLLMService); ok {
+			return tiered.ChatWithTierAndModel(ctx, req, "fast", modelID)
+		}
 		return n.llm.ChatWithModel(ctx, req, modelID)
 	}
-	return n.llm.Chat(ctx, req)
+	return chat.ChatWithTier(ctx, n.llm, req, "fast")
 }
 
 func (n *EnricherNode) callChat(ctx context.Context, modelID string, req chat.Request) (string, error) {
 	if strings.TrimSpace(modelID) != "" {
+		if tiered, ok := n.llm.(chat.TieredLLMService); ok {
+			return tiered.ChatWithTierAndModel(ctx, req, "fast", modelID)
+		}
 		return n.llm.ChatWithModel(ctx, req, modelID)
 	}
-	return n.llm.Chat(ctx, req)
+	return chat.ChatWithTier(ctx, n.llm, req, "fast")
 }
 
 func enhancerInputForType(ctx *rag.IngestionContext, taskType string) string {
