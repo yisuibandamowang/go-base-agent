@@ -96,7 +96,7 @@ func (c *LightRagClient) RetrieveByScope(ctx context.Context, question, mode str
 	}
 	body := map[string]any{
 		"query":                 question,
-		"mode":                  firstGraphNonEmpty(strings.TrimSpace(mode), "mix"),
+		"mode":                  firstGraphNonEmpty(strings.TrimSpace(mode), "hybrid"),
 		"only_need_context":     true,
 		"include_references":    true,
 		"include_chunk_content": true,
@@ -507,9 +507,6 @@ func (c *GraphSearchChannel) Search(ctx context.Context, sc SearchContext) (Sear
 		queryTopK = topK * 3
 	}
 	queryCollections := targetCollections
-	if !directed && sc.RetrievalScope != nil {
-		queryCollections = nil
-	}
 	evidence := c.client.RetrieveByScope(ctx, firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion), c.queryMode, queryTopK, queryCollections)
 
 	primaryQuota, supplementQuota := graphScopeQuotas(topK, directed, c.supplementRatio)

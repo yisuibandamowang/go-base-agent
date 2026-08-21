@@ -65,6 +65,24 @@ func TestLightRagClientRetrieveByScopeSplitsByCollection(t *testing.T) {
 	}
 }
 
+func TestLightRagClientDefaultsQueryModeToHybrid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode query body: %v", err)
+			return
+		}
+		if body["mode"] != "hybrid" {
+			t.Errorf("expected hybrid query mode, got %#v", body["mode"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"references": []any{}})
+	}))
+	defer server.Close()
+
+	client := NewLightRagClient(server.URL, "", nil, 0)
+	client.RetrieveByScope(context.Background(), "会员规则", "", 5, []string{"kb"})
+}
+
 func TestLightRagClientInsertTextAndDeleteByDoc(t *testing.T) {
 	var gotInsertBody map[string]any
 	var gotDeleteBody map[string]any
@@ -219,6 +237,28 @@ func TestGraphSearchChannelUsesGlobalScopeForLowConfidenceIntent(t *testing.T) {
 	}
 	if got, want := idsOf(result.Chunks), []string{"r1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("global scope should drop unmatched evidence: got %v want %v", got, want)
+	}
+}
+
+func TestGraphSearchChannelPassesAllActiveCollectionsForSharedGlobalScope(t *testing.T) {
+	backend := &recordingGraphBackend{kbs: []knowledgeModel.KnowledgeBase{
+		{Name: "会员知识库", CollectionName: "kb"},
+		{Name: "支付知识库", CollectionName: "kb_pay"},
+	}}
+	searcher := &recordingGraphSearcher{evidence: GraphEvidence{Matched: []RetrievedChunk{{ID: "r1"}}}}
+	channel := NewGraphSearchChannel(backend, searcher, "", 1)
+	_, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "报销流程",
+		TopK:             10,
+		RetrievalScope: &RetrievalScope{
+			TargetCollections: []string{"kb", "kb_pay"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := searcher.collections, [][]string{{"kb", "kb_pay"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("global shared scope must pass active collections for result filtering: got %v want %v", got, want)
 	}
 }
 
