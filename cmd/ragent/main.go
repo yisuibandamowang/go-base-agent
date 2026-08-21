@@ -398,6 +398,10 @@ func main() {
 		))
 	}
 	multiEngine := rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors)
+	multiEngine.SetRetrievalScopeOptions(
+		cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
+		cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
+	)
 	multiEngine.SetChannelTimeout(time.Duration(cfg.RAG.Search.Channels.TimeoutMs) * time.Millisecond)
 	multiRetriever := rag.NewMultiChannelRetriever(multiEngine)
 	retriever := maybeWrapRerankRetriever(multiRetriever, rerankService, cfg.RAG.Rerank.IsEnabledByDefault())

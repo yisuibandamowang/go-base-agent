@@ -18,8 +18,8 @@ type PromptContext struct {
 	CodeContext  string
 	// KbIntents KB 通道命中的意图候选（含分数）。
 	KbIntents []NodeScore
-	// EligibleIntentIds 允许参与模板选择的意图 ID：按库推导后真正有证据归属的意图。
-	// 区分"知识定向检索未命中意图"与"全局回退"：定向检索命中但证据为空时该意图不参与模板选择。
+	// EligibleIntentIds 允许参与模板选择和规则注入的意图 ID。
+	// 定向检索只保留真实归属的意图；全局回退保留全部候选意图。
 	EligibleIntentIds map[string]struct{}
 }
 
@@ -298,4 +298,33 @@ func DeriveIntentAttribution(chunks []RetrievedChunk, kbIntents []NodeScore) map
 		}
 	}
 	return intentIDs
+}
+
+// EligibleIntentIDs resolves the intent candidates allowed to contribute prompt rules.
+// Global fallback keeps all KB candidates; directed retrieval keeps non-directed candidates
+// and only admits directed candidates that own a retrieved chunk.
+func EligibleIntentIDs(chunks []RetrievedChunk, kbIntents []NodeScore, directedIntentIDs map[string]struct{}) map[string]struct{} {
+	retrievedIntentIDs := DeriveIntentAttribution(chunks, kbIntents)
+	eligible := make(map[string]struct{})
+	for _, nodeScore := range kbIntents {
+		if nodeScore.Node.Kind != IntentKindKB {
+			continue
+		}
+		intentID := strings.TrimSpace(nodeScore.Node.ID)
+		if intentID == "" {
+			continue
+		}
+		if len(directedIntentIDs) == 0 {
+			eligible[intentID] = struct{}{}
+			continue
+		}
+		if _, directed := directedIntentIDs[intentID]; !directed {
+			eligible[intentID] = struct{}{}
+			continue
+		}
+		if _, retrieved := retrievedIntentIDs[intentID]; retrieved {
+			eligible[intentID] = struct{}{}
+		}
+	}
+	return eligible
 }

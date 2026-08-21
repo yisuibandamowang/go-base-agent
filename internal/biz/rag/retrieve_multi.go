@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -62,9 +63,11 @@ type SearchResultPostProcessor interface {
 // MultiChannelRetrievalEngine coordinates parallel channel retrieval and post-processing.
 // Aligns with Java MultiChannelRetrievalEngine.
 type MultiChannelRetrievalEngine struct {
-	channels       []SearchChannel
-	postProcessors []SearchResultPostProcessor
-	channelTimeout time.Duration
+	channels                 []SearchChannel
+	postProcessors           []SearchResultPostProcessor
+	channelTimeout           time.Duration
+	scopeConfidenceThreshold float64
+	scopeMinIntentScore      float64
 }
 
 // MultiChannelRetriever adapts MultiChannelRetrievalEngine to the Retriever interface.
@@ -97,6 +100,14 @@ func (r *MultiChannelRetriever) RetrieveWithContext(ctx context.Context, sc Sear
 	return r.engine.Retrieve(ctx, sc)
 }
 
+// RetrieveWithContextResult preserves retrieval scope metadata for downstream prompt planning.
+func (r *MultiChannelRetriever) RetrieveWithContextResult(ctx context.Context, sc SearchContext) (RetrievalResult, error) {
+	if r == nil || r.engine == nil {
+		return RetrievalResult{}, nil
+	}
+	return r.engine.RetrieveWithResult(ctx, sc)
+}
+
 // NewMultiChannelRetrievalEngine creates a new retrieval engine.
 func NewMultiChannelRetrievalEngine(channels []SearchChannel, postProcessors []SearchResultPostProcessor) *MultiChannelRetrievalEngine {
 	sort.Slice(channels, func(i, j int) bool {
@@ -106,8 +117,23 @@ func NewMultiChannelRetrievalEngine(channels []SearchChannel, postProcessors []S
 		return postProcessors[i].Order() < postProcessors[j].Order()
 	})
 	return &MultiChannelRetrievalEngine{
-		channels:       channels,
-		postProcessors: postProcessors,
+		channels:                 channels,
+		postProcessors:           postProcessors,
+		scopeConfidenceThreshold: 0.6,
+		scopeMinIntentScore:      0.4,
+	}
+}
+
+// SetRetrievalScopeOptions configures the thresholds used to distinguish directed retrieval from global fallback.
+func (e *MultiChannelRetrievalEngine) SetRetrievalScopeOptions(confidenceThreshold, minIntentScore float64) {
+	if e == nil {
+		return
+	}
+	if confidenceThreshold > 0 {
+		e.scopeConfidenceThreshold = confidenceThreshold
+	}
+	if minIntentScore >= 0 {
+		e.scopeMinIntentScore = minIntentScore
 	}
 }
 
@@ -211,6 +237,73 @@ func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchCon
 	slog.Debug("rag search fusion completed", "chunks", len(allChunks), "channels", len(allResults))
 
 	return allChunks, nil
+}
+
+// RetrieveWithResult returns chunks together with the resolved directed intent IDs.
+func (e *MultiChannelRetrievalEngine) RetrieveWithResult(ctx context.Context, sc SearchContext) (RetrievalResult, error) {
+	if e == nil {
+		return RetrievalResult{}, nil
+	}
+	chunks, err := e.Retrieve(ctx, sc)
+	if err != nil {
+		return RetrievalResult{Chunks: chunks}, err
+	}
+	if !e.hasDirectedChannel(sc) {
+		return RetrievalResult{Chunks: chunks}, nil
+	}
+	return RetrievalResult{
+		Chunks:            chunks,
+		DirectedIntentIDs: e.resolveDirectedIntentIDs(sc),
+	}, nil
+}
+
+func (e *MultiChannelRetrievalEngine) hasDirectedChannel(sc SearchContext) bool {
+	for _, channel := range e.channels {
+		if channel != nil && channel.Type() == ChannelIntentDirected && channel.IsEnabled(sc) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *MultiChannelRetrievalEngine) resolveDirectedIntentIDs(sc SearchContext) map[string]struct{} {
+	ids := make(map[string]struct{})
+	if e == nil || len(sc.Intents) == 0 {
+		return ids
+	}
+
+	maxScore := 0.0
+	for _, subIntent := range sc.Intents {
+		for _, nodeScore := range subIntent.NodeScores {
+			if nodeScore.Node.Kind != IntentKindKB || nodeScore.Score < e.scopeMinIntentScore {
+				continue
+			}
+			if len(nodeScore.Node.EffectiveCollectionNames()) == 0 {
+				continue
+			}
+			if nodeScore.Score > maxScore {
+				maxScore = nodeScore.Score
+			}
+		}
+	}
+	if maxScore < e.scopeConfidenceThreshold {
+		return ids
+	}
+
+	for _, subIntent := range sc.Intents {
+		for _, nodeScore := range subIntent.NodeScores {
+			if nodeScore.Node.Kind != IntentKindKB || nodeScore.Score < e.scopeMinIntentScore {
+				continue
+			}
+			if len(nodeScore.Node.EffectiveCollectionNames()) == 0 {
+				continue
+			}
+			if id := strings.TrimSpace(nodeScore.Node.ID); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	return ids
 }
 
 // DedupPostProcessor removes duplicate chunks by ID.

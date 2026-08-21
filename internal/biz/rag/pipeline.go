@@ -211,7 +211,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 
 	mcpCtx := p.buildMcpContext(ctx, q, resolvedSubIntents)
 	retrieveSpan := p.startTraceNode(ctx, traceRun, "", "retrieve", "RETRIEVE", 0)
-	chunks, err := p.retrieveChunks(ctx, q, subQuestions, resolvedSubIntents, p.resolveDefaultTopK())
+	chunks, directedIntentIDs, err := p.retrieveChunks(ctx, q, subQuestions, resolvedSubIntents, p.resolveDefaultTopK())
 	var kbCtx string
 	var answerCacheKey string
 	if err != nil {
@@ -251,7 +251,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	// 按库推导意图归属：只有真正贡献了证据的意图才允许参与提示词模板选择，
 	// 区分知识定向检索未命中意图与全局回退场景。对齐 Java 9d80d7a/cf2697c。
 	mergedGroup := MergeIntentGroup(resolvedSubIntents)
-	eligibleIntentIDs := DeriveIntentAttribution(chunks, mergedGroup.KBIntents)
+	eligibleIntentIDs := EligibleIntentIDs(chunks, mergedGroup.KBIntents, directedIntentIDs)
 	sources := AssembleSources(chunks)
 	grounding := AssembleGroundingChunks(chunks)
 	kbContext := EnrichCitationContext(withChunkSources(chunks, kbCtx), sources, p.citationEnabled)
@@ -469,7 +469,7 @@ func (p *Pipeline) buildMcpContext(ctx context.Context, question string, subInte
 	return mcpCtx
 }
 
-func (p *Pipeline) retrieveChunks(ctx context.Context, question string, subQuestions []string, subIntents []SubQuestionIntent, topK int) ([]RetrievedChunk, error) {
+func (p *Pipeline) retrieveChunks(ctx context.Context, question string, subQuestions []string, subIntents []SubQuestionIntent, topK int) ([]RetrievedChunk, map[string]struct{}, error) {
 	if aware, ok := p.retrieve.(IntentAwareRetriever); ok {
 		return p.retrieveChunksWithContext(ctx, question, subQuestions, subIntents, topK, aware)
 	}
@@ -478,29 +478,30 @@ func (p *Pipeline) retrieveChunks(ctx context.Context, question string, subQuest
 	for _, query := range queries {
 		chunks, err := p.retrieve.Retrieve(ctx, query, topK)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		allChunks = append(allChunks, chunks...)
 	}
-	return deduplicateChunks(allChunks), nil
+	return deduplicateChunks(allChunks), nil, nil
 }
 
-func (p *Pipeline) retrieveChunksWithContext(ctx context.Context, question string, subQuestions []string, subIntents []SubQuestionIntent, topK int, aware IntentAwareRetriever) ([]RetrievedChunk, error) {
+func (p *Pipeline) retrieveChunksWithContext(ctx context.Context, question string, subQuestions []string, subIntents []SubQuestionIntent, topK int, aware IntentAwareRetriever) ([]RetrievedChunk, map[string]struct{}, error) {
 	queries := retrievalQueries(question, subQuestions)
 	if len(subIntents) == 0 {
-		chunks, err := aware.RetrieveWithContext(ctx, SearchContext{
+		result, err := retrieveWithScope(ctx, aware, SearchContext{
 			OriginalQuestion:  question,
 			RewrittenQuestion: question,
 			SubQuestions:      queries,
 			TopK:              topK,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return deduplicateChunks(chunks), nil
+		return deduplicateChunks(result.Chunks), result.DirectedIntentIDs, nil
 	}
 
 	allChunks := make([]RetrievedChunk, 0)
+	directedIntentIDs := make(map[string]struct{})
 	for _, subIntent := range subIntents {
 		query := strings.TrimSpace(subIntent.SubQuestion)
 		if query == "" {
@@ -513,13 +514,24 @@ func (p *Pipeline) retrieveChunksWithContext(ctx context.Context, question strin
 			Intents:           []SubQuestionIntent{subIntent},
 			TopK:              topK,
 		}
-		chunks, err := aware.RetrieveWithContext(ctx, sc)
+		result, err := retrieveWithScope(ctx, aware, sc)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		allChunks = append(allChunks, chunks...)
+		allChunks = append(allChunks, result.Chunks...)
+		for id := range result.DirectedIntentIDs {
+			directedIntentIDs[id] = struct{}{}
+		}
 	}
-	return deduplicateChunks(allChunks), nil
+	return deduplicateChunks(allChunks), directedIntentIDs, nil
+}
+
+func retrieveWithScope(ctx context.Context, aware IntentAwareRetriever, sc SearchContext) (RetrievalResult, error) {
+	if scoped, ok := aware.(ScopedIntentAwareRetriever); ok {
+		return scoped.RetrieveWithContextResult(ctx, sc)
+	}
+	chunks, err := aware.RetrieveWithContext(ctx, sc)
+	return RetrievalResult{Chunks: chunks}, err
 }
 
 func retrievalQueries(question string, subQuestions []string) []string {

@@ -54,26 +54,34 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, question string, topK in
 
 // RetrieveWithContext runs retrieval with the richer search context when supported.
 func (r *RerankRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	result, err := r.RetrieveWithContextResult(ctx, sc)
+	return result.Chunks, err
+}
+
+// RetrieveWithContextResult preserves retrieval scope metadata through reranking.
+func (r *RerankRetriever) RetrieveWithContextResult(ctx context.Context, sc SearchContext) (RetrievalResult, error) {
 	if r == nil || r.base == nil {
-		return nil, nil
+		return RetrievalResult{}, nil
 	}
 	var (
-		chunks []RetrievedChunk
+		result RetrievalResult
 		err    error
 	)
-	if intentAware, ok := r.base.(IntentAwareRetriever); ok {
-		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
+	if scoped, ok := r.base.(ScopedIntentAwareRetriever); ok {
+		result, err = scoped.RetrieveWithContextResult(ctx, sc)
+	} else if intentAware, ok := r.base.(IntentAwareRetriever); ok {
+		result.Chunks, err = intentAware.RetrieveWithContext(ctx, sc)
 	} else {
 		question := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
-		chunks, err = r.base.Retrieve(ctx, question, sc.TopK)
+		result.Chunks, err = r.base.Retrieve(ctx, question, sc.TopK)
 	}
-	if err != nil || !r.enabled || len(chunks) == 0 {
-		return chunks, err
+	if err != nil || !r.enabled || len(result.Chunks) == 0 {
+		return result, err
 	}
 
-	byID := make(map[string]RetrievedChunk, len(chunks))
-	candidates := make([]rerank.Chunk, 0, len(chunks))
-	for _, chunk := range chunks {
+	byID := make(map[string]RetrievedChunk, len(result.Chunks))
+	candidates := make([]rerank.Chunk, 0, len(result.Chunks))
+	for _, chunk := range result.Chunks {
 		byID[chunk.ID] = chunk
 		candidates = append(candidates, rerank.Chunk{
 			ID:    chunk.ID,
@@ -85,18 +93,19 @@ func (r *RerankRetriever) RetrieveWithContext(ctx context.Context, sc SearchCont
 	question := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
 	reranked, err := r.rerank.Rerank(ctx, question, candidates, sc.TopK)
 	if err != nil {
-		return nil, err
+		return RetrievalResult{}, err
 	}
-	result := make([]RetrievedChunk, 0, len(reranked))
+	rerankedChunks := make([]RetrievedChunk, 0, len(reranked))
 	for _, item := range reranked {
 		chunk, ok := byID[item.ID]
 		if !ok {
 			continue
 		}
 		chunk.Score = item.Score
-		result = append(result, chunk)
+		rerankedChunks = append(rerankedChunks, chunk)
 	}
-	return restoreStrongKeywordAnchors(result, chunks, sc.TopK), nil
+	result.Chunks = restoreStrongKeywordAnchors(rerankedChunks, result.Chunks, sc.TopK)
+	return result, nil
 }
 
 func restoreStrongKeywordAnchors(reranked, candidates []RetrievedChunk, topK int) []RetrievedChunk {

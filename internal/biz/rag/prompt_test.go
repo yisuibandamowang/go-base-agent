@@ -304,6 +304,38 @@ func TestDeriveIntentAttributionByCollection(t *testing.T) {
 	}
 }
 
+func TestEligibleIntentIDsKeepsAllCandidatesInGlobalFallback(t *testing.T) {
+	intents := []NodeScore{
+		{Node: IntentNode{ID: "intent-member", Kind: IntentKindKB, CollectionName: "member"}},
+		{Node: IntentNode{ID: "intent-pay", Kind: IntentKindKB, CollectionName: "pay"}},
+	}
+	chunks := []RetrievedChunk{{ID: "global-1", Metadata: map[string]string{"collection_name": "other"}}}
+
+	got := EligibleIntentIDs(chunks, intents, nil)
+	for _, id := range []string{"intent-member", "intent-pay"} {
+		if _, ok := got[id]; !ok {
+			t.Fatalf("global fallback should keep candidate %q eligible, got %v", id, got)
+		}
+	}
+}
+
+func TestEligibleIntentIDsFiltersDirectedMisses(t *testing.T) {
+	intents := []NodeScore{
+		{Node: IntentNode{ID: "intent-member", Kind: IntentKindKB, CollectionName: "member"}},
+		{Node: IntentNode{ID: "intent-pay", Kind: IntentKindKB, CollectionName: "pay"}},
+	}
+	chunks := []RetrievedChunk{{ID: "member-1", Metadata: map[string]string{"collection_name": "member"}}}
+	directed := map[string]struct{}{"intent-member": {}, "intent-pay": {}}
+
+	got := EligibleIntentIDs(chunks, intents, directed)
+	if _, ok := got["intent-member"]; !ok {
+		t.Fatalf("directed hit should remain eligible, got %v", got)
+	}
+	if _, ok := got["intent-pay"]; ok {
+		t.Fatalf("directed miss should be filtered, got %v", got)
+	}
+}
+
 // TestSingleKbIntentPromptTemplateUsesAttribution 验证只有一个有证据归属的 KB 意图时
 // 使用该意图的 PromptTemplate 作为系统提示词。对齐 Java planPrompt 的 eligible 过滤。
 func TestSingleKbIntentPromptTemplateUsesAttribution(t *testing.T) {

@@ -54,22 +54,31 @@ func (r *MetadataEnrichingRetriever) Retrieve(ctx context.Context, question stri
 
 // RetrieveWithContext preserves richer search context when the base retriever supports it.
 func (r *MetadataEnrichingRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	result, err := r.RetrieveWithContextResult(ctx, sc)
+	return result.Chunks, err
+}
+
+// RetrieveWithContextResult preserves retrieval scope metadata through metadata enrichment.
+func (r *MetadataEnrichingRetriever) RetrieveWithContextResult(ctx context.Context, sc SearchContext) (RetrievalResult, error) {
 	if r == nil || r.base == nil {
-		return nil, nil
+		return RetrievalResult{}, nil
 	}
 	var (
-		chunks []RetrievedChunk
+		result RetrievalResult
 		err    error
 	)
-	if intentAware, ok := r.base.(IntentAwareRetriever); ok {
-		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
+	if scoped, ok := r.base.(ScopedIntentAwareRetriever); ok {
+		result, err = scoped.RetrieveWithContextResult(ctx, sc)
+	} else if intentAware, ok := r.base.(IntentAwareRetriever); ok {
+		result.Chunks, err = intentAware.RetrieveWithContext(ctx, sc)
 	} else {
-		chunks, err = r.base.Retrieve(ctx, firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion), sc.TopK)
+		result.Chunks, err = r.base.Retrieve(ctx, firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion), sc.TopK)
 	}
-	if err != nil || r.resolver == nil || len(chunks) == 0 {
-		return chunks, err
+	if err != nil || r.resolver == nil || len(result.Chunks) == 0 {
+		return result, err
 	}
-	return r.enrich(ctx, chunks)
+	result.Chunks, err = r.enrich(ctx, result.Chunks)
+	return result, err
 }
 
 func (r *MetadataEnrichingRetriever) enrich(ctx context.Context, chunks []RetrievedChunk) ([]RetrievedChunk, error) {

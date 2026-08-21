@@ -250,6 +250,47 @@ func (r *recordingIntentAwareRetriever) RetrieveWithContext(ctx context.Context,
 	return r.chunks, nil
 }
 
+type scopedIntentAwareRetriever struct {
+	result RetrievalResult
+}
+
+func (r *scopedIntentAwareRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	return r.result.Chunks, nil
+}
+
+func (r *scopedIntentAwareRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	return r.result.Chunks, nil
+}
+
+func (r *scopedIntentAwareRetriever) RetrieveWithContextResult(ctx context.Context, sc SearchContext) (RetrievalResult, error) {
+	return r.result, nil
+}
+
+func TestPipelineRetrieveChunksCarriesDirectedIntentIDs(t *testing.T) {
+	retriever := &scopedIntentAwareRetriever{result: RetrievalResult{
+		Chunks:            []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段"}},
+		DirectedIntentIDs: map[string]struct{}{"intent-member": {}},
+	}}
+	p := NewPipeline(nil, nil, nil, retriever, nil)
+
+	chunks, directedIntentIDs, err := p.retrieveChunks(context.Background(), "会员等级规则", nil, []SubQuestionIntent{{
+		SubQuestion: "会员等级规则",
+		NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "intent-member", Kind: IntentKindKB, CollectionName: "member"},
+			Score: 0.9,
+		}},
+	}}, 5)
+	if err != nil {
+		t.Fatalf("retrieve chunks: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].ID != "chunk-1" {
+		t.Fatalf("unexpected chunks: %+v", chunks)
+	}
+	if _, ok := directedIntentIDs["intent-member"]; !ok {
+		t.Fatalf("expected directed intent metadata to reach pipeline, got %v", directedIntentIDs)
+	}
+}
+
 func testRetriever() Retriever {
 	return staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
 }

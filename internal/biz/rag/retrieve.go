@@ -21,6 +21,17 @@ type IntentAwareRetriever interface {
 	RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error)
 }
 
+// RetrievalResult carries retrieved chunks and the scope information needed by prompt selection.
+type RetrievalResult struct {
+	Chunks            []RetrievedChunk
+	DirectedIntentIDs map[string]struct{}
+}
+
+// ScopedIntentAwareRetriever returns retrieval results together with the resolved intent scope.
+type ScopedIntentAwareRetriever interface {
+	RetrieveWithContextResult(ctx context.Context, sc SearchContext) (RetrievalResult, error)
+}
+
 // GlobalRetriever can perform a single global retrieval with a total candidate budget.
 type GlobalRetriever interface {
 	SupportsGlobalRetrieval() bool

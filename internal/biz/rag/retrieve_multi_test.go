@@ -205,6 +205,41 @@ func TestMultiChannelRetrieverImplementsRetriever(t *testing.T) {
 	}
 }
 
+func TestMultiChannelRetrievalEngineRetrieveWithResultTracksDirectedScope(t *testing.T) {
+	engine := NewMultiChannelRetrievalEngine([]SearchChannel{
+		&testChannel{name: "scope", enabled: true, typ: ChannelIntentDirected},
+	}, nil)
+	engine.SetRetrievalScopeOptions(0.6, 0.4)
+
+	result, err := engine.RetrieveWithResult(context.Background(), SearchContext{
+		OriginalQuestion: "会员等级规则",
+		Intents: []SubQuestionIntent{{NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "intent-member", Kind: IntentKindKB, CollectionName: "member"},
+			Score: 0.92,
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("retrieve with result: %v", err)
+	}
+	if _, ok := result.DirectedIntentIDs["intent-member"]; !ok {
+		t.Fatalf("expected high-confidence KB intent to be marked directed, got %v", result.DirectedIntentIDs)
+	}
+
+	globalResult, err := engine.RetrieveWithResult(context.Background(), SearchContext{
+		OriginalQuestion: "会员等级规则",
+		Intents: []SubQuestionIntent{{NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "intent-member", Kind: IntentKindKB, CollectionName: "member"},
+			Score: 0.45,
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("global fallback retrieve with result: %v", err)
+	}
+	if len(globalResult.DirectedIntentIDs) != 0 {
+		t.Fatalf("low-confidence retrieval should be global fallback, got %v", globalResult.DirectedIntentIDs)
+	}
+}
+
 func TestMultiChannelRetrievalEngine_UsesFusionPostProcessor(t *testing.T) {
 	channels := []SearchChannel{
 		&testChannel{name: "keyword", priority: 1, enabled: true, typ: ChannelKeyword, chunks: []RetrievedChunk{
