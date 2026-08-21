@@ -535,7 +535,8 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 				TitleMaxLength:    30,
 			},
 			Search: config.RAGSearchConfig{
-				DefaultTopK: 8,
+				DefaultTopK:     8,
+				SupplementRatio: 0.3,
 				Channels: config.RAGSearchChannelsConfig{
 					VectorGlobal: config.RAGSearchChannelConfig{
 						Enabled:                         &queryRewriteEnabled,
@@ -706,6 +707,9 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	search := ragCfg["search"].(map[string]any)
 	if search["recallBudget"].(float64) != 88 {
 		t.Fatalf("unexpected search recall budget: %#v", search)
+	}
+	if search["scope"].(map[string]any)["supplementRatio"].(float64) != 0.3 {
+		t.Fatalf("unexpected search scope supplement ratio: %#v", search["scope"])
 	}
 	channels := search["channels"].(map[string]any)
 	if _, ok := channels["timeoutMs"]; !ok {

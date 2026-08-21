@@ -373,7 +373,7 @@ func buildRAGSearchSettings(cfg *config.Config) map[string]any {
 		"scope": map[string]any{
 			"minIntentScore":      intentDirected.MinIntentScore,
 			"confidenceThreshold": vectorGlobal.ConfidenceThreshold,
-			"supplementRatio":     vectorGlobal.SingleIntentSupplementThreshold,
+			"supplementRatio":     cfg.RAG.Search.SupplementRatio,
 		},
 		"channels": map[string]any{
 			"timeoutMs": cfg.RAG.Search.Channels.TimeoutMs,
