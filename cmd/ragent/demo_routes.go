@@ -241,7 +241,7 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 			"features": map[string]any{
 				"queryRewrite":  cfg.RAG.QueryRewrite.IsEnabledByDefault(),
 				"rerank":        cfg.RAG.Rerank.IsEnabledByDefault(),
-				"citation":      true,
+				"citation":      cfg.RAG.Citation.IsEnabledByDefault(),
 				"contextEnrich": cfg.RAG.Context.Enrich.IsEnabledByDefault(),
 				"trace":         cfg.RAG.Trace.IsEnabledByDefault(),
 			},

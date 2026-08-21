@@ -704,6 +704,9 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	if ragCfg["features"].(map[string]any)["trace"].(bool) != true {
 		t.Fatalf("unexpected feature settings: %#v", ragCfg["features"])
 	}
+	if ragCfg["features"].(map[string]any)["citation"].(bool) != false {
+		t.Fatalf("expected citation setting to reflect disabled config: %#v", ragCfg["features"])
+	}
 	search := ragCfg["search"].(map[string]any)
 	if search["recallBudget"].(float64) != 88 {
 		t.Fatalf("unexpected search recall budget: %#v", search)

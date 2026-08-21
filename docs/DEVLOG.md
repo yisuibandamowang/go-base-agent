@@ -791,3 +791,4 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 # 2026-08-21
 
 - 对齐 Java `60436e3` 的意图分类和查询改写提示策略：将问候、身份询问、致谢和回答评价识别为交互导向，只允许选择 `SYSTEM` 意图；实体导向与主题导向继续分别按关键实体和分类路径/描述匹配，并保留低分返回空数组的规则；查询改写明确保持查询意图、原语言和历史用户上下文边界，不把 Assistant 答案写入改写结果。
+- 对齐 Java `5a1af64` 的系统设置展示：`/rag/settings` 的 `rag.features.citation` 改为返回当前 `rag.citation.enabled` 的实际生效值，不再固定展示为开启。
