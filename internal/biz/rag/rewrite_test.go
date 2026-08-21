@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,36 @@ func TestLLMRewriter_DisablesThinkingInRequest(t *testing.T) {
 	}
 	if capturedReq.Thinking == nil || *capturedReq.Thinking {
 		t.Fatal("expected rewrite request to disable thinking")
+	}
+}
+
+func TestLLMRewriter_PromptProtectsEllipticalFollowUps(t *testing.T) {
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnContent(`{"rewrite":"保险系统数据安全怎么做","sub_questions":["保险系统数据安全怎么做"]}`)
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	rewriter := NewLLMRewriter(llm, 4, 500, true)
+	_, err := rewriter.Rewrite(context.Background(), "保险系统呢", []chat.Message{
+		chat.NewUserMessage("OA系统数据安全怎么做的？"),
+		chat.NewAssistantMessage("OA系统的数据安全规范围绕数据全生命周期。"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(capturedReq.Messages) == 0 {
+		t.Fatal("expected rewrite prompt")
+	}
+	prompt := capturedReq.Messages[0].Content
+	for _, want := range []string{"省略续问", "不得将历史 Assistant 回答中的答案", "非查询轮次"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected rewrite prompt to contain %q, got %q", want, prompt)
+		}
 	}
 }
 

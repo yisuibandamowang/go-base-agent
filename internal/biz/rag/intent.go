@@ -377,14 +377,32 @@ func buildIntentClassifierPrompt(leafNodes []IntentNode, rawNodes []intentModel.
 		default:
 			b.WriteString("  type=KB\n")
 		}
-		if strings.TrimSpace(node.Examples) != "" {
+		if examples := formatIntentExamples(node.Examples); examples != "" {
 			b.WriteString("  examples=")
-			b.WriteString(strings.TrimSpace(node.Examples))
+			b.WriteString(examples)
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func formatIntentExamples(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return trimmed
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			normalized = append(normalized, value)
+		}
+	}
+	return strings.Join(normalized, " / ")
 }
 
 func intentFullPath(node IntentNode, nodeIndex map[string]IntentNode) string {

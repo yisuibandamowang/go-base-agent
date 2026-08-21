@@ -84,6 +84,24 @@ func TestIntentResolverUsesLLMClassifierWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestBuildIntentClassifierPromptUnwrapsJSONExamples(t *testing.T) {
+	prompt := buildIntentClassifierPrompt([]IntentNode{{
+		ID:          "sys-feedback",
+		IntentCode:  "sys-feedback",
+		Name:        "评价反馈",
+		Description: "用户对上一轮回答做出评价",
+		Examples:    `["回答得不错","你答错了"]`,
+		Kind:        IntentKindSystem,
+	}}, nil)
+
+	if !strings.Contains(prompt, "examples=回答得不错 / 你答错了") {
+		t.Fatalf("expected JSON examples to be unwrapped, got %q", prompt)
+	}
+	if strings.Contains(prompt, `examples=["`) {
+		t.Fatalf("JSON syntax should not leak into classifier examples, got %q", prompt)
+	}
+}
+
 func TestIntentResolverFallsBackToHeuristicWhenLLMFails(t *testing.T) {
 	resolver := NewIntentResolver(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
 		{BaseModel: db.BaseModel{ID: "root"}, IntentCode: "member", Name: "会员系统", Enabled: 1},
