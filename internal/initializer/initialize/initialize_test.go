@@ -9,10 +9,32 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLoadDefaultEnterpriseKnowledgeBaseDataset(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	datasetDir := filepath.Join(filepath.Dir(sourceFile), "../../../resources/initializer/enterprise-knowledge-base")
+	dataset, err := LoadDataset(datasetDir)
+	if err != nil {
+		t.Fatalf("load default enterprise dataset: %v", err)
+	}
+	if len(dataset.KnowledgeBases) != 2 {
+		t.Fatalf("expected 2 knowledge bases, got %d", len(dataset.KnowledgeBases))
+	}
+	if len(dataset.Intents) != 23 {
+		t.Fatalf("expected 23 intents, got %d", len(dataset.Intents))
+	}
+	if len(dataset.Questions) != 15 {
+		t.Fatalf("expected 15 questions, got %d", len(dataset.Questions))
+	}
+}
 
 func TestVerifyChecksumsAcceptsMatchingFiles(t *testing.T) {
 	dir := t.TempDir()

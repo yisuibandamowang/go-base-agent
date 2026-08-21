@@ -153,6 +153,8 @@ make initialize
 make initialize AGENT_TYPE_DIR=/path/to/agent-type-dir
 ```
 
+仓库已内置 Java 初始化器同源的 `resources/initializer/enterprise-knowledge-base` 默认模板，包含 2 个知识库、10 份文档、23 个意图节点和 15 个演示问题；直接执行 `make initialize` 即可使用该模板。
+
 初始化流程会依次执行预检、清理、知识库创建、文档上传与分块、意图树、示例问题、结果校验和预热。
 正式初始化要求数据集目录提供 `checksums.sha256`，启动前会校验目录内声明文件的 SHA-256；开发测试场景直接调用初始化包时仍保持兼容。
 意图 properties 支持 Java 数据集的 `mcp-tool-id`、`prompt-snippet-file`、`prompt-template-file` 和 `param-prompt-template-file` 字段。
