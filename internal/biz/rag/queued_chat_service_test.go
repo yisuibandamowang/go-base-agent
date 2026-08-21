@@ -84,6 +84,9 @@ func TestQueuedChatService_TimeoutSendsRejectFinishAndDone(t *testing.T) {
 	if mem.saved[1].Content != "系统繁忙，请稍后再试" {
 		t.Fatalf("unexpected reject message content: %+v", mem.saved[1])
 	}
+	if mem.saved[1].ReplyToMessageID != "msg-1" || mem.saved[1].MessageStatus != MessageStatusRejected {
+		t.Fatalf("expected rejected assistant linkage and status, got %+v", mem.saved[1])
+	}
 }
 
 type queueInnerRecorder struct {

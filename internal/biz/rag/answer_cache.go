@@ -24,6 +24,8 @@ type CachedAnswer struct {
 	Citations        string `json:"citations,omitempty"`
 	// SourcesJSON 文档级来源列表的 JSON 序列化，缓存命中时随 finish 事件回放。
 	SourcesJSON string `json:"sources,omitempty"`
+	// GroundingJSON 推荐追问使用的 grounding 片段 JSON。
+	GroundingJSON string `json:"retrievedChunks,omitempty"`
 }
 
 func (a CachedAnswer) fullContent() string {

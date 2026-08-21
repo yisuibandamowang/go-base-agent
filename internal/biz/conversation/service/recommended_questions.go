@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	conversationModel "go-base-agent/internal/biz/conversation/model"
 	"go-base-agent/internal/biz/rag"
 	"go-base-agent/internal/infra/chat"
 )
@@ -47,7 +48,7 @@ func RecommendedQuestionsFailed() RecommendedQuestionsPayload {
 }
 
 type recommendedQuestionGenerator interface {
-	Generate(ctx context.Context, question, answer string) RecommendedQuestionsPayload
+	Generate(ctx context.Context, question, answer string, chunks []rag.GroundingChunk) RecommendedQuestionsPayload
 }
 
 // LLMRecommendedQuestionGenerator generates follow-up questions with an LLM.
@@ -73,7 +74,7 @@ func NewLLMRecommendedQuestionGenerator(llm chat.LLMService, externalPromptDir s
 }
 
 // Generate returns up to three recommended questions for the given answer.
-func (g *LLMRecommendedQuestionGenerator) Generate(ctx context.Context, question, answer string) RecommendedQuestionsPayload {
+func (g *LLMRecommendedQuestionGenerator) Generate(ctx context.Context, question, answer string, chunks []rag.GroundingChunk) RecommendedQuestionsPayload {
 	question = strings.TrimSpace(question)
 	answer = strings.TrimSpace(stripRecommendationCitations(answer))
 	answer = strings.TrimSpace(rag.StripInlineCitations(answer))
@@ -84,7 +85,7 @@ func (g *LLMRecommendedQuestionGenerator) Generate(ctx context.Context, question
 		return RecommendedQuestionsFailed()
 	}
 
-	prompt, err := g.renderPrompt(question, answer)
+	prompt, err := g.renderPrompt(question, answer, chunks)
 	if err != nil {
 		slog.Warn("render recommended questions prompt failed", "err", err)
 		return RecommendedQuestionsFailed()
@@ -107,33 +108,68 @@ func (g *LLMRecommendedQuestionGenerator) Generate(ctx context.Context, question
 	return parseRecommendedQuestions(raw, g.maxCount)
 }
 
-func (g *LLMRecommendedQuestionGenerator) renderPrompt(question, answer string) (string, error) {
+func (g *LLMRecommendedQuestionGenerator) renderPrompt(question, answer string, chunks []rag.GroundingChunk) (string, error) {
 	data := map[string]any{
-		"Question": question,
-		"Answer":   answer,
+		"Question": truncateRecommendedInput(question, 1000),
+		"Answer":   truncateRecommendedInput(answer, 6000),
 		"Count":    g.maxCount,
-		"Chunks":   "（无检索片段，仅依据问答生成）",
+		"Chunks":   buildRecommendedGroundingText(chunks),
 	}
 	if g.prompt != nil {
 		if rendered, err := g.prompt.Render("RECOMMENDED_QUESTIONS", data); err == nil && strings.TrimSpace(rendered) != "" {
-			return normalizeRecommendedQuestionPrompt(rendered, question, answer, g.maxCount), nil
+			return normalizeRecommendedQuestionPrompt(rendered, question, answer, g.maxCount, chunks), nil
 		}
 	}
 	rendered, err := g.loader.Render(recommendedQuestionPromptFile, data)
 	if err != nil {
 		return "", fmt.Errorf("render recommended questions prompt: %w", err)
 	}
-	return normalizeRecommendedQuestionPrompt(rendered, question, answer, g.maxCount), nil
+	return normalizeRecommendedQuestionPrompt(rendered, question, answer, g.maxCount, chunks), nil
 }
 
-func normalizeRecommendedQuestionPrompt(prompt, question, answer string, count int) string {
+func normalizeRecommendedQuestionPrompt(prompt, question, answer string, count int, chunks []rag.GroundingChunk) string {
 	replacer := strings.NewReplacer(
 		"{question}", question,
 		"{answer}", answer,
 		"{count}", fmt.Sprintf("%d", count),
-		"{chunks}", "（无检索片段，仅依据问答生成）",
+		"{chunks}", buildRecommendedGroundingText(chunks),
 	)
 	return replacer.Replace(prompt)
+}
+
+func truncateRecommendedInput(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) > max {
+		return string(runes[:max])
+	}
+	return value
+}
+
+func buildRecommendedGroundingText(chunks []rag.GroundingChunk) string {
+	if len(chunks) == 0 {
+		return "（无检索片段，仅依据问答生成）"
+	}
+	const maxChars = 6000
+	var builder strings.Builder
+	for index, chunk := range chunks {
+		text := strings.TrimSpace(chunk.Text)
+		if text == "" || builder.Len() >= maxChars {
+			continue
+		}
+		prefix := fmt.Sprintf("%d. 【%s】", index+1, strings.TrimSpace(chunk.DocName))
+		remaining := maxChars - builder.Len() - len([]rune(prefix)) - 1
+		if remaining <= 0 {
+			break
+		}
+		text = truncateRecommendedInput(text, remaining)
+		builder.WriteString(prefix)
+		builder.WriteString(text)
+		builder.WriteByte('\n')
+	}
+	if builder.Len() == 0 {
+		return "（无检索片段，仅依据问答生成）"
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func parseRecommendedQuestions(raw string, maxCount int) RecommendedQuestionsPayload {
@@ -219,17 +255,52 @@ func (s *ConversationService) GenerateRecommendedQuestions(ctx context.Context, 
 	if !strings.EqualFold(msg.Role, string(chat.RoleAssistant)) {
 		return RecommendedQuestionsFailed(), fmt.Errorf("仅支持对助手消息生成推荐追问")
 	}
+	if cached, ok := parseCachedRecommendedQuestions(msg.RecommendedQuestions); ok {
+		return RecommendedQuestionsSuccess(cached), nil
+	}
+	if status := strings.TrimSpace(msg.MessageStatus); status != "" && !strings.EqualFold(status, string(chat.MessageStatusNormal)) {
+		return RecommendedQuestionsEmpty(), nil
+	}
 	if s.recommendedQuestions == nil {
 		return RecommendedQuestionsEmpty(), nil
 	}
-	question, err := s.loadQuestionBeforeAssistantMessage(ctx, msg.ConversationID, userID, msg.ID)
+	question, err := s.loadQuestionForAssistant(ctx, msg, userID)
 	if err != nil {
 		return RecommendedQuestionsFailed(), err
 	}
 	if strings.TrimSpace(question) == "" {
 		return RecommendedQuestionsEmpty(), nil
 	}
-	return s.recommendedQuestions.Generate(ctx, question, msg.Content), nil
+	generated := s.recommendedQuestions.Generate(ctx, question, msg.Content, rag.ParseGroundingChunks(msg.RetrievedChunks))
+	if generated.Status == RecommendedQuestionsStatusFailed {
+		return generated, nil
+	}
+	if err := s.msgRepo.UpdateRecommendedQuestions(ctx, msg.ID, generated.Questions); err != nil {
+		return RecommendedQuestionsFailed(), err
+	}
+	return generated, nil
+}
+
+func (s *ConversationService) loadQuestionForAssistant(ctx context.Context, assistant *conversationModel.Message, userID string) (string, error) {
+	if strings.TrimSpace(assistant.ReplyToMessageID) != "" {
+		question, err := s.msgRepo.FindByIDAndUserID(ctx, assistant.ReplyToMessageID, userID)
+		if err != nil || question == nil || !strings.EqualFold(question.Role, string(chat.RoleUser)) || question.ConversationID != assistant.ConversationID {
+			return "", nil
+		}
+		return question.Content, nil
+	}
+	return s.loadQuestionBeforeAssistantMessage(ctx, assistant.ConversationID, userID, assistant.ID)
+}
+
+func parseCachedRecommendedQuestions(raw string) ([]string, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, false
+	}
+	var questions []string
+	if err := json.Unmarshal([]byte(raw), &questions); err != nil || questions == nil {
+		return nil, false
+	}
+	return questions, true
 }
 
 func (s *ConversationService) loadQuestionBeforeAssistantMessage(ctx context.Context, conversationID, userID, assistantMessageID string) (string, error) {

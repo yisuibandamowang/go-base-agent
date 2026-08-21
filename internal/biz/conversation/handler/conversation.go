@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"go-base-agent/internal/biz/conversation/dto"
 	"go-base-agent/internal/biz/conversation/model"
@@ -13,6 +15,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func parseRecommendedQuestions(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var questions []string
+	if err := json.Unmarshal([]byte(raw), &questions); err != nil {
+		return nil
+	}
+	return questions
+}
 
 // ConversationHandler 会话 HTTP 处理层。
 type ConversationHandler struct {
@@ -143,15 +156,18 @@ func (h *ConversationHandler) Messages(c *gin.Context) {
 			vote = &vv
 		}
 		records = append(records, dto.MessageResp{
-			ID:               m.ID,
-			ConversationID:   m.ConversationID,
-			Role:             m.Role,
-			Content:          m.Content,
-			ThinkingContent:  m.ThinkingContent,
-			ThinkingDuration: m.ThinkingDuration,
-			Vote:             vote,
-			Sources:          rag.ParseSources(m.Sources),
-			CreateTime:       m.CreateTime,
+			ID:                   m.ID,
+			ConversationID:       m.ConversationID,
+			Role:                 m.Role,
+			Content:              m.Content,
+			ThinkingContent:      m.ThinkingContent,
+			ThinkingDuration:     m.ThinkingDuration,
+			Vote:                 vote,
+			Sources:              rag.ParseSources(m.Sources),
+			RecommendedQuestions: parseRecommendedQuestions(m.RecommendedQuestions),
+			ReplyToMessageID:     m.ReplyToMessageID,
+			MessageStatus:        m.MessageStatus,
+			CreateTime:           m.CreateTime,
 		})
 	}
 	c.JSON(http.StatusOK, convention.Success(records))

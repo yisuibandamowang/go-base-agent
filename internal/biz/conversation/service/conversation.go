@@ -486,13 +486,17 @@ func (s *DBMemoryStore) AppendMessage(ctx context.Context, conversationID string
 		}
 	}
 	m := &model.Message{
-		ConversationID:   conversationID,
-		UserID:           conv.UserID,
-		Role:             string(msg.Role),
-		Content:          msg.Content,
-		ThinkingContent:  msg.ThinkingContent,
-		ThinkingDuration: msg.ThinkingDuration,
-		Sources:          msg.Sources,
+		ConversationID:       conversationID,
+		UserID:               conv.UserID,
+		Role:                 string(msg.Role),
+		Content:              msg.Content,
+		ThinkingContent:      msg.ThinkingContent,
+		ThinkingDuration:     msg.ThinkingDuration,
+		Sources:              msg.Sources,
+		RetrievedChunks:      msg.RetrievedChunks,
+		RecommendedQuestions: msg.RecommendedQuestions,
+		ReplyToMessageID:     msg.ReplyToMessageID,
+		MessageStatus:        string(msg.MessageStatus),
 	}
 	m.CreateTime = time.Now()
 	if err := s.msgRepo.Create(ctx, m); err != nil {

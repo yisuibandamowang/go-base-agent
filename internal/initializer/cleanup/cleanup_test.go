@@ -2,7 +2,10 @@ package cleanup
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +57,10 @@ func TestRunExecutesPreflightThenCleanup(t *testing.T) {
 			calls = append(calls, "lock")
 			return true, nil
 		},
+		DeleteDocuments: func(context.Context) error {
+			calls = append(calls, "documents")
+			return nil
+		},
 		ReleaseLock: func(context.Context, string) error {
 			calls = append(calls, "release")
 			return nil
@@ -62,11 +69,15 @@ func TestRunExecutesPreflightThenCleanup(t *testing.T) {
 			calls = append(calls, "cleanup")
 			return nil
 		},
+		ClearCache: func(context.Context) error {
+			calls = append(calls, "cache")
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("run cleanup: %v", err)
 	}
-	want := []string{"preflight", "db", "redis", "lock", "cleanup", "release"}
+	want := []string{"preflight", "db", "redis", "lock", "documents", "cleanup", "cache", "release"}
 	if len(calls) != len(want) {
 		t.Fatalf("unexpected calls: %#v", calls)
 	}
@@ -88,5 +99,44 @@ func TestRunRejectsBadConfirm(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestDeleteRemoteDocumentsDeletesCompletedDocuments(t *testing.T) {
+	var deletedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/ragent/auth/login":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "0", "data": map[string]any{
+				"token": "token", "role": "admin",
+			}})
+		case r.URL.Path == "/api/ragent/knowledge-base" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "0", "data": map[string]any{
+				"records": []map[string]any{{"id": "kb-1"}}, "pages": 1,
+			}})
+		case r.URL.Path == "/api/ragent/knowledge-base/kb-1/docs" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "0", "data": map[string]any{
+				"records": []map[string]any{{"id": "doc-1", "docName": "a.md", "status": "success"}}, "pages": 1,
+			}})
+		case strings.HasPrefix(r.URL.Path, "/api/ragent/knowledge-base/docs/") && r.Method == http.MethodDelete:
+			deletedID = strings.TrimPrefix(r.URL.Path, "/api/ragent/knowledge-base/docs/")
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "0"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	err := deleteRemoteDocuments(context.Background(), Options{
+		BaseURL:       server.URL,
+		AdminUsername: "admin",
+		AdminPassword: "admin",
+		HTTPClient:    server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("deleteRemoteDocuments: %v", err)
+	}
+	if deletedID != "doc-1" {
+		t.Fatalf("expected doc-1 to be deleted, got %q", deletedID)
 	}
 }

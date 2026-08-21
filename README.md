@@ -139,7 +139,29 @@ make cleanup-db
 make preflight
 ```
 
-会检查 PostgreSQL、Redis、健康接口和管理员登录状态，当前由 `cmd/initializer preflight` 执行。
+会检查 PostgreSQL、Redis、健康接口、管理员登录状态和 `/rag/settings` 中声明的后端类型，并拒绝近 30 分钟内存在文档分块、RAG trace、摄取任务或活动流的初始化/清理操作，当前由 `cmd/initializer preflight` 执行。
+
+### 2.3 初始化企业知识库
+
+```bash
+make initialize
+```
+
+`AGENT_TYPE_DIR` 可覆盖 Makefile 中的默认数据集目录，例如：
+
+```bash
+make initialize AGENT_TYPE_DIR=/path/to/agent-type-dir
+```
+
+初始化流程会依次执行预检、清理、知识库创建、文档上传与分块、意图树、示例问题、结果校验和预热。
+正式初始化要求数据集目录提供 `checksums.sha256`，启动前会校验目录内声明文件的 SHA-256；开发测试场景直接调用初始化包时仍保持兼容。
+意图 properties 支持 Java 数据集的 `mcp-tool-id`、`prompt-snippet-file`、`prompt-template-file` 和 `param-prompt-template-file` 字段。
+初始化结果校验还会确认每个绑定知识库的意图节点实际包含对应 Collection，避免意图树创建成功但检索范围错误。
+默认同名文档会按 Java 初始化器行为替换，单份文档分块最多等待 `20m`，每 `3s` 轮询一次；可用
+`--replace-existing=false`、`--document-timeout` 和 `--document-poll-interval` 调整。只查看计划时加
+`--dry-run`，跳过模型预热时加 `--skip-warmup`。
+预热每轮默认最多尝试 3 次，SSE 必须收到非空回答、`finish`（`NORMAL` 且含消息 ID）和 `done`；回答完成后会补生成推荐追问，追问失败不影响主回答数据。
+可用 `--warmup-max-attempts`、`--warmup-retry-interval`、`--warmup-interval` 调整预热节奏，使用 `--warmup-shuffle-seed` 固定演示问题顺序以便复现。
 
 ### 3. 配置环境
 

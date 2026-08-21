@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -103,6 +104,21 @@ func NewMessageRepo(database *gorm.DB) *MessageRepo {
 // Create 创建消息。
 func (r *MessageRepo) Create(ctx context.Context, msg *model.Message) error {
 	return r.db.WithContext(ctx).Create(msg).Error
+}
+
+// UpdateRecommendedQuestions 保存 assistant 消息的推荐追问结果。
+func (r *MessageRepo) UpdateRecommendedQuestions(ctx context.Context, messageID string, questions []string) error {
+	raw, err := json.Marshal(questions)
+	if err != nil {
+		return fmt.Errorf("marshal recommended questions: %w", err)
+	}
+	if err := r.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
+		Model(&model.Message{}).
+		Where("id = ? AND role = ?", messageID, "assistant").
+		Updates(map[string]interface{}{"recommended_questions": string(raw), "update_time": time.Now()}).Error; err != nil {
+		return fmt.Errorf("update recommended questions: %w", err)
+	}
+	return nil
 }
 
 // FindByIDAndUserID 根据消息 ID 和用户 ID 查询未删除消息。

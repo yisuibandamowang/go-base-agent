@@ -194,9 +194,9 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		decision := p.guidance.DetectAmbiguity(ctx, q, resolvedSubIntents)
 		if decision.Action == GuidanceActionPrompt && strings.TrimSpace(decision.Prompt) != "" {
 			sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
-			_ = p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question))
+			_, _ = appendConversationMessage(persistenceCtx, p.memory, conversationID, chat.NewUserMessage(question))
 			sender.SendMessage(MsgTypeResponse, decision.Prompt)
-			sender.SendFinish("", resolveConversationTitle(persistenceCtx, p.memory, conversationID, sendTitleOnComplete))
+			sender.SendFinishWithStatus("", resolveConversationTitle(persistenceCtx, p.memory, conversationID, sendTitleOnComplete), nil, MessageStatusNormal)
 			sender.SendDone()
 			sender.Close()
 			finishTraceRun(traceStatusSuccess, nil)
@@ -253,6 +253,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	mergedGroup := MergeIntentGroup(resolvedSubIntents)
 	eligibleIntentIDs := DeriveIntentAttribution(chunks, mergedGroup.KBIntents)
 	sources := AssembleSources(chunks)
+	grounding := AssembleGroundingChunks(chunks)
 	kbContext := EnrichCitationContext(withChunkSources(chunks, kbCtx), sources, p.citationEnabled)
 
 	req := p.prompt.Build(PromptContext{
@@ -272,7 +273,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		answerLLM = p.lightweightLLM()
 	}
 
-	if err := p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question)); err != nil {
+	questionMessageID, err := appendConversationMessage(persistenceCtx, p.memory, conversationID, chat.NewUserMessage(question))
+	if err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
 	}
 
@@ -283,6 +285,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		sender:              sender,
 		citations:           formatCitations(chunks),
 		sources:             sources,
+		grounding:           grounding,
+		replyToMessageID:    questionMessageID,
 		task:                task,
 		traceRecorder:       p.trace,
 		traceRun:            traceRun,
@@ -373,7 +377,8 @@ func (p *Pipeline) loadCachedAnswer(ctx context.Context, key string) (*CachedAns
 
 func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, question string, cached *CachedAnswer, sender *SSESender, task *streamTask) {
 	sendTitleOnComplete := shouldSendTitleOnComplete(ctx, p.memory, conversationID)
-	if err := p.memory.SaveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+	questionMessageID, err := appendConversationMessage(ctx, p.memory, conversationID, chat.NewUserMessage(question))
+	if err != nil {
 		slog.Warn("rag memory: save cached user message failed", "conversationId", conversationID, "err", err)
 	}
 	if task != nil && task.isCancelled() {
@@ -387,6 +392,8 @@ func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, quest
 		answerPrefix:        cached.Content,
 		citations:           cached.Citations,
 		sources:             unmarshalSources(cached.SourcesJSON),
+		grounding:           ParseGroundingChunks(cached.GroundingJSON),
+		replyToMessageID:    questionMessageID,
 		sendTitleOnComplete: sendTitleOnComplete,
 		thinkingDuration:    cached.ThinkingDuration,
 	}
@@ -396,6 +403,9 @@ func (p *Pipeline) streamCachedAnswer(ctx context.Context, conversationID, quest
 		ThinkingContent:  cached.ThinkingContent,
 		ThinkingDuration: cached.ThinkingDuration,
 		Sources:          cached.SourcesJSON,
+		RetrievedChunks:  cached.GroundingJSON,
+		ReplyToMessageID: questionMessageID,
+		MessageStatus:    chat.MessageStatusNormal,
 	}
 	messageID, err := appendConversationMessage(ctx, p.memory, conversationID, msg)
 	if err != nil {
@@ -545,7 +555,8 @@ func deduplicateChunks(chunks []RetrievedChunk) []RetrievedChunk {
 
 func (p *Pipeline) streamRetrievalFallback(ctx, persistenceCtx context.Context, conversationID, question string, sender *SSESender, task *streamTask, llm chat.LLMService, reason string) {
 	sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
-	if err := p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question)); err != nil {
+	questionMessageID, err := appendConversationMessage(persistenceCtx, p.memory, conversationID, chat.NewUserMessage(question))
+	if err != nil {
 		slog.Warn("rag memory: save user message failed", "conversationId", conversationID, "err", err)
 	}
 	if task != nil && task.isCancelled() {
@@ -566,6 +577,7 @@ func (p *Pipeline) streamRetrievalFallback(ctx, persistenceCtx context.Context, 
 		memory:              p.memory,
 		sender:              sender,
 		answerPrefix:        prefix,
+		replyToMessageID:    questionMessageID,
 		task:                task,
 		sendTitleOnComplete: sendTitleOnComplete,
 		messageChunkSize:    p.messageChunkSize,
@@ -625,6 +637,8 @@ type pipelineCallback struct {
 	answerPrefix        string
 	citations           string
 	sources             []SourceRef
+	grounding           []GroundingChunk
+	replyToMessageID    string
 	task                *streamTask
 	traceRecorder       TraceRecorder
 	traceRun            *TraceRunRecord
@@ -674,7 +688,7 @@ func (c *pipelineCallback) OnComplete() {
 	if c.citations != "" {
 		_ = c.sender.SendMessage(MsgTypeResponse, c.citations)
 	}
-	c.sender.SendFinishWithSources(messageID, title, c.sources)
+	c.sender.SendFinishWithStatus(messageID, title, c.sources, MessageStatusNormal)
 	c.sender.SendDone()
 	c.sender.Close()
 }
@@ -722,8 +736,10 @@ func sendChunkedToSender(sender *SSESender, msgType, content string, size int) {
 
 func (c *pipelineCallback) buildCompletionPayloadOnCancel() CompletionPayload {
 	return CompletionPayload{
-		MessageID: c.saveCancelledAssistantMessage(),
-		Title:     c.resolveConversationTitle(),
+		MessageID:     c.saveCancelledAssistantMessage(),
+		Title:         c.resolveConversationTitle(),
+		Sources:       c.sources,
+		MessageStatus: MessageStatusInterrupted,
 	}
 }
 
@@ -761,6 +777,7 @@ func (c *pipelineCallback) saveCompletedAssistantMessage() string {
 		ThinkingDuration: c.resolveThinkingDuration(),
 		Citations:        c.citations,
 		SourcesJSON:      sourcesJSON,
+		GroundingJSON:    MarshalGroundingChunks(c.grounding),
 	}
 	msg := chat.Message{
 		Role:             chat.RoleAssistant,
@@ -768,6 +785,9 @@ func (c *pipelineCallback) saveCompletedAssistantMessage() string {
 		ThinkingContent:  answer.ThinkingContent,
 		ThinkingDuration: answer.ThinkingDuration,
 		Sources:          sourcesJSON,
+		RetrievedChunks:  answer.GroundingJSON,
+		ReplyToMessageID: c.replyToMessageID,
+		MessageStatus:    chat.MessageStatusNormal,
 	}
 	id, err := appendConversationMessage(c.ctx, c.memory, c.conversationID, msg)
 	if err != nil {
@@ -791,6 +811,8 @@ func (c *pipelineCallback) saveCancelledAssistantMessage() string {
 		Content:          content,
 		ThinkingContent:  c.thinking.String(),
 		ThinkingDuration: c.resolveThinkingDuration(),
+		ReplyToMessageID: c.replyToMessageID,
+		MessageStatus:    chat.MessageStatusInterrupted,
 	}
 	id, err := appendConversationMessage(c.ctx, c.memory, c.conversationID, msg)
 	if err != nil {
@@ -910,7 +932,7 @@ func firstSystemPromptTemplate(subIntents []SubQuestionIntent) string {
 }
 
 func (p *Pipeline) streamSystemOnlyResponse(ctx, persistenceCtx context.Context, question, conversationID string, history []chat.Message, task *streamTask, sender *SSESender, traceRun *TraceRunRecord, llm chat.LLMService, customPrompt string) {
-	_ = p.memory.SaveMessage(persistenceCtx, conversationID, chat.NewUserMessage(question))
+	questionMessageID, _ := appendConversationMessage(persistenceCtx, p.memory, conversationID, chat.NewUserMessage(question))
 	req := p.buildSystemOnlyRequest(question, history, customPrompt)
 	cb := &pipelineCallback{
 		ctx:              persistenceCtx,
@@ -921,6 +943,7 @@ func (p *Pipeline) streamSystemOnlyResponse(ctx, persistenceCtx context.Context,
 		traceRecorder:    p.trace,
 		traceRun:         traceRun,
 		messageChunkSize: p.messageChunkSize,
+		replyToMessageID: questionMessageID,
 	}
 	task.setCancelPayloadFn(cb.buildCompletionPayloadOnCancel)
 	llmSpan := p.startTraceNode(ctx, traceRun, "", "llm-stream", "LLM", 0)

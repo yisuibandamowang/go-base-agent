@@ -556,6 +556,34 @@ func TestPipeline_StreamChat_PersistsCitationsWithAssistantMessage(t *testing.T)
 	}
 }
 
+func TestPipeline_StreamChat_PersistsGroundingChunksWithAssistantMessage(t *testing.T) {
+	mem := &recordingMemoryService{}
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			cb.OnContent("会员回答")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+	retriever := staticRetriever{chunks: []RetrievedChunk{
+		{ID: "a-low", Text: "低分", Score: 0.2, Metadata: map[string]string{"doc_id": "doc-a", "doc_name": "文档A"}},
+		{ID: "a-best", Text: "最高分", Score: 0.9, Metadata: map[string]string{"doc_id": "doc-a", "doc_name": "文档A"}},
+		{ID: "b-best", Text: "文档B", Score: 0.8, Metadata: map[string]string{"doc_id": "doc-b", "doc_name": "文档B"}},
+	}}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, mem)
+	p.StreamChat(context.Background(), "会员权益", "conv-1", "task-1", false, s)
+
+	if len(mem.saved) != 2 {
+		t.Fatalf("expected user and assistant messages, got %d", len(mem.saved))
+	}
+	grounding := ParseGroundingChunks(mem.saved[1].RetrievedChunks)
+	if len(grounding) != 2 || grounding[0].Text != "最高分" || grounding[1].DocName != "文档B" {
+		t.Fatalf("unexpected persisted grounding chunks: %+v", grounding)
+	}
+}
+
 func TestPipeline_StreamChat_IgnoresQuestionOnlyCachedAnswerBeforeRetrieval(t *testing.T) {
 	mem := &recordingMemoryService{}
 	retriever := &recordingRetriever{chunks: []RetrievedChunk{{
@@ -1619,6 +1647,9 @@ func TestPipeline_StopTaskCancelEventIncludesAssistantMessageID(t *testing.T) {
 	}
 	if len(mem.saved) != 2 {
 		t.Fatalf("expected user and partial assistant messages to be saved, got %d", len(mem.saved))
+	}
+	if mem.saved[1].ReplyToMessageID != "msg-1" || mem.saved[1].MessageStatus != MessageStatusInterrupted {
+		t.Fatalf("expected interrupted assistant linkage and status, got %+v", mem.saved[1])
 	}
 }
 

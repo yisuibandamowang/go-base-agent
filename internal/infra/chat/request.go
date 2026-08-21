@@ -10,6 +10,15 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+// MessageStatus describes how an assistant message ended.
+type MessageStatus string
+
+const (
+	MessageStatusNormal      MessageStatus = "NORMAL"
+	MessageStatusInterrupted MessageStatus = "INTERRUPTED"
+	MessageStatusRejected    MessageStatus = "REJECTED"
+)
+
 // Message represents a single chat message.
 // Aligns with Java ChatMessage.
 type Message struct {
@@ -19,6 +28,20 @@ type Message struct {
 	ThinkingDuration int    `json:"thinkingDuration,omitempty"`
 	// Sources 回答来源（JSON 序列化的文档级来源列表），仅随助手消息落库与回显，不参与模型请求。
 	Sources string `json:"sources,omitempty"`
+	// RetrievedChunks 推荐追问使用的 grounding 片段 JSON，仅随助手消息落库。
+	RetrievedChunks string `json:"retrievedChunks,omitempty"`
+	// RecommendedQuestions 推荐追问结果 JSON，仅随助手消息落库。
+	RecommendedQuestions string `json:"recommendedQuestions,omitempty"`
+	// ReplyToMessageID 是 assistant 消息对应的用户消息 ID。
+	ReplyToMessageID string `json:"replyToMessageId,omitempty"`
+	// MessageStatus 是消息结束状态，仅落库消息使用。
+	MessageStatus MessageStatus `json:"messageStatus,omitempty"`
+}
+
+// GroundingChunk 是推荐追问使用的文档片段证据。
+type GroundingChunk struct {
+	DocName string `json:"docName"`
+	Text    string `json:"text"`
 }
 
 // NewSystemMessage creates a system message.

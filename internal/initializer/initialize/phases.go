@@ -1,9 +1,15 @@
 package initialize
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 // intentTreeResponse 意图树接口的扁平节点。
@@ -14,37 +20,12 @@ type intentTreeResponse struct {
 
 // listKnowledgeBases 拉取服务端全部知识库。
 func (c *client) listKnowledgeBases(ctx context.Context) ([]map[string]any, error) {
-	var resp struct {
-		Code    string           `json:"code"`
-		Message string           `json:"message"`
-		Data    []map[string]any `json:"data"`
-	}
-	if err := c.getJSON("/api/ragent/knowledge-base", &resp); err != nil {
-		return nil, err
-	}
-	if len(resp.Data) == 0 {
-		return nil, nil
-	}
-	return resp.Data, nil
+	return c.listPagedRecords("/api/ragent/knowledge-base")
 }
 
 // listDocuments 拉取指定知识库下的全部文档。
 func (c *client) listDocuments(ctx context.Context, kbID string) ([]map[string]any, error) {
-	var resp struct {
-		Code    string           `json:"code"`
-		Message string           `json:"message"`
-		Data    struct {
-			Records []map[string]any `json:"records"`
-			Total   int              `json:"total"`
-		} `json:"data"`
-	}
-	if err := c.getJSON("/api/ragent/knowledge-base/"+encodePathValue(kbID)+"/docs", &resp); err != nil {
-		return nil, err
-	}
-	if len(resp.Data.Records) == 0 {
-		return nil, nil
-	}
-	return resp.Data.Records, nil
+	return c.listPagedRecords("/api/ragent/knowledge-base/" + encodePathValue(kbID) + "/docs")
 }
 
 // flattenIntentTree 拉取并摊平意图树。
@@ -76,21 +57,42 @@ func flattenIntentNodes(nodes []map[string]any) []map[string]any {
 
 // listSampleQuestions 拉取全部示例问题。
 func (c *client) listSampleQuestions(ctx context.Context) ([]map[string]any, error) {
-	var resp struct {
-		Code    string           `json:"code"`
-		Message string           `json:"message"`
-		Data    struct {
+	return c.listPagedRecords("/api/ragent/sample-questions")
+}
+
+func (c *client) listPagedRecords(path string) ([]map[string]any, error) {
+	all := make([]map[string]any, 0)
+	for current := 1; ; current++ {
+		var resp struct {
+			Data json.RawMessage `json:"data"`
+		}
+		pagePath := fmt.Sprintf("%s?current=%d&size=500", path, current)
+		if err := c.getJSON(pagePath, &resp); err != nil {
+			return nil, err
+		}
+		raw := bytes.TrimSpace(resp.Data)
+		if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+			return all, nil
+		}
+		if raw[0] == '[' {
+			var records []map[string]any
+			if err := json.Unmarshal(raw, &records); err != nil {
+				return nil, fmt.Errorf("解析列表响应失败: %w", err)
+			}
+			return append(all, records...), nil
+		}
+		var page struct {
 			Records []map[string]any `json:"records"`
-			Total   int              `json:"total"`
-		} `json:"data"`
+			Pages   int              `json:"pages"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return nil, fmt.Errorf("解析分页响应失败: %w", err)
+		}
+		all = append(all, page.Records...)
+		if page.Pages <= current || page.Pages <= 0 {
+			return all, nil
+		}
 	}
-	if err := c.getJSON("/api/ragent/sample-questions", &resp); err != nil {
-		return nil, err
-	}
-	if len(resp.Data.Records) == 0 {
-		return nil, nil
-	}
-	return resp.Data.Records, nil
 }
 
 // initKnowledgeBases 创建数据集定义的知识库，已存在且配置一致时复用。
@@ -139,6 +141,174 @@ func initKnowledgeBases(ctx context.Context, c *client, dataset *Dataset, dryRun
 	return nil
 }
 
+func initDocuments(ctx context.Context, c *client, dataset *Dataset, dryRun bool, timeout, pollInterval time.Duration) error {
+	return initDocumentsWithReplace(ctx, c, dataset, dryRun, timeout, pollInterval, true)
+}
+
+func initDocumentsWithReplace(ctx context.Context, c *client, dataset *Dataset, dryRun bool, timeout, pollInterval time.Duration, replaceExisting bool) error {
+	if timeout <= 0 {
+		timeout = 20 * time.Minute
+	}
+	if pollInterval <= 0 {
+		pollInterval = 3 * time.Second
+	}
+	bases, err := c.listKnowledgeBases(ctx)
+	if err != nil {
+		return fmt.Errorf("拉取知识库列表失败: %w", err)
+	}
+	idByCollection := make(map[string]string, len(bases))
+	for _, base := range bases {
+		idByCollection[strValue(base["collectionName"])] = strValue(base["id"])
+	}
+	for _, definition := range dataset.KnowledgeBases {
+		dir := strings.TrimSpace(definition.DocumentsDir)
+		if dir == "" {
+			continue
+		}
+		kbID := idByCollection[definition.CollectionName]
+		if kbID == "" {
+			return fmt.Errorf("文档所属知识库不存在: %s", definition.CollectionName)
+		}
+		files, err := collectDocumentFiles(dir)
+		if err != nil {
+			return fmt.Errorf("读取文档目录失败 %s: %w", dir, err)
+		}
+		existing, err := c.listDocuments(ctx, kbID)
+		if err != nil {
+			return fmt.Errorf("拉取文档列表失败 %s: %w", definition.Name, err)
+		}
+		for _, filePath := range files {
+			fileName := filepath.Base(filePath)
+			if dryRun {
+				fmt.Printf("[document][dry-run] upload kb=%s file=%s\n", definition.Ref, filePath)
+				continue
+			}
+			existingSameName := documentsNamed(existing, fileName)
+			if len(existingSameName) > 0 && !replaceExisting {
+				if shouldSkipExistingDocument(existingSameName, fileName) {
+					fmt.Printf("[document] 跳过已成功文档: %s\n", fileName)
+					continue
+				}
+				return fmt.Errorf("文档已存在且不可替换: %s", fileName)
+			}
+			for _, old := range existingSameName {
+				if strValue(old["id"]) != "" {
+					if strings.EqualFold(strValue(old["status"]), "running") {
+						return fmt.Errorf("已有文档正在分块，无法替换: %s", fileName)
+					}
+					if err := c.delete("/api/ragent/knowledge-base/docs/" + encodePathValue(strValue(old["id"]))); err != nil {
+						return fmt.Errorf("删除旧文档失败 %s: %w", fileName, err)
+					}
+				}
+			}
+			docID, err := c.uploadDocument(ctx, kbID, filePath)
+			if err != nil {
+				return err
+			}
+			if err := c.postEmpty(ctx, "/api/ragent/knowledge-base/docs/"+encodePathValue(docID)+"/chunk"); err != nil {
+				return fmt.Errorf("触发文档分块失败 %s: %w", fileName, err)
+			}
+			if err := waitForDocument(ctx, c, docID, fileName, timeout, pollInterval); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func documentsNamed(documents []map[string]any, name string) []map[string]any {
+	result := make([]map[string]any, 0)
+	for _, document := range documents {
+		if strValue(document["docName"]) == name {
+			result = append(result, document)
+		}
+	}
+	return result
+}
+
+func collectDocumentFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, 0)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			nested, err := collectDocumentFiles(path)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, nested...)
+			continue
+		}
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func shouldSkipExistingDocument(existing []map[string]any, name string) bool {
+	for _, doc := range existing {
+		if strValue(doc["docName"]) == name && strings.EqualFold(strValue(doc["status"]), "success") && numericValue(doc["chunkCount"]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForDocument(ctx context.Context, c *client, docID, name string, timeout, pollInterval time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		var resp struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := c.getJSON("/api/ragent/knowledge-base/docs/"+encodePathValue(docID), &resp); err != nil {
+			return fmt.Errorf("查询文档状态失败 %s: %w", name, err)
+		}
+		status := strings.ToLower(strValue(resp.Data["status"]))
+		switch status {
+		case "success":
+			if numericValue(resp.Data["chunkCount"]) <= 0 {
+				return fmt.Errorf("文档分块成功但没有有效分块: %s", name)
+			}
+			return nil
+		case "failed", "error":
+			return fmt.Errorf("文档分块失败 %s: %s", name, strValue(resp.Data["errorMessage"]))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("等待文档分块超时 %s", name)
+		case <-ticker.C:
+		}
+	}
+}
+
+func numericValue(value any) int {
+	switch n := value.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case string:
+		var parsed int
+		_, _ = fmt.Sscanf(n, "%d", &parsed)
+		return parsed
+	default:
+		return 0
+	}
+}
+
 // initIntentTree 先清理旧节点再按数据集重建。
 func initIntentTree(ctx context.Context, c *client, dataset *Dataset, dryRun bool) error {
 	if dryRun {
@@ -183,8 +353,10 @@ func initIntentTree(ctx context.Context, c *client, dataset *Dataset, dryRun boo
 		putIfNotBlank(payload, "parentCode", intent.ParentCode)
 		putIfNotBlank(payload, "description", intent.Description)
 		putIfNotBlank(payload, "examples", intent.Examples)
+		putIfNotBlank(payload, "mcpToolId", intent.McpToolID)
 		putIfNotBlank(payload, "promptSnippet", intent.PromptSnippet)
 		putIfNotBlank(payload, "promptTemplate", intent.PromptTemplate)
+		putIfNotBlank(payload, "paramPromptTemplate", intent.ParamPromptTemplate)
 		if intent.TopK > 0 {
 			payload["topK"] = intent.TopK
 		}
@@ -269,10 +441,29 @@ func verify(ctx context.Context, c *client, dataset *Dataset) error {
 		if err != nil {
 			return fmt.Errorf("校验文档列表失败 %s: %w", definition.Name, err)
 		}
+		expectedNames := make(map[string]struct{})
+		files, err := collectDocumentFiles(definition.DocumentsDir)
+		if err != nil {
+			return fmt.Errorf("读取文档目录失败 %s: %w", definition.Name, err)
+		}
+		for _, filePath := range files {
+			expectedNames[filepath.Base(filePath)] = struct{}{}
+		}
+		if len(documents) != len(expectedNames) {
+			return fmt.Errorf("知识库文档数量不一致: %s, expected=%d, actual=%d",
+				definition.Name, len(expectedNames), len(documents))
+		}
 		for _, document := range documents {
+			name := strValue(document["docName"])
+			if _, ok := expectedNames[name]; !ok {
+				return fmt.Errorf("出现当前智能体类型外的文档: %s", name)
+			}
 			status := strValue(document["status"])
 			if !strings.EqualFold(status, "success") {
-				return fmt.Errorf("文档未成功: %s, status=%s", strValue(document["docName"]), status)
+				return fmt.Errorf("文档未成功: %s, status=%s", name, status)
+			}
+			if numericValue(document["chunkCount"]) <= 0 {
+				return fmt.Errorf("文档没有 Chunk: %s", name)
 			}
 		}
 		documentCount += len(documents)
@@ -291,8 +482,21 @@ func verify(ctx context.Context, c *client, dataset *Dataset) error {
 		intentByCode[strValue(intent["intentCode"])] = intent
 	}
 	for _, definition := range dataset.Intents {
-		if intentByCode[definition.Code] == nil {
+		actual := intentByCode[definition.Code]
+		if actual == nil {
 			return fmt.Errorf("缺少意图节点: %s", definition.Code)
+		}
+		if definition.KnowledgeBaseRef != "" {
+			expectedCollection := ""
+			for _, kb := range dataset.KnowledgeBases {
+				if kb.Ref == definition.KnowledgeBaseRef {
+					expectedCollection = kb.CollectionName
+					break
+				}
+			}
+			if !containsCollection(actual, expectedCollection) {
+				return fmt.Errorf("意图没有绑定预期知识库: %s, expected=%s", definition.Code, expectedCollection)
+			}
 		}
 	}
 
@@ -317,6 +521,23 @@ func verify(ctx context.Context, c *client, dataset *Dataset) error {
 	fmt.Printf("[verify] 通过：knowledgeBases=%d, documents=%d, intents=%d, questions=%d\n",
 		len(baseByCollection), documentCount, len(intents), len(questions))
 	return nil
+}
+
+func containsCollection(intent map[string]any, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return true
+	}
+	if strings.EqualFold(strValue(intent["collectionName"]), expected) {
+		return true
+	}
+	values, _ := intent["collectionNames"].([]any)
+	for _, value := range values {
+		if strings.EqualFold(strValue(value), expected) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveKBIDs 拉取服务端知识库并按 collectionName 映射到 ref。

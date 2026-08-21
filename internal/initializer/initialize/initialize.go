@@ -3,11 +3,14 @@
 package initialize
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +32,10 @@ type Options struct {
 	HTTPClient    *http.Client
 	DryRun        bool
 	SkipWarmup    bool
+	// ReplaceExisting 控制初始化时是否替换同名文档；nil 按 Java 默认值 true 处理。
+	ReplaceExisting      *bool
+	DocumentTimeout      time.Duration
+	DocumentPollInterval time.Duration
 	// Cleanup 执行清理环节（复用 cleanup.Run）。
 	Cleanup func(ctx context.Context) error
 	// Preflight 执行预检环节（复用 preflight.Run）。
@@ -57,19 +64,21 @@ type KnowledgeBase struct {
 
 // Intent 数据集中的一条意图节点定义。
 type Intent struct {
-	Code            string
-	Name            string
-	Level           int
-	ParentCode      string
-	Description     string
-	Examples        string
-	Kind            int
-	SortOrder       int
-	Enabled         bool
-	TopK            int
-	PromptSnippet   string
-	PromptTemplate  string
-	KnowledgeBaseRef string
+	Code                string
+	Name                string
+	Level               int
+	ParentCode          string
+	Description         string
+	Examples            string
+	Kind                int
+	SortOrder           int
+	Enabled             bool
+	TopK                int
+	McpToolID           string
+	PromptSnippet       string
+	PromptTemplate      string
+	ParamPromptTemplate string
+	KnowledgeBaseRef    string
 }
 
 // Dataset 一次初始化使用的不可变数据集。
@@ -110,6 +119,14 @@ func DefaultPhases(opts Options, dataset *Dataset) []Phase {
 				return err
 			}
 			return initKnowledgeBases(ctx, client, dataset, opts.DryRun)
+		}},
+		{Name: "documents", Run: func(ctx context.Context) error {
+			client, err := newClient(opts)
+			if err != nil {
+				return err
+			}
+			return initDocumentsWithReplace(ctx, client, dataset, opts.DryRun, opts.DocumentTimeout,
+				opts.DocumentPollInterval, boolValueOrDefault(opts.ReplaceExisting, true))
 		}},
 		{Name: "intent-tree", Run: func(ctx context.Context) error {
 			client, err := newClient(opts)
@@ -186,6 +203,11 @@ func LoadDataset(agentTypeDir string) (*Dataset, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("智能体类型目录不存在: %s", dir)
 	}
+	if checksumPath := filepath.Join(dir, "checksums.sha256"); fileExists(checksumPath) {
+		if err := verifyChecksums(dir); err != nil {
+			return nil, err
+		}
+	}
 
 	kbs, err := loadKnowledgeBases(dir)
 	if err != nil {
@@ -199,7 +221,158 @@ func LoadDataset(agentTypeDir string) (*Dataset, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dataset{KnowledgeBases: kbs, Intents: intents, Questions: questions}, nil
+	dataset := &Dataset{KnowledgeBases: kbs, Intents: intents, Questions: questions}
+	if err := validateDataset(dataset); err != nil {
+		return nil, err
+	}
+	return dataset, nil
+}
+
+func verifyChecksums(agentTypeDir string) error {
+	root, err := filepath.Abs(strings.TrimSpace(agentTypeDir))
+	if err != nil {
+		return fmt.Errorf("解析 checksum 根目录失败: %w", err)
+	}
+	checksumPath := filepath.Join(root, "checksums.sha256")
+	raw, err := os.ReadFile(checksumPath)
+	if err != nil {
+		return fmt.Errorf("读取 checksum 文件失败: %w", err)
+	}
+	checked := 0
+	for _, rawLine := range strings.Split(string(raw), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		separator := strings.Index(line, "  ")
+		if separator <= 0 {
+			return fmt.Errorf("非法 checksum 行: %s", rawLine)
+		}
+		expected := strings.ToLower(strings.TrimSpace(line[:separator]))
+		relative := strings.TrimSpace(line[separator+2:])
+		if len(expected) != sha256.Size*2 {
+			return fmt.Errorf("非法 checksum 值: %s", expected)
+		}
+		target := filepath.Clean(filepath.Join(root, relative))
+		rel, err := filepath.Rel(root, target)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !fileExists(target) {
+			return fmt.Errorf("checksum 引用了非法文件: %s", relative)
+		}
+		actual, err := fileSHA256(target)
+		if err != nil {
+			return fmt.Errorf("计算文件 checksum 失败 %s: %w", relative, err)
+		}
+		if actual != expected {
+			return fmt.Errorf("文件 checksum 不一致: %s，expected=%s，actual=%s", relative, expected, actual)
+		}
+		checked++
+	}
+	if checked == 0 {
+		return fmt.Errorf("checksums.sha256 中没有待校验文件")
+	}
+	return nil
+}
+
+// VerifyChecksums 校验智能体类型目录中的 checksums.sha256 文件。
+func VerifyChecksums(agentTypeDir string) error {
+	return verifyChecksums(agentTypeDir)
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func validateDataset(dataset *Dataset) error {
+	if dataset == nil {
+		return errors.New("dataset 不能为空")
+	}
+	refs := make(map[string]struct{}, len(dataset.KnowledgeBases))
+	collections := make(map[string]struct{}, len(dataset.KnowledgeBases))
+	for _, definition := range dataset.KnowledgeBases {
+		if strings.TrimSpace(definition.Ref) == "" || strings.TrimSpace(definition.Name) == "" ||
+			strings.TrimSpace(definition.CollectionName) == "" || strings.TrimSpace(definition.EmbeddingModel) == "" {
+			return fmt.Errorf("知识库定义字段不能为空: %s", definition.Ref)
+		}
+		if _, exists := refs[definition.Ref]; exists {
+			return fmt.Errorf("知识库 ref 重复: %s", definition.Ref)
+		}
+		refs[definition.Ref] = struct{}{}
+		if _, exists := collections[definition.CollectionName]; exists {
+			return fmt.Errorf("知识库 collectionName 重复: %s", definition.CollectionName)
+		}
+		collections[definition.CollectionName] = struct{}{}
+		files, err := collectDocumentFiles(definition.DocumentsDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("知识库文档目录不存在: %s", definition.DocumentsDir)
+			}
+			return fmt.Errorf("读取知识库文档目录失败 %s: %w", definition.Ref, err)
+		}
+		if len(files) == 0 {
+			return fmt.Errorf("知识库没有文档: %s", definition.Ref)
+		}
+		fileNames := make(map[string]struct{}, len(files))
+		for _, filePath := range files {
+			name := filepath.Base(filePath)
+			if _, exists := fileNames[name]; exists {
+				return fmt.Errorf("同一知识库存在重名文档，无法区分: %s/%s", definition.Ref, name)
+			}
+			fileNames[name] = struct{}{}
+		}
+	}
+
+	intentCodes := make(map[string]struct{}, len(dataset.Intents))
+	intentOrder := make(map[string]int, len(dataset.Intents))
+	for _, intent := range dataset.Intents {
+		if strings.TrimSpace(intent.Code) == "" || strings.TrimSpace(intent.Name) == "" {
+			return fmt.Errorf("意图定义字段不能为空: %s", intent.Code)
+		}
+		if _, exists := intentCodes[intent.Code]; exists {
+			return fmt.Errorf("意图 code 重复: %s", intent.Code)
+		}
+		intentCodes[intent.Code] = struct{}{}
+		intentOrder[intent.Code] = intent.SortOrder
+		if intent.KnowledgeBaseRef != "" {
+			if _, exists := refs[intent.KnowledgeBaseRef]; !exists {
+				return fmt.Errorf("意图 %s 引用了未知知识库 ref: %s", intent.Code, intent.KnowledgeBaseRef)
+			}
+		}
+	}
+	for _, intent := range dataset.Intents {
+		if strings.TrimSpace(intent.ParentCode) == "" {
+			continue
+		}
+		parentOrder, exists := intentOrder[intent.ParentCode]
+		if !exists {
+			return fmt.Errorf("意图父节点不存在: %s -> %s", intent.Code, intent.ParentCode)
+		}
+		if parentOrder >= intent.SortOrder {
+			return fmt.Errorf("父节点必须排在子节点之前: %s", intent.Code)
+		}
+	}
+
+	questionRefs := make(map[string]struct{}, len(dataset.Questions))
+	for _, question := range dataset.Questions {
+		if _, exists := questionRefs[question.Ref]; exists {
+			return fmt.Errorf("演示问题 ref 重复: %s", question.Ref)
+		}
+		questionRefs[question.Ref] = struct{}{}
+	}
+	return nil
 }
 
 func loadKnowledgeBases(dir string) ([]KnowledgeBase, error) {
@@ -252,20 +425,34 @@ func loadIntents(dir string, kbs []KnowledgeBase) ([]Intent, error) {
 		if err != nil {
 			return nil, err
 		}
+		promptSnippet, err := loadIntentPrompt(dir, props, "prompt-snippet")
+		if err != nil {
+			return nil, fmt.Errorf("读取意图 %s prompt-snippet 失败: %w", name, err)
+		}
+		promptTemplate, err := loadIntentPrompt(dir, props, "prompt-template")
+		if err != nil {
+			return nil, fmt.Errorf("读取意图 %s prompt-template 失败: %w", name, err)
+		}
+		paramPromptTemplate, err := loadIntentPrompt(dir, props, "param-prompt-template")
+		if err != nil {
+			return nil, fmt.Errorf("读取意图 %s param-prompt-template 失败: %w", name, err)
+		}
 		intent := Intent{
-			Code:             strings.TrimSpace(props["code"]),
-			Name:             strings.TrimSpace(props["name"]),
-			Level:            atoiDefault(props["level"], 0),
-			ParentCode:       strings.TrimSpace(props["parent-code"]),
-			Description:      strings.TrimSpace(props["description"]),
-			Examples:         strings.TrimSpace(props["examples"]),
-			Kind:             atoiDefault(props["kind"], 0),
-			SortOrder:        atoiDefault(props["sort-order"], 0),
-			Enabled:          parseBoolDefault(props["enabled"], true),
-			TopK:             atoiDefault(props["top-k"], 0),
-			PromptSnippet:    strings.TrimSpace(props["prompt-snippet"]),
-			PromptTemplate:   strings.TrimSpace(props["prompt-template"]),
-			KnowledgeBaseRef: strings.TrimSpace(props["knowledge-base-ref"]),
+			Code:                strings.TrimSpace(props["code"]),
+			Name:                strings.TrimSpace(props["name"]),
+			Level:               atoiDefault(props["level"], 0),
+			ParentCode:          strings.TrimSpace(props["parent-code"]),
+			Description:         strings.TrimSpace(props["description"]),
+			Examples:            strings.TrimSpace(props["examples"]),
+			Kind:                atoiDefault(props["kind"], 0),
+			SortOrder:           atoiDefault(props["sort-order"], 0),
+			Enabled:             parseBoolDefault(props["enabled"], true),
+			TopK:                atoiDefault(props["top-k"], 0),
+			McpToolID:           strings.TrimSpace(props["mcp-tool-id"]),
+			PromptSnippet:       promptSnippet,
+			PromptTemplate:      promptTemplate,
+			ParamPromptTemplate: paramPromptTemplate,
+			KnowledgeBaseRef:    strings.TrimSpace(props["knowledge-base-ref"]),
 		}
 		if intent.Code == "" {
 			return nil, fmt.Errorf("意图定义缺少 code: %s", name)
@@ -278,8 +465,32 @@ func loadIntents(dir string, kbs []KnowledgeBase) ([]Intent, error) {
 	return result, nil
 }
 
+func loadIntentPrompt(agentTypeDir string, props map[string]string, key string) (string, error) {
+	if relative := strings.TrimSpace(props[key+"-file"]); relative != "" {
+		root, err := filepath.Abs(agentTypeDir)
+		if err != nil {
+			return "", err
+		}
+		target := filepath.Clean(filepath.Join(root, relative))
+		rel, err := filepath.Rel(root, target)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !fileExists(target) {
+			return "", fmt.Errorf("Prompt 文件不存在或越出智能体类型目录: %s", relative)
+		}
+		raw, err := os.ReadFile(target)
+		if err != nil {
+			return "", err
+		}
+		return string(raw), nil
+	}
+	return strings.TrimSpace(props[key]), nil
+}
+
 func loadQuestions(dir string) ([]Question, error) {
-	props, err := loadPropertiesFile(filepath.Join(dir, "questions.properties"))
+	path := filepath.Join(dir, "questions.properties")
+	props, err := loadPropertiesFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +597,13 @@ func splitPipe(value string) []string {
 		}
 	}
 	return result
+}
+
+func boolValueOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 // client 封装对 Ragent 服务的认证 HTTP 调用。
@@ -495,6 +713,68 @@ func (c *client) delete(path string) error {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return c.doJSON(req, nil)
+}
+
+func (c *client) postEmpty(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	return c.doJSON(req, nil)
+}
+
+func (c *client) uploadDocument(ctx context.Context, kbID, filePath string) (string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("读取文档失败: %w", err)
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("sourceType", "file"); err != nil {
+		return "", fmt.Errorf("写入文档来源类型失败: %w", err)
+	}
+	if err := writer.WriteField("processMode", "chunk"); err != nil {
+		return "", fmt.Errorf("写入文档处理模式失败: %w", err)
+	}
+	if err := writer.WriteField("scheduleEnabled", "0"); err != nil {
+		return "", fmt.Errorf("写入文档调度配置失败: %w", err)
+	}
+	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return "", fmt.Errorf("创建文档文件字段失败: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("写入文档文件字段失败: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("关闭文档上传表单失败: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/ragent/knowledge-base/"+url.PathEscape(kbID)+"/docs/upload", &body)
+	if err != nil {
+		return "", fmt.Errorf("创建文档上传请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	var resp struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := c.doJSON(req, &resp); err != nil {
+		return "", fmt.Errorf("上传文档失败: %w", err)
+	}
+	if strings.TrimSpace(resp.Data.ID) == "" {
+		return "", fmt.Errorf("上传文档响应缺少文档 ID: %s", filepath.Base(filePath))
+	}
+	return resp.Data.ID, nil
 }
 
 func encodePathValue(value string) string {

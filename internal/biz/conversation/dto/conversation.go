@@ -17,15 +17,18 @@ type ConversationResp struct {
 
 // MessageResp 消息响应。
 type MessageResp struct {
-	ID               string          `json:"id"`
-	ConversationID   string          `json:"conversationId"`
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	ThinkingContent  string          `json:"thinkingContent,omitempty"`
-	ThinkingDuration int             `json:"thinkingDuration,omitempty"`
-	Vote             *int16          `json:"vote"`
-	Sources          []rag.SourceRef `json:"sources,omitempty"`
-	CreateTime       time.Time       `json:"createTime"`
+	ID                   string          `json:"id"`
+	ConversationID       string          `json:"conversationId"`
+	Role                 string          `json:"role"`
+	Content              string          `json:"content"`
+	ThinkingContent      string          `json:"thinkingContent,omitempty"`
+	ThinkingDuration     int             `json:"thinkingDuration,omitempty"`
+	Vote                 *int16          `json:"vote"`
+	Sources              []rag.SourceRef `json:"sources,omitempty"`
+	RecommendedQuestions []string        `json:"recommendedQuestions,omitempty"`
+	ReplyToMessageID     string          `json:"replyToMessageId,omitempty"`
+	MessageStatus        string          `json:"messageStatus,omitempty"`
+	CreateTime           time.Time       `json:"createTime"`
 }
 
 // UpdateTitleReq 更新会话标题请求。

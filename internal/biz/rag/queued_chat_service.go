@@ -80,7 +80,7 @@ func (s *QueuedChatService) handleTimeout(ctx context.Context, question, convers
 	}
 	if payload != nil {
 		_ = sender.SendReject()
-		_ = sender.SendFinish(payload.MessageID, payload.Title)
+		_ = sender.SendFinishWithStatus(payload.MessageID, payload.Title, nil, MessageStatusRejected)
 	}
 	_ = sender.SendDone()
 	sender.Close()
@@ -90,19 +90,24 @@ func (s *QueuedChatService) buildRejectedPayload(ctx context.Context, question, 
 	if s.memory == nil || strings.TrimSpace(question) == "" {
 		return nil
 	}
-	if _, err := s.saveMessage(ctx, conversationID, chat.NewUserMessage(question)); err != nil {
+	questionMessageID, err := s.saveMessage(ctx, conversationID, chat.NewUserMessage(question))
+	if err != nil {
 		slog.Warn("rag queue: save rejected user message failed", "conversationId", conversationID, "err", err)
 		return nil
 	}
-	messageID, err := s.saveMessage(ctx, conversationID, chat.NewAssistantMessage(queuedChatRejectMessage))
+	rejected := chat.NewAssistantMessage(queuedChatRejectMessage)
+	rejected.ReplyToMessageID = questionMessageID
+	rejected.MessageStatus = chat.MessageStatusRejected
+	messageID, err := s.saveMessage(ctx, conversationID, rejected)
 	if err != nil {
 		slog.Warn("rag queue: save rejected assistant message failed", "conversationId", conversationID, "err", err)
 		return nil
 	}
 	title := s.resolveRejectedTitle(ctx, conversationID, question)
 	return &CompletionPayload{
-		MessageID: normalizeCompletionMessageID(messageID),
-		Title:     title,
+		MessageID:     normalizeCompletionMessageID(messageID),
+		Title:         title,
+		MessageStatus: MessageStatusRejected,
 	}
 }
 

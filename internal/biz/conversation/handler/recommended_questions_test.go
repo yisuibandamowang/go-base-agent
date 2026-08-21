@@ -10,6 +10,7 @@ import (
 	conversationModel "go-base-agent/internal/biz/conversation/model"
 	conversationRepo "go-base-agent/internal/biz/conversation/repo"
 	conversationService "go-base-agent/internal/biz/conversation/service"
+	"go-base-agent/internal/biz/rag"
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/framework/db"
 
@@ -96,7 +97,7 @@ type captureRecommendedQuestionsGenerator struct {
 	payload  conversationService.RecommendedQuestionsPayload
 }
 
-func (g *captureRecommendedQuestionsGenerator) Generate(_ context.Context, question, answer string) conversationService.RecommendedQuestionsPayload {
+func (g *captureRecommendedQuestionsGenerator) Generate(_ context.Context, question, answer string, _ []rag.GroundingChunk) conversationService.RecommendedQuestionsPayload {
 	g.question = question
 	g.answer = answer
 	if g.payload.Status == "" {

@@ -12,12 +12,14 @@ import (
 
 // Options describes the runtime checks executed by the preflight command.
 type Options struct {
-	BaseURL       string
-	AdminUsername string
-	AdminPassword string
-	HTTPClient    *http.Client
-	CheckDB       func(context.Context) error
-	CheckRedis    func(context.Context) error
+	BaseURL          string
+	AdminUsername    string
+	AdminPassword    string
+	HTTPClient       *http.Client
+	CheckDB          func(context.Context) error
+	CheckRedis       func(context.Context) error
+	CheckIdle        func(context.Context) error
+	ExpectedBackends map[string]string
 }
 
 type apiResult[T any] struct {
@@ -83,8 +85,42 @@ func Run(ctx context.Context, opts Options) error {
 	if err := checkCurrentUser(ctx, client, joinURL(baseURL, "/api/ragent/auth/current-user"), login.Token); err != nil {
 		return err
 	}
-	if err := checkOK(ctx, client, joinURL(baseURL, "/api/ragent/rag/settings")); err != nil {
+	settingsURL := joinURL(baseURL, "/api/ragent/rag/settings")
+	if len(opts.ExpectedBackends) == 0 {
+		if err := checkOK(ctx, client, settingsURL); err != nil {
+			return err
+		}
+	} else if err := checkBackends(ctx, client, settingsURL, opts.ExpectedBackends); err != nil {
 		return err
+	}
+	if err := runCheck(ctx, "活动任务", opts.CheckIdle); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkBackends(ctx context.Context, client *http.Client, rawURL string, expected map[string]string) error {
+	var payload apiResult[map[string]any]
+	if err := getJSON(ctx, client, rawURL, "", &payload); err != nil {
+		return err
+	}
+	if strings.TrimSpace(payload.Code) != "" && payload.Code != "0" {
+		if strings.TrimSpace(payload.Message) == "" {
+			return fmt.Errorf("预检接口失败: %s", rawURL)
+		}
+		return fmt.Errorf("预检接口失败: %s", payload.Message)
+	}
+	backends, _ := payload.Data["backends"].(map[string]any)
+	for name, want := range expected {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		backend, _ := backends[name].(map[string]any)
+		got := strings.TrimSpace(fmt.Sprint(backend["type"]))
+		if !strings.EqualFold(got, want) {
+			return fmt.Errorf("RAG %s 后端类型不一致: expected=%s, actual=%s", name, want, got)
+		}
 	}
 	return nil
 }

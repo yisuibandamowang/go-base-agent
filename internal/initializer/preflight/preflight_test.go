@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -25,8 +27,15 @@ func TestRunChecksCoreEndpointsAndAdminLogin(t *testing.T) {
 		mu.Unlock()
 
 		switch r.URL.Path {
-		case "/health", "/readyz", "/api/ragent/health", "/api/ragent/rag/settings":
+		case "/health", "/readyz", "/api/ragent/health":
 			writeSuccess(t, w, "ok")
+		case "/api/ragent/rag/settings":
+			writeSuccess(t, w, map[string]any{"backends": map[string]any{
+				"vector":  map[string]any{"type": "pg"},
+				"storage": map[string]any{"type": "s3"},
+				"keyword": map[string]any{"type": "pg"},
+				"graph":   map[string]any{"type": "none"},
+			}})
 		case "/api/ragent/auth/login":
 			defer r.Body.Close()
 			body, err := io.ReadAll(r.Body)
@@ -57,7 +66,7 @@ func TestRunChecksCoreEndpointsAndAdminLogin(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var dbChecks, redisChecks int
+	var dbChecks, redisChecks, idleChecks int
 	err := Run(context.Background(), Options{
 		BaseURL:       server.URL,
 		AdminUsername: "admin",
@@ -71,6 +80,13 @@ func TestRunChecksCoreEndpointsAndAdminLogin(t *testing.T) {
 			redisChecks++
 			return nil
 		},
+		CheckIdle: func(context.Context) error {
+			idleChecks++
+			return nil
+		},
+		ExpectedBackends: map[string]string{
+			"vector": "pg", "storage": "s3", "keyword": "pg", "graph": "none",
+		},
 	})
 	if err != nil {
 		t.Fatalf("run preflight: %v", err)
@@ -80,6 +96,9 @@ func TestRunChecksCoreEndpointsAndAdminLogin(t *testing.T) {
 	}
 	if redisChecks != 1 {
 		t.Fatalf("expected one redis check, got %d", redisChecks)
+	}
+	if idleChecks != 1 {
+		t.Fatalf("expected one idle check, got %d", idleChecks)
 	}
 	if got := currentUserAuth; got != "Bearer token-123" {
 		t.Fatalf("unexpected current-user auth header: %q", got)
@@ -104,6 +123,72 @@ func TestRunChecksCoreEndpointsAndAdminLogin(t *testing.T) {
 		if calls[path] != 1 {
 			t.Fatalf("expected one call for %s, got %d", path, calls[path])
 		}
+	}
+}
+
+func TestRunRejectsActiveInitializerTasks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/readyz", "/api/ragent/health":
+			writeSuccess(t, w, "ok")
+		case "/api/ragent/rag/settings":
+			writeSuccess(t, w, map[string]any{"backends": map[string]any{
+				"vector":  map[string]any{"type": "pg"},
+				"storage": map[string]any{"type": "s3"},
+			}})
+		case "/api/ragent/auth/login":
+			writeSuccess(t, w, map[string]any{"userId": "u-1", "role": "admin", "token": "token-123"})
+		case "/api/ragent/auth/current-user":
+			writeSuccess(t, w, map[string]any{"userId": "u-1", "role": "admin"})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	err := Run(context.Background(), Options{
+		BaseURL:       server.URL,
+		AdminUsername: "admin",
+		AdminPassword: "admin",
+		HTTPClient:    server.Client(),
+		CheckIdle: func(context.Context) error {
+			return errors.New("检测到运行中的任务: db=1, redis=0")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "运行中的任务") {
+		t.Fatalf("expected active task rejection, got %v", err)
+	}
+}
+
+func TestRunRejectsUnexpectedRAGBackendType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/readyz", "/api/ragent/health":
+			writeSuccess(t, w, "ok")
+		case "/api/ragent/rag/settings":
+			writeSuccess(t, w, map[string]any{"backends": map[string]any{
+				"vector":  map[string]any{"type": "milvus"},
+				"storage": map[string]any{"type": "s3"},
+			}})
+		case "/api/ragent/auth/login":
+			writeSuccess(t, w, map[string]any{"userId": "u-1", "role": "admin", "token": "token-123"})
+		case "/api/ragent/auth/current-user":
+			writeSuccess(t, w, map[string]any{"userId": "u-1", "role": "admin"})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	err := Run(context.Background(), Options{
+		BaseURL:          server.URL,
+		AdminUsername:    "admin",
+		AdminPassword:    "admin",
+		HTTPClient:       server.Client(),
+		ExpectedBackends: map[string]string{"vector": "pg", "storage": "s3"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "vector") {
+		t.Fatalf("expected backend type rejection, got: %v", err)
 	}
 }
 

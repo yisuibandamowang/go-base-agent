@@ -4,6 +4,13 @@ import (
 	"encoding/json"
 
 	"go-base-agent/internal/framework/sse"
+	"go-base-agent/internal/infra/chat"
+)
+
+const (
+	MessageStatusNormal      = chat.MessageStatusNormal
+	MessageStatusInterrupted = chat.MessageStatusInterrupted
+	MessageStatusRejected    = chat.MessageStatusRejected
 )
 
 // SSE event names, byte-level aligned with Java SSEEventType.
@@ -39,9 +46,10 @@ const (
 // CompletionPayload is sent when the model finishes generating.
 // Aligns with Java CompletionPayload(messageId, title, sources) — 命中知识库时携带文档级来源列表。
 type CompletionPayload struct {
-	MessageID string      `json:"messageId,omitempty"`
-	Title     string      `json:"title,omitempty"`
-	Sources   []SourceRef `json:"sources,omitempty"`
+	MessageID     string             `json:"messageId,omitempty"`
+	Title         string             `json:"title,omitempty"`
+	Sources       []SourceRef        `json:"sources,omitempty"`
+	MessageStatus chat.MessageStatus `json:"messageStatus,omitempty"`
 }
 
 // DonePayload is the final "[DONE]" marker.
@@ -88,10 +96,16 @@ func (s *SSESender) SendFinish(messageID, title string) error {
 
 // SendFinishWithSources sends the completion event with document-level sources.
 func (s *SSESender) SendFinishWithSources(messageID, title string, sources []SourceRef) error {
+	return s.SendFinishWithStatus(messageID, title, sources, MessageStatusNormal)
+}
+
+// SendFinishWithStatus sends the completion event with its message status.
+func (s *SSESender) SendFinishWithStatus(messageID, title string, sources []SourceRef, status chat.MessageStatus) error {
 	return s.sendEvent(EventFinish, CompletionPayload{
-		MessageID: messageID,
-		Title:     title,
-		Sources:   sources,
+		MessageID:     messageID,
+		Title:         title,
+		Sources:       sources,
+		MessageStatus: status,
 	})
 }
 
@@ -111,8 +125,9 @@ func (s *SSESender) SendReject() error {
 // SendCancel sends a cancellation event.
 func (s *SSESender) SendCancel(messageID, title string) error {
 	return s.sendEvent(EventCancel, CompletionPayload{
-		MessageID: messageID,
-		Title:     title,
+		MessageID:     messageID,
+		Title:         title,
+		MessageStatus: MessageStatusInterrupted,
 	})
 }
 

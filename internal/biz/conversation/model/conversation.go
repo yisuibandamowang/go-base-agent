@@ -32,6 +32,12 @@ type Message struct {
 	ThinkingDuration int    `gorm:"column:thinking_duration;type:integer" json:"thinkingDuration"`
 	// Sources 回答来源（JSONB 文档级来源列表，命中知识库的助手消息携带）。
 	Sources string `gorm:"column:sources;type:jsonb" json:"sources"`
+	// RetrievedChunks 推荐追问使用的 grounding 片段（JSONB）。
+	RetrievedChunks string `gorm:"column:retrieved_chunks;type:jsonb" json:"-"`
+	// RecommendedQuestions 推荐追问结果（JSONB）；空数组表示已生成但无结果。
+	RecommendedQuestions string `gorm:"column:recommended_questions;type:jsonb" json:"-"`
+	ReplyToMessageID     string `gorm:"column:reply_to_message_id;type:varchar(20)" json:"replyToMessageId,omitempty"`
+	MessageStatus        string `gorm:"column:message_status;type:varchar(16);default:NORMAL" json:"messageStatus,omitempty"`
 }
 
 func (Message) TableName() string {

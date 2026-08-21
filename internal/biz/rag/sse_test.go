@@ -72,6 +72,16 @@ func TestCompletionPayload_JSON_WithTitle(t *testing.T) {
 	}
 }
 
+func TestSendFinishWithStatusIncludesMessageStatus(t *testing.T) {
+	s, w := newTestSSESender(t)
+	if err := s.SendFinishWithStatus("msg-1", "标题", nil, MessageStatusNormal); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(w.Body.String(), `"messageStatus":"NORMAL"`) {
+		t.Fatalf("expected normal message status, got %s", w.Body.String())
+	}
+}
+
 func TestSendMeta(t *testing.T) {
 	s, w := newTestSSESender(t)
 	err := s.SendMeta("conv-1", "task-2")
