@@ -200,6 +200,35 @@ func TestBackendKeywordSearchChannelSortsResultsAcrossKnowledgeBasesByScore(t *t
 	}
 }
 
+func TestBackendKeywordSearchChannelUsesSharedScopeSupplementBudget(t *testing.T) {
+	backend := &recordingSearchBackend{kbs: []knowledgeModel.KnowledgeBase{
+		{CollectionName: "target"},
+		{CollectionName: "other"},
+	}}
+	channel := NewBackendKeywordSearchChannel(backend, 5)
+	channel.SetKeywordOptions("both", 1)
+	channel.SetSupplementRatio(0.25)
+
+	_, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "会员规则",
+		TopK:             4,
+		RetrievalScope: &RetrievalScope{
+			Directed:              true,
+			TargetCollections:     []string{"target"},
+			SupplementCollections: []string{"other"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := backend.keywordCollections, []string{"target", "other"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("scope collections mismatch: got %v want %v", got, want)
+	}
+	if got, want := backend.keywordTopKs, []int{3, 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("scope quota mismatch: got %v want %v", got, want)
+	}
+}
+
 func TestRetrieverSearchChannelVectorGlobalUsesConfidenceAndTopKMultiplier(t *testing.T) {
 	retriever := &recordingTopKRetriever{}
 	channel := NewRetrieverSearchChannel("VectorGlobalSearch", ChannelVectorGlobal, 10, retriever)
@@ -434,6 +463,44 @@ func TestPgIntentDirectedSearchChannelUsesVectorSearchForIntentCollections(t *te
 	meta := result.Chunks[0].Metadata
 	if meta["kb_name"] != "会员知识库" || meta["collection_name"] != "collection_a" {
 		t.Fatalf("expected knowledge base metadata, got %+v", meta)
+	}
+}
+
+func TestPgIntentDirectedSearchChannelUsesSharedScopeSupplementBudget(t *testing.T) {
+	emb := &recordingEmbeddingService{}
+	searcher := &recordingVectorSearcher{results: []VectorChunk{{
+		ChunkID: "chunk-1",
+		Content: "规则",
+		Score:   0.9,
+	}}}
+	channel := NewPgIntentDirectedVectorSearchChannel(nil, searcher, emb, fakeKnowledgeBaseLister{kbs: []knowledgeModel.KnowledgeBase{
+		{CollectionName: "target", EmbeddingModel: "emb"},
+		{CollectionName: "other", EmbeddingModel: "emb"},
+	}}, 1)
+	channel.SetIntentOptions(0.4, 1)
+	channel.SetSupplementRatio(0.25)
+
+	_, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "会员规则",
+		TopK:             4,
+		Intents: []SubQuestionIntent{{NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "member", Kind: IntentKindKB, CollectionName: "target", TopK: 4},
+			Score: 0.9,
+		}}}},
+		RetrievalScope: &RetrievalScope{
+			Directed:              true,
+			TargetCollections:     []string{"target"},
+			SupplementCollections: []string{"other"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := searcher.collections, []string{"target", "other"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("scope collections mismatch: got %v want %v", got, want)
+	}
+	if got, want := searcher.topKs, []int{4, 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("scope quota mismatch: got %v want %v", got, want)
 	}
 }
 

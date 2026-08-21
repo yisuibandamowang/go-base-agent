@@ -73,6 +73,9 @@ func (c *RetrieverSearchChannel) IsEnabled(sc SearchContext) bool {
 	if c.typ != ChannelVectorGlobal || !c.vectorGlobalConfigured {
 		return true
 	}
+	if sc.RetrievalScope != nil {
+		return !sc.RetrievalScope.Directed
+	}
 	if !c.intentDirectedEnabled {
 		return true
 	}
@@ -92,7 +95,9 @@ func (c *RetrieverSearchChannel) Search(ctx context.Context, sc SearchContext) (
 		chunks []RetrievedChunk
 		err    error
 	)
-	if intentAware, ok := c.retriever.(IntentAwareRetriever); ok {
+	if sc.RetrievalScope != nil && sc.RetrievalScope.Directed {
+		return SearchChannelResult{ChannelType: c.typ, ChannelName: c.name, LatencyMs: time.Since(start).Milliseconds()}, nil
+	} else if intentAware, ok := c.retriever.(IntentAwareRetriever); ok {
 		chunks, err = intentAware.RetrieveWithContext(ctx, sc)
 	} else if globalRetriever, ok := c.retriever.(GlobalRetriever); ok && c.shouldUseGlobalRetriever(globalRetriever) {
 		query := firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion)
@@ -151,10 +156,11 @@ func intentScoreStats(intents []SubQuestionIntent) (float64, int) {
 
 // BackendKeywordSearchChannel keeps keyword recall behind a search backend abstraction.
 type BackendKeywordSearchChannel struct {
-	backend        KnowledgeSearchBackend
-	mode           string
-	topKMultiplier int
-	priority       int
+	backend         KnowledgeSearchBackend
+	mode            string
+	topKMultiplier  int
+	supplementRatio float64
+	priority        int
 }
 
 // PgKeywordSearchChannel is kept as a compatibility alias.
@@ -162,7 +168,7 @@ type PgKeywordSearchChannel = BackendKeywordSearchChannel
 
 // NewBackendKeywordSearchChannel creates a keyword recall channel backed by the unified backend.
 func NewBackendKeywordSearchChannel(backend KnowledgeSearchBackend, priority int) *BackendKeywordSearchChannel {
-	return &BackendKeywordSearchChannel{backend: backend, priority: priority}
+	return &BackendKeywordSearchChannel{backend: backend, priority: priority, supplementRatio: 0.25}
 }
 
 // NewPgKeywordSearchChannel keeps the old constructor for compatibility.
@@ -182,6 +188,16 @@ func (c *BackendKeywordSearchChannel) SetKeywordOptions(mode string, topKMultipl
 	c.topKMultiplier = topKMultiplier
 }
 
+// SetSupplementRatio configures the directed-scope supplement budget.
+func (c *BackendKeywordSearchChannel) SetSupplementRatio(ratio float64) {
+	if c == nil {
+		return
+	}
+	if ratio >= 0 {
+		c.supplementRatio = ratio
+	}
+}
+
 func (c *BackendKeywordSearchChannel) Name() string            { return "KeywordSearch" }
 func (c *BackendKeywordSearchChannel) Priority() int           { return c.priority }
 func (c *BackendKeywordSearchChannel) Type() SearchChannelType { return ChannelKeyword }
@@ -197,24 +213,38 @@ func (c *BackendKeywordSearchChannel) Search(ctx context.Context, sc SearchConte
 		return SearchChannelResult{}, fmt.Errorf("list knowledge bases: %w", err)
 	}
 	topK := c.resolveTopK(sc.TopK)
+	quota := SplitScopeQuota(sc.RetrievalScope, topK, c.supplementRatio)
+	primaryKbs := kbs
+	supplementKbs := []knowledgeModel.KnowledgeBase(nil)
+	if sc.RetrievalScope != nil && sc.RetrievalScope.Directed {
+		primaryKbs = filterKnowledgeBasesByCollections(kbs, sc.RetrievalScope.TargetCollections)
+		supplementKbs = filterKnowledgeBasesByCollections(kbs, sc.RetrievalScope.SupplementCollections)
+	}
 	slog.Debug("keyword search started", "query", query, "mode", c.mode, "kb_count", len(kbs), "topK", topK)
 
 	chunks := make([]RetrievedChunk, 0)
-	for _, kb := range kbs {
-		result, err := c.backend.SearchKeywordChunks(ctx, kb, query, topK)
-		if err != nil {
-			slog.Warn("keyword search failed", "kb", kb.Name, "collection", kb.CollectionName, "err", err)
-			continue
+	searchKbs := func(targets []knowledgeModel.KnowledgeBase, limit int) {
+		if limit <= 0 {
+			return
 		}
-		for i := range result {
-			if result[i].Metadata == nil {
-				result[i].Metadata = make(map[string]string)
+		for _, kb := range targets {
+			result, err := c.backend.SearchKeywordChunks(ctx, kb, query, limit)
+			if err != nil {
+				slog.Warn("keyword search failed", "kb", kb.Name, "collection", kb.CollectionName, "err", err)
+				continue
 			}
-			result[i].Metadata["retrieval_channel"] = "keyword"
-			result[i].Metadata["keyword_score"] = fmt.Sprintf("%.6f", result[i].Score)
+			for i := range result {
+				if result[i].Metadata == nil {
+					result[i].Metadata = make(map[string]string)
+				}
+				result[i].Metadata["retrieval_channel"] = "keyword"
+				result[i].Metadata["keyword_score"] = fmt.Sprintf("%.6f", result[i].Score)
+			}
+			chunks = append(chunks, result...)
 		}
-		chunks = append(chunks, result...)
 	}
+	searchKbs(primaryKbs, quota.Primary)
+	searchKbs(supplementKbs, quota.Supplement)
 	sort.SliceStable(chunks, func(i, j int) bool {
 		return chunks[i].Score > chunks[j].Score
 	})
@@ -233,6 +263,9 @@ func (c *BackendKeywordSearchChannel) resolveKnowledgeBases(ctx context.Context,
 	kbs, err := c.backend.ListKnowledgeBases(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if sc.RetrievalScope != nil {
+		return kbs, nil
 	}
 
 	mode := c.mode
@@ -267,12 +300,13 @@ func (c *BackendKeywordSearchChannel) resolveTopK(topK int) int {
 
 // BackendIntentDirectedSearchChannel keeps intent recall behind a search backend abstraction.
 type BackendIntentDirectedSearchChannel struct {
-	backend      KnowledgeSearchBackend
-	vectorSearch VectorSearchService
-	emb          embedding.Service
-	minScore     float64
-	topKMultiple int
-	priority     int
+	backend         KnowledgeSearchBackend
+	vectorSearch    VectorSearchService
+	emb             embedding.Service
+	minScore        float64
+	topKMultiple    int
+	supplementRatio float64
+	priority        int
 }
 
 // PgIntentDirectedSearchChannel is kept as a compatibility alias.
@@ -280,7 +314,7 @@ type PgIntentDirectedSearchChannel = BackendIntentDirectedSearchChannel
 
 // NewBackendIntentDirectedSearchChannel creates an intent-directed channel backed by a search backend.
 func NewBackendIntentDirectedSearchChannel(backend KnowledgeSearchBackend, vectorSearch VectorSearchService, emb embedding.Service, priority int) *BackendIntentDirectedSearchChannel {
-	return &BackendIntentDirectedSearchChannel{backend: backend, vectorSearch: vectorSearch, emb: emb, priority: priority}
+	return &BackendIntentDirectedSearchChannel{backend: backend, vectorSearch: vectorSearch, emb: emb, priority: priority, supplementRatio: 0.25}
 }
 
 // NewPgIntentDirectedSearchChannel keeps the old constructor for compatibility.
@@ -305,12 +339,25 @@ func (c *BackendIntentDirectedSearchChannel) SetIntentOptions(minScore float64, 
 	c.topKMultiple = topKMultiplier
 }
 
+// SetSupplementRatio configures the directed-scope supplement budget.
+func (c *BackendIntentDirectedSearchChannel) SetSupplementRatio(ratio float64) {
+	if c == nil {
+		return
+	}
+	if ratio >= 0 {
+		c.supplementRatio = ratio
+	}
+}
+
 func (c *BackendIntentDirectedSearchChannel) Name() string            { return "IntentDirectedSearch" }
 func (c *BackendIntentDirectedSearchChannel) Priority() int           { return c.priority }
 func (c *BackendIntentDirectedSearchChannel) Type() SearchChannelType { return ChannelIntentDirected }
 func (c *BackendIntentDirectedSearchChannel) IsEnabled(sc SearchContext) bool {
 	if c == nil || c.backend == nil {
 		return false
+	}
+	if sc.RetrievalScope != nil {
+		return sc.RetrievalScope.Directed && len(sc.RetrievalScope.TargetCollections) > 0
 	}
 	if len(sc.Intents) > 0 {
 		return len(c.intentDirectedTargets(sc)) > 0
@@ -322,7 +369,16 @@ func (c *BackendIntentDirectedSearchChannel) Search(ctx context.Context, sc Sear
 	start := time.Now()
 	query := strings.TrimSpace(firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion))
 	targets := c.intentDirectedTargets(sc)
+	if sc.RetrievalScope != nil {
+		if !sc.RetrievalScope.Directed {
+			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+		}
+		targets = filterIntentTargetsByCollections(targets, sc.RetrievalScope.TargetCollections)
+	}
 	if len(targets) == 0 {
+		if sc.RetrievalScope != nil {
+			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+		}
 		if len(sc.Intents) > 0 {
 			collections, err := c.matchIntentCollections(ctx, query)
 			if err != nil || len(collections) == 0 {
@@ -336,10 +392,40 @@ func (c *BackendIntentDirectedSearchChannel) Search(ctx context.Context, sc Sear
 	}
 	if c.canVectorSearch() && len(targets) > 0 {
 		if chunks, searched := c.searchIntentVectors(ctx, query, targets); searched {
+			if sc.RetrievalScope != nil && sc.RetrievalScope.Directed && len(sc.RetrievalScope.SupplementCollections) > 0 {
+				capacity := 0
+				for _, target := range targets {
+					capacity += target.topK
+				}
+				quota := SplitScopeQuota(sc.RetrievalScope, capacity, c.supplementRatio)
+				chunks = capScopeChunks(chunks, quota.Primary)
+				supplementTargets := make([]intentDirectedTarget, 0, len(sc.RetrievalScope.SupplementCollections))
+				for _, collection := range sc.RetrievalScope.SupplementCollections {
+					supplementTargets = append(supplementTargets, intentDirectedTarget{collectionName: collection, topK: quota.Supplement})
+				}
+				if supplement, supplementSearched := c.searchIntentVectors(ctx, query, supplementTargets); supplementSearched {
+					chunks = append(chunks, capScopeChunks(supplement, quota.Supplement)...)
+					sortRetrievedChunksByScore(chunks)
+				}
+			}
 			return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), Chunks: chunks, LatencyMs: time.Since(start).Milliseconds()}, nil
 		}
 	}
 	return SearchChannelResult{ChannelType: ChannelIntentDirected, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+}
+
+func filterIntentTargetsByCollections(targets []intentDirectedTarget, collections []string) []intentDirectedTarget {
+	allowed := make(map[string]struct{}, len(collections))
+	for _, collection := range collections {
+		allowed[strings.TrimSpace(collection)] = struct{}{}
+	}
+	filtered := make([]intentDirectedTarget, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := allowed[strings.TrimSpace(target.collectionName)]; ok {
+			filtered = append(filtered, target)
+		}
+	}
+	return filtered
 }
 
 func (c *BackendIntentDirectedSearchChannel) canVectorSearch() bool {

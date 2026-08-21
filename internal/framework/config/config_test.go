@@ -447,6 +447,9 @@ func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
 	if search.DefaultTopK != 10 {
 		t.Fatalf("unexpected default topK: %d", search.DefaultTopK)
 	}
+	if search.SupplementRatio != 0.25 {
+		t.Fatalf("unexpected supplement ratio: %v", search.SupplementRatio)
+	}
 	if search.Channels.VectorGlobal.TopKMultiplier != 3 ||
 		search.Channels.VectorGlobal.CandidateBudget != 100 ||
 		search.Channels.VectorGlobal.ConfidenceThreshold != 0.6 ||

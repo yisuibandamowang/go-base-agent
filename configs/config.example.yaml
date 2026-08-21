@@ -131,6 +131,7 @@ rag:
           - ticket
 
   search:
+    supplement-ratio: 0.25
     timeout-ms: 15000
     channels:
       vector-global:

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -431,6 +430,7 @@ type GraphSearchChannel struct {
 	priority                 int
 	scopeConfidenceThreshold float64
 	scopeMinIntentScore      float64
+	supplementRatio          float64
 }
 
 // NewGraphSearchChannel creates a graph search channel.
@@ -449,11 +449,12 @@ func NewGraphSearchChannel(backend KnowledgeSearchBackend, client GraphQueryClie
 		priority:                 priority,
 		scopeConfidenceThreshold: 0.6,
 		scopeMinIntentScore:      0.4,
+		supplementRatio:          0.25,
 	}
 }
 
 // SetScopeOptions configures the shared confidence thresholds used for graph retrieval scope.
-func (c *GraphSearchChannel) SetScopeOptions(confidenceThreshold, minIntentScore float64) {
+func (c *GraphSearchChannel) SetScopeOptions(confidenceThreshold, minIntentScore float64, supplementRatios ...float64) {
 	if c == nil {
 		return
 	}
@@ -462,6 +463,9 @@ func (c *GraphSearchChannel) SetScopeOptions(confidenceThreshold, minIntentScore
 	}
 	if minIntentScore >= 0 {
 		c.scopeMinIntentScore = minIntentScore
+	}
+	if len(supplementRatios) > 0 && supplementRatios[0] >= 0 {
+		c.supplementRatio = supplementRatios[0]
 	}
 }
 
@@ -477,11 +481,17 @@ func (c *GraphSearchChannel) Search(ctx context.Context, sc SearchContext) (Sear
 	if c == nil || c.backend == nil || c.client == nil {
 		return SearchChannelResult{ChannelType: ChannelGraph, ChannelName: "GraphSearch"}, nil
 	}
-	kbs, err := c.backend.ListKnowledgeBases(ctx)
-	if err != nil {
-		return SearchChannelResult{ChannelType: ChannelGraph, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+	activeCollections := []string(nil)
+	if sc.RetrievalScope != nil {
+		activeCollections = append(activeCollections, sc.RetrievalScope.TargetCollections...)
+		activeCollections = append(activeCollections, sc.RetrievalScope.SupplementCollections...)
+	} else {
+		kbs, err := c.backend.ListKnowledgeBases(ctx)
+		if err != nil {
+			return SearchChannelResult{ChannelType: ChannelGraph, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
+		}
+		activeCollections = activeKnowledgeCollections(kbs)
 	}
-	activeCollections := activeKnowledgeCollections(kbs)
 	if len(activeCollections) == 0 {
 		return SearchChannelResult{ChannelType: ChannelGraph, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
 	}
@@ -496,9 +506,13 @@ func (c *GraphSearchChannel) Search(ctx context.Context, sc SearchContext) (Sear
 	if directed {
 		queryTopK = topK * 3
 	}
-	evidence := c.client.RetrieveByScope(ctx, firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion), c.queryMode, queryTopK, targetCollections)
+	queryCollections := targetCollections
+	if !directed && sc.RetrievalScope != nil {
+		queryCollections = nil
+	}
+	evidence := c.client.RetrieveByScope(ctx, firstSearchText(sc.RewrittenQuestion, sc.OriginalQuestion), c.queryMode, queryTopK, queryCollections)
 
-	primaryQuota, supplementQuota := graphScopeQuotas(topK, directed)
+	primaryQuota, supplementQuota := graphScopeQuotas(topK, directed, c.supplementRatio)
 	chunks := capGraphChunks(evidence.Matched, primaryQuota)
 	if directed {
 		chunks = mergeGraphChunks(chunks, capGraphChunks(evidence.Unmatched, supplementQuota))
@@ -517,6 +531,9 @@ func (c *GraphSearchChannel) Search(ctx context.Context, sc SearchContext) (Sear
 func (c *GraphSearchChannel) resolveScope(sc SearchContext, activeCollections []string) (bool, []string) {
 	if c == nil || len(activeCollections) == 0 {
 		return false, activeCollections
+	}
+	if sc.RetrievalScope != nil {
+		return sc.RetrievalScope.Directed, append([]string(nil), sc.RetrievalScope.TargetCollections...)
 	}
 	maxScore := 0.0
 	bound := make(map[string]struct{})
@@ -570,22 +587,19 @@ func activeKnowledgeCollections(kbs []knowledgeModel.KnowledgeBase) []string {
 	return collections
 }
 
-func graphScopeQuotas(topK int, directed bool) (int, int) {
+func graphScopeQuotas(topK int, directed bool, ratios ...float64) (int, int) {
 	if topK <= 0 {
 		return 0, 0
 	}
 	if !directed {
 		return topK, 0
 	}
-	supplement := int(math.Ceil(float64(topK) * 0.25))
-	if supplement > topK {
-		supplement = topK
+	ratio := 0.25
+	if len(ratios) > 0 {
+		ratio = ratios[0]
 	}
-	primary := topK - supplement
-	if primary < 0 {
-		primary = 0
-	}
-	return primary, supplement
+	quota := SplitScopeQuota(&RetrievalScope{Directed: true, SupplementCollections: []string{"supplement"}}, topK, ratio)
+	return quota.Primary, quota.Supplement
 }
 
 func capGraphChunks(chunks []RetrievedChunk, limit int) []RetrievedChunk {

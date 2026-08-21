@@ -356,6 +356,7 @@ func main() {
 			cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
 			cfg.RAG.Search.Channels.IntentDirected.TopKMultiplier,
 		)
+		intentChannel.SetSupplementRatio(cfg.RAG.Search.SupplementRatio)
 		searchChannels = append(searchChannels, intentChannel)
 	}
 	if keywordSearchChannelEnabled(cfg.RAG.Search.Channels.Keyword) {
@@ -364,6 +365,7 @@ func main() {
 			cfg.RAG.Search.Channels.Keyword.Mode,
 			cfg.RAG.Search.Channels.Keyword.TopKMultiplier,
 		)
+		keywordChannel.SetSupplementRatio(cfg.RAG.Search.SupplementRatio)
 		searchChannels = append(searchChannels, keywordChannel)
 	}
 	if strings.EqualFold(cfg.RAG.Graph.Type, "lightrag") && cfg.RAG.Search.Channels.Graph.IsEnabledByDefaultWith(false) {
@@ -371,6 +373,7 @@ func main() {
 		graphChannel.SetScopeOptions(
 			cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
 			cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
+			cfg.RAG.Search.SupplementRatio,
 		)
 		searchChannels = append(searchChannels, graphChannel)
 	}
@@ -403,6 +406,11 @@ func main() {
 		))
 	}
 	multiEngine := rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors)
+	multiEngine.SetRetrievalScopeResolver(rag.NewRetrievalScopeResolver(
+		searchBackend,
+		cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
+		cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
+	))
 	multiEngine.SetRetrievalScopeOptions(
 		cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
 		cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -32,6 +33,7 @@ type SearchContext struct {
 	Intents           []SubQuestionIntent
 	TopK              int
 	KnowledgeBaseID   string
+	RetrievalScope    *RetrievalScope
 }
 
 // SearchChannelResult contains the results from a single channel.
@@ -68,6 +70,7 @@ type MultiChannelRetrievalEngine struct {
 	channelTimeout           time.Duration
 	scopeConfidenceThreshold float64
 	scopeMinIntentScore      float64
+	scopeResolver            *RetrievalScopeResolver
 }
 
 // MultiChannelRetriever adapts MultiChannelRetrievalEngine to the Retriever interface.
@@ -137,6 +140,14 @@ func (e *MultiChannelRetrievalEngine) SetRetrievalScopeOptions(confidenceThresho
 	}
 }
 
+// SetRetrievalScopeResolver configures the shared request-level scope resolver.
+func (e *MultiChannelRetrievalEngine) SetRetrievalScopeResolver(resolver *RetrievalScopeResolver) {
+	if e == nil {
+		return
+	}
+	e.scopeResolver = resolver
+}
+
 // SetChannelTimeout configures per-channel timeout degradation.
 func (e *MultiChannelRetrievalEngine) SetChannelTimeout(timeout time.Duration) {
 	if e == nil {
@@ -150,6 +161,13 @@ func (e *MultiChannelRetrievalEngine) SetChannelTimeout(timeout time.Duration) {
 
 // Retrieve runs enabled channels in parallel, then applies post-processors.
 func (e *MultiChannelRetrievalEngine) Retrieve(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	if e.scopeResolver != nil && sc.RetrievalScope == nil {
+		scope, err := e.scopeResolver.Resolve(ctx, sc.Intents)
+		if err != nil {
+			return nil, fmt.Errorf("resolve retrieval scope: %w", err)
+		}
+		sc.RetrievalScope = &scope
+	}
 	type result struct {
 		result SearchChannelResult
 		err    error
@@ -244,6 +262,13 @@ func (e *MultiChannelRetrievalEngine) RetrieveWithResult(ctx context.Context, sc
 	if e == nil {
 		return RetrievalResult{}, nil
 	}
+	if e.scopeResolver != nil && sc.RetrievalScope == nil {
+		scope, err := e.scopeResolver.Resolve(ctx, sc.Intents)
+		if err != nil {
+			return RetrievalResult{}, fmt.Errorf("resolve retrieval scope: %w", err)
+		}
+		sc.RetrievalScope = &scope
+	}
 	chunks, err := e.Retrieve(ctx, sc)
 	if err != nil {
 		return RetrievalResult{Chunks: chunks}, err
@@ -268,6 +293,17 @@ func (e *MultiChannelRetrievalEngine) hasDirectedChannel(sc SearchContext) bool 
 
 func (e *MultiChannelRetrievalEngine) resolveDirectedIntentIDs(sc SearchContext) map[string]struct{} {
 	ids := make(map[string]struct{})
+	if sc.RetrievalScope != nil {
+		if !sc.RetrievalScope.Directed {
+			return ids
+		}
+		for _, nodeScore := range sc.RetrievalScope.Intents {
+			if id := strings.TrimSpace(nodeScore.Node.ID); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		return ids
+	}
 	if e == nil || len(sc.Intents) == 0 {
 		return ids
 	}

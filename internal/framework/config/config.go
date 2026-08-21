@@ -313,9 +313,10 @@ type RAGMCPServerConfig struct {
 }
 
 type RAGSearchConfig struct {
-	DefaultTopK int                     `mapstructure:"default-top-k"`
-	Channels    RAGSearchChannelsConfig `mapstructure:"channels"`
-	Fusion      RAGSearchFusionConfig   `mapstructure:"fusion"`
+	DefaultTopK     int                     `mapstructure:"default-top-k"`
+	SupplementRatio float64                 `mapstructure:"supplement-ratio"`
+	Channels        RAGSearchChannelsConfig `mapstructure:"channels"`
+	Fusion          RAGSearchFusionConfig   `mapstructure:"fusion"`
 }
 
 type RAGSearchChannelsConfig struct {
@@ -669,6 +670,9 @@ func applyDefaults(cfg *Config) {
 	search := &cfg.RAG.Search
 	if search.DefaultTopK <= 0 {
 		search.DefaultTopK = 10
+	}
+	if search.SupplementRatio <= 0 {
+		search.SupplementRatio = 0.25
 	}
 	if search.Channels.TimeoutMs <= 0 {
 		search.Channels.TimeoutMs = 15000
