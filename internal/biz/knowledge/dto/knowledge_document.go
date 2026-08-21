@@ -37,6 +37,35 @@ type UpdateDocumentReq struct {
 	PipelineID      string  `json:"pipelineId"`
 }
 
+// IngestionSpecSchemaResp 是文档级摄取配置的表单 schema。
+type IngestionSpecSchemaResp struct {
+	ParseProfileLabel      string                       `json:"parseProfileLabel"`
+	ParseProfiles          []IngestionSpecProfileOption `json:"parseProfiles"`
+	ParseProfileExtensions []string                     `json:"parseProfileExtensions"`
+	BudgetFields           []IngestionSpecBudgetField   `json:"budgetFields"`
+	WholeDocumentSentinel  int                          `json:"wholeDocumentSentinel"`
+}
+
+// IngestionSpecProfileOption 是文档解析档位选项。
+type IngestionSpecProfileOption struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+	Hint  string `json:"hint"`
+}
+
+// IngestionSpecBudgetField 是分块预算字段定义。
+type IngestionSpecBudgetField struct {
+	Key            string `json:"key"`
+	Label          string `json:"label"`
+	DefaultValue   int    `json:"defaultValue"`
+	Min            int    `json:"min"`
+	Max            int    `json:"max"`
+	RecommendedMin int    `json:"recommendedMin"`
+	RecommendedMax int    `json:"recommendedMax"`
+	Hint           string `json:"hint"`
+	Detail         string `json:"detail"`
+}
+
 // DocumentResp 文档响应。
 type DocumentResp struct {
 	ID                 string `json:"id"`

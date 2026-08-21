@@ -593,6 +593,7 @@ func main() {
 		kb := api.Group("/knowledge-base")
 		{
 			kb.GET("/chunk-strategies", kbHandler.ChunkStrategies)
+			kb.GET("/docs/ingestion-spec-schema", docHandler.IngestionSpecSchema)
 
 			kb.POST("/:id/docs/upload", docHandler.Upload)
 			kb.GET("/:id/docs/internal-url-import-tasks/:taskId", docHandler.GetInternalURLImportTask)

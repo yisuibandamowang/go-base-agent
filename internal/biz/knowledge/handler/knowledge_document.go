@@ -58,6 +58,46 @@ func NewDocumentHandler(svc *service.DocumentService, fs *FileStore) *DocumentHa
 	return &DocumentHandler{svc: svc, fileStore: fs}
 }
 
+// IngestionSpecSchema 返回文档级摄取配置的表单 schema。
+func (h *DocumentHandler) IngestionSpecSchema(c *gin.Context) {
+	response := dto.IngestionSpecSchemaResp{
+		ParseProfileLabel: "表格结构",
+		ParseProfiles: []dto.IngestionSpecProfileOption{
+			{Value: "fast", Label: "规整表格", Hint: "一行一条记录、表头只有一层，秒级完成"},
+			{Value: "fidelity", Label: "复杂表格", Hint: "有合并单元格、多层表头或跨页表格；需要数十秒，走外部解析服务"},
+		},
+		ParseProfileExtensions: []string{"xls", "xlsx"},
+		BudgetFields: []dto.IngestionSpecBudgetField{
+			{
+				Key: "maxChars", Label: "块大小", DefaultValue: 1024, Min: 1, Max: 8192,
+				RecommendedMin: 512, RecommendedMax: 8192,
+				Hint:   "一段目标放多少字",
+				Detail: "这是目标，不是硬上限。为保住整章或整张表不被切开，一段最多能撑到「块大小 × 结构容忍倍数」。调小则检索更精准，但每段带的上下文更少",
+			},
+			{
+				Key: "overlapChars", Label: "块重叠", DefaultValue: 128, Min: 0, Max: 8191,
+				RecommendedMin: 64, RecommendedMax: 1024,
+				Hint:   "相邻两段重复多少字",
+				Detail: "只在单个段落超过块大小、必须拦腰切开时才生效，多数段落到不了这一步。它同时是切口回退找句号的最大距离，填太小会切在句子中间。默认取块大小的 1/8，且必须小于块大小",
+			},
+			{
+				Key: "rowsPerChunk", Label: "表格每块行数", DefaultValue: 50, Min: 1, Max: 1000,
+				RecommendedMin: 20, RecommendedMax: 50,
+				Hint:   "表格每段放多少数据行",
+				Detail: "列多、每格字数长的表要调小",
+			},
+			{
+				Key: "toleranceFactor", Label: "结构容忍倍数", DefaultValue: 3, Min: 1, Max: 8,
+				RecommendedMin: 2, RecommendedMax: 4,
+				Hint:   "一段最多可超出块大小的倍数",
+				Detail: "为保住整章、整张表、整个代码块不被切开，允许一段撑到块大小的几倍。填 1 就是严格按块大小切，章节会被切碎；调大则块更完整，但检索更粗、单次问答塞给模型的上下文也更多",
+			},
+		},
+		WholeDocumentSentinel: -1,
+	}
+	c.JSON(http.StatusOK, convention.Success(response))
+}
+
 // SetUploadLimiter 为文档上传接口设置并发限流器。
 func (h *DocumentHandler) SetUploadLimiter(limiter uploadLimiter, maxWait time.Duration) {
 	h.uploadLimiter = limiter

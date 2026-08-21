@@ -279,7 +279,7 @@ cmd/mcp-server/          # MCP Server
 | 鉴权 | `/api/ragent/auth/login`、`/api/ragent/auth/logout`、`/api/ragent/auth/current-user` |
 | 用户 | `/api/ragent/users`、`/api/ragent/user/password` |
 | 会话 | `/api/ragent/conversations`、`/api/ragent/conversations/:conversationId/messages` |
-| 知识库 | `/api/ragent/knowledge-base`、`/api/ragent/knowledge-base/:id/docs/upload`（支持本地文件、远程 URL、内部 URL） |
+| 知识库 | `/api/ragent/knowledge-base`、`/api/ragent/knowledge-base/docs/ingestion-spec-schema`、`/api/ragent/knowledge-base/:id/docs/upload`（支持本地文件、远程 URL、内部 URL） |
 | 意图树 | `/api/ragent/intent-tree/*`、`/api/ragent/mappings*` |
 | 智能体 | `/api/ragent/agents*`、`/api/ragent/admin/agents*` |
 | 管理后台 | `/api/ragent/admin/*`、`/api/ragent/biz-change-logs*` |
