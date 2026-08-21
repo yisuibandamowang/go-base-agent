@@ -425,10 +425,12 @@ func graphReferenceMatches(filePath string, filter map[string]struct{}) bool {
 
 // GraphSearchChannel queries LightRAG and feeds graph evidence into the multi-channel retriever.
 type GraphSearchChannel struct {
-	backend   KnowledgeSearchBackend
-	client    GraphQueryClient
-	queryMode string
-	priority  int
+	backend                  KnowledgeSearchBackend
+	client                   GraphQueryClient
+	queryMode                string
+	priority                 int
+	scopeConfidenceThreshold float64
+	scopeMinIntentScore      float64
 }
 
 // NewGraphSearchChannel creates a graph search channel.
@@ -441,10 +443,25 @@ func NewGraphSearchChannel(backend KnowledgeSearchBackend, client GraphQueryClie
 		queryMode = "hybrid"
 	}
 	return &GraphSearchChannel{
-		backend:   backend,
-		client:    client,
-		queryMode: queryMode,
-		priority:  priority,
+		backend:                  backend,
+		client:                   client,
+		queryMode:                queryMode,
+		priority:                 priority,
+		scopeConfidenceThreshold: 0.6,
+		scopeMinIntentScore:      0.4,
+	}
+}
+
+// SetScopeOptions configures the shared confidence thresholds used for graph retrieval scope.
+func (c *GraphSearchChannel) SetScopeOptions(confidenceThreshold, minIntentScore float64) {
+	if c == nil {
+		return
+	}
+	if confidenceThreshold > 0 {
+		c.scopeConfidenceThreshold = confidenceThreshold
+	}
+	if minIntentScore >= 0 {
+		c.scopeMinIntentScore = minIntentScore
 	}
 }
 
@@ -469,12 +486,7 @@ func (c *GraphSearchChannel) Search(ctx context.Context, sc SearchContext) (Sear
 		return SearchChannelResult{ChannelType: ChannelGraph, ChannelName: c.Name(), LatencyMs: time.Since(start).Milliseconds()}, nil
 	}
 
-	intentCollections := keywordIntentCollections(sc)
-	directed := len(intentCollections) > 0
-	targetCollections := intentCollections
-	if len(targetCollections) == 0 {
-		targetCollections = activeCollections
-	}
+	directed, targetCollections := c.resolveScope(sc, activeCollections)
 
 	topK := sc.TopK
 	if topK <= 0 {
@@ -500,6 +512,45 @@ func (c *GraphSearchChannel) Search(ctx context.Context, sc SearchContext) (Sear
 		Chunks:      chunks,
 		LatencyMs:   time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func (c *GraphSearchChannel) resolveScope(sc SearchContext, activeCollections []string) (bool, []string) {
+	if c == nil || len(activeCollections) == 0 {
+		return false, activeCollections
+	}
+	maxScore := 0.0
+	bound := make(map[string]struct{})
+	for _, subIntent := range sc.Intents {
+		for _, nodeScore := range subIntent.NodeScores {
+			if nodeScore.Node.Kind != IntentKindKB || nodeScore.Score < c.scopeMinIntentScore {
+				continue
+			}
+			collections := nodeScore.Node.EffectiveCollectionNames()
+			if len(collections) == 0 {
+				continue
+			}
+			if nodeScore.Score > maxScore {
+				maxScore = nodeScore.Score
+			}
+			for _, collection := range collections {
+				bound[collection] = struct{}{}
+			}
+		}
+	}
+	if maxScore < c.scopeConfidenceThreshold {
+		return false, activeCollections
+	}
+
+	targets := make([]string, 0, len(bound))
+	for _, collection := range activeCollections {
+		if _, ok := bound[collection]; ok {
+			targets = append(targets, collection)
+		}
+	}
+	if len(targets) == 0 {
+		return false, activeCollections
+	}
+	return true, targets
 }
 
 func activeKnowledgeCollections(kbs []knowledgeModel.KnowledgeBase) []string {

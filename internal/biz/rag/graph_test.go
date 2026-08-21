@@ -186,6 +186,74 @@ func TestGraphSearchChannelBoostsTopKAndUsesCollections(t *testing.T) {
 	}
 }
 
+func TestGraphSearchChannelUsesGlobalScopeForLowConfidenceIntent(t *testing.T) {
+	backend := &recordingGraphBackend{
+		kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "会员知识库", CollectionName: "kb"},
+			{Name: "支付知识库", CollectionName: "kb_pay"},
+		},
+	}
+	searcher := &recordingGraphSearcher{evidence: GraphEvidence{
+		Matched:   []RetrievedChunk{{ID: "r1", Text: "全局证据", Score: 1}},
+		Unmatched: []RetrievedChunk{{ID: "r0", Text: "无主证据", Score: 0.5}},
+	}}
+	channel := NewGraphSearchChannel(backend, searcher, "hybrid", 1)
+	channel.SetScopeOptions(0.6, 0.4)
+
+	result, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "报销流程",
+		TopK:             10,
+		Intents: []SubQuestionIntent{{NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "kb", CollectionName: "kb", Kind: IntentKindKB},
+			Score: 0.35,
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := searcher.topKs, []int{10}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("global scope should not boost topK: got %v want %v", got, want)
+	}
+	if got, want := searcher.collections, [][]string{{"kb", "kb_pay"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("global scope should query all active collections: got %v want %v", got, want)
+	}
+	if got, want := idsOf(result.Chunks), []string{"r1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("global scope should drop unmatched evidence: got %v want %v", got, want)
+	}
+}
+
+func TestGraphSearchChannelFallsBackWhenDirectedCollectionIsStale(t *testing.T) {
+	backend := &recordingGraphBackend{
+		kbs: []knowledgeModel.KnowledgeBase{
+			{Name: "会员知识库", CollectionName: "kb"},
+			{Name: "支付知识库", CollectionName: "kb_pay"},
+		},
+	}
+	searcher := &recordingGraphSearcher{evidence: GraphEvidence{
+		Matched: []RetrievedChunk{{ID: "r1", Text: "全局证据", Score: 1}},
+	}}
+	channel := NewGraphSearchChannel(backend, searcher, "hybrid", 1)
+	channel.SetScopeOptions(0.6, 0.4)
+
+	_, err := channel.Search(context.Background(), SearchContext{
+		OriginalQuestion: "报销流程",
+		TopK:             10,
+		Intents: []SubQuestionIntent{{NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "deleted-intent", CollectionName: "deleted", Kind: IntentKindKB},
+			Score: 0.95,
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if got, want := searcher.topKs, []int{10}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stale directed collection should fall back without boost: got %v want %v", got, want)
+	}
+	if got, want := searcher.collections, [][]string{{"kb", "kb_pay"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stale directed collection should fall back to active collections: got %v want %v", got, want)
+	}
+}
+
 func (b *recordingGraphBackend) ListKnowledgeBases(context.Context) ([]knowledgeModel.KnowledgeBase, error) {
 	return b.kbs, nil
 }

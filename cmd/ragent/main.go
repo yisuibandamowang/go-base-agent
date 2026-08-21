@@ -367,7 +367,12 @@ func main() {
 		searchChannels = append(searchChannels, keywordChannel)
 	}
 	if strings.EqualFold(cfg.RAG.Graph.Type, "lightrag") && cfg.RAG.Search.Channels.Graph.IsEnabledByDefaultWith(false) {
-		searchChannels = append(searchChannels, rag.NewGraphSearchChannel(searchBackend, graphClient, cfg.RAG.Graph.Lightrag.QueryMode, 8))
+		graphChannel := rag.NewGraphSearchChannel(searchBackend, graphClient, cfg.RAG.Graph.Lightrag.QueryMode, 8)
+		graphChannel.SetScopeOptions(
+			cfg.RAG.Search.Channels.VectorGlobal.ConfidenceThreshold,
+			cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
+		)
+		searchChannels = append(searchChannels, graphChannel)
 	}
 	if cfg.RAG.Search.Channels.VectorGlobal.IsEnabledByDefault() {
 		vectorGlobalChannel := rag.NewRetrieverSearchChannel("VectorGlobalSearch", rag.ChannelVectorGlobal, 10, vectorRetriever)
