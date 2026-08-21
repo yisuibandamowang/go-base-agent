@@ -85,12 +85,24 @@ func (h *PipelineHandler) Delete(c *gin.Context) {
 
 // TaskHandler 是摄取任务 HTTP 处理层。
 type TaskHandler struct {
-	svc *service.TaskService
+	svc                 *service.TaskService
+	maxFileSizeBytes    int64
+	maxRequestSizeBytes int64
 }
 
 // NewTaskHandler 创建 TaskHandler。
 func NewTaskHandler(svc *service.TaskService) *TaskHandler {
-	return &TaskHandler{svc: svc}
+	return &TaskHandler{svc: svc, maxFileSizeBytes: 50 << 20, maxRequestSizeBytes: 100 << 20}
+}
+
+// SetUploadLimits 设置摄取任务上传上限。
+func (h *TaskHandler) SetUploadLimits(maxFileSizeBytes, maxRequestSizeBytes int64) {
+	if maxFileSizeBytes > 0 {
+		h.maxFileSizeBytes = maxFileSizeBytes
+	}
+	if maxRequestSizeBytes > 0 {
+		h.maxRequestSizeBytes = maxRequestSizeBytes
+	}
 }
 
 // Create POST /api/ragent/ingestion/tasks
@@ -110,6 +122,9 @@ func (h *TaskHandler) Create(c *gin.Context) {
 
 // Upload POST /api/ragent/ingestion/tasks/upload
 func (h *TaskHandler) Upload(c *gin.Context) {
+	if h.maxRequestSizeBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxRequestSizeBytes)
+	}
 	pipelineID := strings.TrimSpace(c.PostForm("pipelineId"))
 	if pipelineID == "" {
 		pipelineID = strings.TrimSpace(c.Query("pipelineId"))
@@ -117,6 +132,10 @@ func (h *TaskHandler) Upload(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", "读取上传文件失败: "+err.Error()))
+		return
+	}
+	if h.maxFileSizeBytes > 0 && file.Size > h.maxFileSizeBytes {
+		c.JSON(http.StatusOK, convention.Failure("A000001", "上传文件大小超过限制"))
 		return
 	}
 	resp, err := h.svc.Upload(c.Request.Context(), pipelineID, file, userID(c))

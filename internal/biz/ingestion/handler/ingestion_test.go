@@ -142,6 +142,34 @@ func TestIngestionHandlers_PipelineAndTaskFlow(t *testing.T) {
 			t.Fatalf("unexpected upload response: %s", resp.Body.String())
 		}
 	})
+
+	t.Run("upload rejects file above configured limit", func(t *testing.T) {
+		taskHandler.SetUploadLimits(4, 1024)
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		part, err := writer.CreateFormFile("file", "large.md")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write([]byte("12345")); err != nil {
+			t.Fatalf("write form file: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/ragent/ingestion/tasks/upload", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		resp := httptest.NewRecorder()
+		r.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+		}
+		if !bytes.Contains(resp.Body.Bytes(), []byte("上传文件大小超过限制")) {
+			t.Fatalf("expected file size rejection, got %s", resp.Body.String())
+		}
+	})
 }
 
 type fakeTaskExecutor struct {

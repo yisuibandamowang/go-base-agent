@@ -42,6 +42,10 @@ rag:
     # type=lightrag 时会启用图谱检索通道，并在向量写入/删除后 best-effort 同步 LightRAG 图谱
     embedding-model: qwen-emb-8b
 
+  upload:
+    max-file-size-bytes: 52428800
+    max-request-size-bytes: 104857600
+
   default:
     collection-name: rag_default_store
     dimension: 1536

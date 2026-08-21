@@ -175,6 +175,7 @@ func main() {
 	}
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
 	docHandler.SetUploadLimiter(documentUploadLimiter, documentUploadMaxWait)
+	docHandler.SetUploadLimits(cfg.RAG.Upload.MaxFileSizeBytes, cfg.RAG.Upload.MaxRequestSizeBytes)
 	if err := docHandler.SetInternalURLImportTaskStore(gormDB, time.Duration(cfg.RAG.Knowledge.Geelib.ImportTaskTimeoutMinutes)*time.Minute); err != nil {
 		slog.Warn("failed to initialize internal url import task store", "err", err)
 	}
@@ -199,8 +200,9 @@ func main() {
 		docSvc,
 		cfg.RAG.Knowledge.Schedule,
 	)
-	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "url", MaxBytes: 50 << 20}))
-	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "http", MaxBytes: 50 << 20}))
+	documentScheduleMaxBytes := cfg.RAG.Upload.MaxFileSizeBytes
+	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "url", MaxBytes: documentScheduleMaxBytes}))
+	documentScheduleSvc.RegisterSource(crawler.NewHTTPSource(crawler.HTTPSourceConfig{Name: "http", MaxBytes: documentScheduleMaxBytes}))
 	if geelibSource != nil {
 		documentScheduleSvc.RegisterSource(geelibSource)
 	}
@@ -211,7 +213,7 @@ func main() {
 		AccessToken: cfg.RAG.Knowledge.Feishu.AccessToken,
 		TenantToken: cfg.RAG.Knowledge.Feishu.TenantToken,
 		BaseURL:     cfg.RAG.Knowledge.Feishu.BaseURL,
-		MaxBytes:    50 << 20,
+		MaxBytes:    documentScheduleMaxBytes,
 	}))
 	documentScheduleSvc.RegisterSource(crawler.NewConfluenceSource(crawler.ConfluenceSourceConfig{
 		Name:        "confluence",
@@ -219,7 +221,7 @@ func main() {
 		Username:    cfg.RAG.Knowledge.Confluence.Username,
 		APIKey:      cfg.RAG.Knowledge.Confluence.APIKey,
 		AccessToken: cfg.RAG.Knowledge.Confluence.AccessToken,
-		MaxBytes:    50 << 20,
+		MaxBytes:    documentScheduleMaxBytes,
 	}))
 	go documentScheduleSvc.Run(appCtx)
 
@@ -346,6 +348,7 @@ func main() {
 	ingestionTaskSvc.SetExecutor(docSvc)
 	ingestionPipelineH := ingestionHandler.NewPipelineHandler(ingestionPipelineSvc)
 	ingestionTaskH := ingestionHandler.NewTaskHandler(ingestionTaskSvc)
+	ingestionTaskH.SetUploadLimits(cfg.RAG.Upload.MaxFileSizeBytes, cfg.RAG.Upload.MaxRequestSizeBytes)
 
 	vectorRetriever := rag.NewVectorRetriever(vecStore, embService, kbRepo, cfg.RAG.Search.DefaultTopK)
 	searchBackend := rag.NewKnowledgeSearchBackend(gormDB, kbRepo)

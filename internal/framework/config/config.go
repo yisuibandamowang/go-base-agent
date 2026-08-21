@@ -109,6 +109,7 @@ type RAGConfig struct {
 	ImageParse   RAGImageParseConfig   `mapstructure:"image-parse"`
 	Semaphore    RAGSemaphoreConfig    `mapstructure:"semaphore"`
 	Knowledge    RAGKnowledgeConfig    `mapstructure:"knowledge"`
+	Upload       RAGUploadConfig       `mapstructure:"upload"`
 	MCP          RAGMCPConfig          `mapstructure:"mcp"`
 	Search       RAGSearchConfig       `mapstructure:"search"`
 	Guidance     RAGGuidanceConfig     `mapstructure:"guidance"`
@@ -262,6 +263,12 @@ type RAGKnowledgeScheduleConfig struct {
 	BatchSize             int `mapstructure:"batch-size"`
 	MinIntervalSeconds    int `mapstructure:"min-interval-seconds"`
 	RunningTimeoutMinutes int `mapstructure:"running-timeout-minutes"`
+}
+
+// RAGUploadConfig controls multipart upload limits exposed by the service.
+type RAGUploadConfig struct {
+	MaxFileSizeBytes    int64 `mapstructure:"max-file-size-bytes"`
+	MaxRequestSizeBytes int64 `mapstructure:"max-request-size-bytes"`
 }
 
 type RAGKnowledgeFeishuConfig struct {
@@ -645,6 +652,12 @@ func applyDefaults(cfg *Config) {
 		}
 	}
 	mem := &cfg.RAG.Memory
+	if cfg.RAG.Upload.MaxFileSizeBytes <= 0 {
+		cfg.RAG.Upload.MaxFileSizeBytes = 50 << 20
+	}
+	if cfg.RAG.Upload.MaxRequestSizeBytes <= 0 {
+		cfg.RAG.Upload.MaxRequestSizeBytes = 100 << 20
+	}
 	if mem.HistoryKeepTurns <= 0 {
 		mem.HistoryKeepTurns = 8
 	}

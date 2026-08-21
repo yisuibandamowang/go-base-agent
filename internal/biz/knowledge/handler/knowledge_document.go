@@ -32,13 +32,15 @@ import (
 
 // DocumentHandler 文档管理 HTTP 处理层。
 type DocumentHandler struct {
-	svc                *service.DocumentService
-	fileStore          *FileStore
-	internalURLFetcher internalURLFetcher
-	uploadLimiter      uploadLimiter
-	uploadMaxWait      time.Duration
-	internalURLTaskDB  *gorm.DB
-	internalURLTaskTTL time.Duration
+	svc                 *service.DocumentService
+	fileStore           *FileStore
+	internalURLFetcher  internalURLFetcher
+	uploadLimiter       uploadLimiter
+	uploadMaxWait       time.Duration
+	maxFileSizeBytes    int64
+	maxRequestSizeBytes int64
+	internalURLTaskDB   *gorm.DB
+	internalURLTaskTTL  time.Duration
 }
 
 type uploadLimiter interface {
@@ -55,7 +57,12 @@ type internalURLDocumentWalker interface {
 
 // NewDocumentHandler 创建 DocumentHandler。
 func NewDocumentHandler(svc *service.DocumentService, fs *FileStore) *DocumentHandler {
-	return &DocumentHandler{svc: svc, fileStore: fs}
+	return &DocumentHandler{
+		svc:                 svc,
+		fileStore:           fs,
+		maxFileSizeBytes:    50 << 20,
+		maxRequestSizeBytes: 100 << 20,
+	}
 }
 
 // IngestionSpecSchema 返回文档级摄取配置的表单 schema。
@@ -102,6 +109,16 @@ func (h *DocumentHandler) IngestionSpecSchema(c *gin.Context) {
 func (h *DocumentHandler) SetUploadLimiter(limiter uploadLimiter, maxWait time.Duration) {
 	h.uploadLimiter = limiter
 	h.uploadMaxWait = maxWait
+}
+
+// SetUploadLimits 设置单文件和单请求上传上限。
+func (h *DocumentHandler) SetUploadLimits(maxFileSizeBytes, maxRequestSizeBytes int64) {
+	if maxFileSizeBytes > 0 {
+		h.maxFileSizeBytes = maxFileSizeBytes
+	}
+	if maxRequestSizeBytes > 0 {
+		h.maxRequestSizeBytes = maxRequestSizeBytes
+	}
 }
 
 // SetInternalURLFetcher 设置内部 URL 拉取器。
@@ -164,8 +181,10 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	kbID := c.Param("id")
 
-	// Parse multipart form (max 50MB)
-	if err := c.Request.ParseMultipartForm(50 << 20); err != nil {
+	if h.maxRequestSizeBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxRequestSizeBytes)
+	}
+	if err := c.Request.ParseMultipartForm(h.maxFileSizeBytes); err != nil {
 		c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("解析上传表单失败: %v", err)))
 		return
 	}
@@ -180,6 +199,10 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	// File upload
 	if files := form.File["file"]; len(files) > 0 {
 		header = files[0]
+		if h.maxFileSizeBytes > 0 && header.Size > h.maxFileSizeBytes {
+			c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("上传文件大小超过限制，单个文件最大允许 %d bytes", h.maxFileSizeBytes)))
+			return
+		}
 		f, err := header.Open()
 		if err != nil {
 			c.JSON(http.StatusOK, convention.Failure("A000001", fmt.Sprintf("读取文件失败: %v", err)))
@@ -208,7 +231,7 @@ func (h *DocumentHandler) uploadDocument(c *gin.Context) {
 	}
 
 	if file == nil && strings.EqualFold(strings.TrimSpace(req.SourceType), "url") {
-		data, name, fileType, err := fetchRemoteUploadFile(c.Request.Context(), req.SourceLocation)
+		data, name, fileType, err := fetchRemoteUploadFile(c.Request.Context(), req.SourceLocation, h.maxFileSizeBytes)
 		if err != nil {
 			c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
 			return
@@ -892,7 +915,7 @@ func internalURLFileType(mimeType, docName string) string {
 	return "md"
 }
 
-func fetchRemoteUploadFile(ctx context.Context, rawURL string) ([]byte, string, string, error) {
+func fetchRemoteUploadFile(ctx context.Context, rawURL string, maxBytes int64) ([]byte, string, string, error) {
 	location := strings.TrimSpace(rawURL)
 	if location == "" {
 		return nil, "", "", fmt.Errorf("来源地址不能为空")
@@ -917,13 +940,15 @@ func fetchRemoteUploadFile(ctx context.Context, rawURL string) ([]byte, string, 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, "", "", fmt.Errorf("获取远程文件失败: HTTP %d", resp.StatusCode)
 	}
-	const maxUploadBytes = 50 << 20
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxUploadBytes+1))
+	if maxBytes <= 0 {
+		maxBytes = 50 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, "", "", fmt.Errorf("读取远程文件失败: %w", err)
 	}
-	if len(data) > maxUploadBytes {
-		return nil, "", "", fmt.Errorf("远程文件超过 50MB 限制")
+	if int64(len(data)) > maxBytes {
+		return nil, "", "", fmt.Errorf("远程文件超过 %d bytes 限制", maxBytes)
 	}
 	name := remoteUploadFilename(resp.Header.Get("Content-Disposition"), parsed.Path)
 	fileType := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")

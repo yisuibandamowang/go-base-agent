@@ -226,14 +226,15 @@ func firstDemoNonEmpty(values ...string) string {
 }
 
 func ragSettingsPayload(cfg *config.Config) map[string]any {
+	maxFileSizeBytes, maxRequestSizeBytes := uploadLimits(cfg)
 	return map[string]any{
 		"engine": map[string]any{
 			"type": resolveEngineType(cfg),
 		},
 		"backends": buildRAGBackendSettings(cfg),
 		"upload": map[string]any{
-			"maxFileSize":    demoUploadMaxFileSize,
-			"maxRequestSize": demoUploadMaxRequestSize,
+			"maxFileSize":    maxFileSizeBytes,
+			"maxRequestSize": maxRequestSizeBytes,
 			"allowedTypes":   []string{".pdf", ".docx", ".md", ".txt", ".html", ".csv"},
 		},
 		"rag": map[string]any{
@@ -291,6 +292,20 @@ func ragSettingsPayload(cfg *config.Config) map[string]any {
 			"vlm":       buildVlmSettings(cfg.AI.VLM),
 		},
 	}
+}
+
+func uploadLimits(cfg *config.Config) (int64, int64) {
+	maxFileSizeBytes := demoUploadMaxFileSize
+	maxRequestSizeBytes := demoUploadMaxRequestSize
+	if cfg != nil {
+		if cfg.RAG.Upload.MaxFileSizeBytes > 0 {
+			maxFileSizeBytes = cfg.RAG.Upload.MaxFileSizeBytes
+		}
+		if cfg.RAG.Upload.MaxRequestSizeBytes > 0 {
+			maxRequestSizeBytes = cfg.RAG.Upload.MaxRequestSizeBytes
+		}
+	}
+	return maxFileSizeBytes, maxRequestSizeBytes
 }
 
 func resolveEngineType(cfg *config.Config) string {

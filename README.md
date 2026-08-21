@@ -241,6 +241,7 @@ curl http://localhost:9091/metrics
 | `ai.stream.message-chunk-size` | SSE 消息分块粒度；主链路会按 rune 数批量发送 `message` 事件 |
 | `ai.providers.*` | Chat / Embedding / Rerank provider 配置 |
 | `ai.chat.default-tier` / `ai.chat.deep-thinking-tier` / `ai.chat.tiers` | Chat 档位路由配置；按档位候选顺序和 `timeout-ms` 执行，深度思考请求使用 `deep-thinking-tier`，档位配置不完整时兼容旧的模型候选排序 |
+| `rag.upload.max-file-size-bytes` / `rag.upload.max-request-size-bytes` | 文档与摄取任务上传限制；前者限制单个文件，也用于远程 URL、定时 HTTP、飞书、Confluence 来源的单份文档，后者限制单次 multipart 请求体大小 |
 | `sa-token` | JWT 认证配置，包含 token 名称和过期时间 |
 | `rustfs` | 对象存储配置 |
 

@@ -751,6 +751,38 @@ rag:
 	}
 }
 
+func TestLoadParsesRAGUploadLimits(t *testing.T) {
+	yaml := `
+rag:
+  upload:
+    max-file-size-bytes: 111
+    max-request-size-bytes: 222
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Upload.MaxFileSizeBytes != 111 || cfg.RAG.Upload.MaxRequestSizeBytes != 222 {
+		t.Fatalf("unexpected upload limits: %+v", cfg.RAG.Upload)
+	}
+}
+
+func TestRAGUploadLimitsDefault(t *testing.T) {
+	cfg := Config{}
+	applyDefaults(&cfg)
+
+	if cfg.RAG.Upload.MaxFileSizeBytes != 50<<20 || cfg.RAG.Upload.MaxRequestSizeBytes != 100<<20 {
+		t.Fatalf("unexpected default upload limits: %+v", cfg.RAG.Upload)
+	}
+}
+
 func TestLoadParsesRAGKnowledgeGeelibImportTaskTimeout(t *testing.T) {
 	yaml := `
 rag:
