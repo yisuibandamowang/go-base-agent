@@ -496,6 +496,9 @@ func main() {
 	ragPipeline.SetCodeRepoPath(cfg.RAG.Code.RepoPath)
 	ragPipeline.SetCitationEnabled(cfg.RAG.Citation.IsEnabledByDefault())
 	ragPipeline.SetPreferredLLMService(preferredLLMService)
+	if redisAvailable {
+		ragPipeline.SetStreamTaskRedis(rdb)
+	}
 	ragPipeline.SetAnswerCache(rag.NewRedisAnswerCacheManager(rdb), cfg.RAG.AnswerCache.IsEnabledByDefault(), cfg.RAG.AnswerCache.TTLDuration())
 	ragPipeline.SetMcpContextProvider(mcpContextProvider)
 	ragPipeline.SetIntentResolver(intentResolverSvc)
@@ -726,6 +729,7 @@ func main() {
 
 	slog.Info("shutting down server...")
 	appCancel()
+	ragPipeline.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

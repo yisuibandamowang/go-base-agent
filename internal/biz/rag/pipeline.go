@@ -12,6 +12,8 @@ import (
 	"go-base-agent/internal/biz/codeqna"
 	appctx "go-base-agent/internal/framework/context"
 	"go-base-agent/internal/infra/chat"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Pipeline orchestrates the RAG chat flow.
@@ -93,6 +95,20 @@ func (p *Pipeline) SetCitationEnabled(enabled bool) {
 // SetPreferredLLMService sets the lightweight LLM used for non-RAG responses.
 func (p *Pipeline) SetPreferredLLMService(llm chat.LLMService) {
 	p.preferredLLM = llm
+}
+
+// SetStreamTaskRedis enables cross-instance stream cancellation through Redis.
+func (p *Pipeline) SetStreamTaskRedis(client *redis.Client) {
+	if p != nil && p.tasks != nil {
+		p.tasks.setRedisClient(client)
+	}
+}
+
+// Close releases the stream task cancellation subscription.
+func (p *Pipeline) Close() {
+	if p != nil && p.tasks != nil {
+		p.tasks.close()
+	}
 }
 
 // SetAnswerCache configures completed answer cache for standalone RAG questions.
