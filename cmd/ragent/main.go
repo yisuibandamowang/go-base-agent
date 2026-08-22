@@ -48,6 +48,7 @@ import (
 	"go-base-agent/internal/framework/middleware"
 	"go-base-agent/internal/framework/mq"
 	"go-base-agent/internal/framework/ratelimit"
+	"go-base-agent/internal/framework/snowflake"
 	"go-base-agent/internal/infra/chat"
 	"go-base-agent/internal/infra/embedding"
 	"go-base-agent/internal/infra/model"
@@ -80,6 +81,12 @@ func main() {
 	defer pingCancel()
 	if _, err := rdb.Ping(pingCtx).Result(); err != nil {
 		slog.Warn("redis not available, rate limiter disabled", "err", err)
+	} else if strings.TrimSpace(os.Getenv("SNOWFLAKE_WORKER_ID")) == "" {
+		idCtx, idCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := snowflake.ConfigureFromRedis(idCtx, rdb); err != nil {
+			slog.Warn("snowflake redis allocation failed, fallback to local worker id", "err", err)
+		}
+		idCancel()
 	}
 	idempotentGuard := idempotent.New(rdb)
 

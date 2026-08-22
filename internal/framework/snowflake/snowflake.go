@@ -10,13 +10,30 @@ import (
 )
 
 var (
-	node *sf.Node
-	once sync.Once
+	node             *sf.Node
+	once             sync.Once
+	configured       bool
+	configuredNodeID int64
 )
+
+func configureNode(id int64) error {
+	if id < 0 || id > 1023 {
+		return fmt.Errorf("snowflake node id out of range: %d", id)
+	}
+	if configured || node != nil {
+		return fmt.Errorf("snowflake node already initialized")
+	}
+	configuredNodeID = id
+	configured = true
+	return nil
+}
 
 func Node() *sf.Node {
 	once.Do(func() {
 		id := int64(1)
+		if configured {
+			id = configuredNodeID
+		}
 		if env := os.Getenv("SNOWFLAKE_WORKER_ID"); env != "" {
 			n, err := strconv.ParseInt(env, 10, 64)
 			if err != nil {
