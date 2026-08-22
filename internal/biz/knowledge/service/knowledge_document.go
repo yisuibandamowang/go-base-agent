@@ -1445,7 +1445,7 @@ func (s *DocumentService) chunkDocument(ctx context.Context, doc *model.Knowledg
 			Content:           content,
 			ContentHash:       contentHash,
 			CharCount:         len([]rune(content)),
-			TokenCount:        len(strings.Fields(content)),
+			TokenCount:        HeuristicTokenCount(content),
 			SourceVersion:     sourceVersion,
 			SourceHash:        sourceHash,
 			ChunkConfigHash:   configHash,
@@ -1826,7 +1826,7 @@ func (s *DocumentService) persistChunksAndVectors(ctx context.Context, doc *mode
 			Content:           vc.Content,
 			ContentHash:       stringSHA256Hex(vc.Content),
 			CharCount:         len([]rune(vc.Content)),
-			TokenCount:        len(strings.Fields(vc.Content)),
+			TokenCount:        HeuristicTokenCount(vc.Content),
 			SourceVersion:     vc.SourceVersion,
 			SourceHash:        vc.SourceHash,
 			ChunkConfigHash:   vc.ChunkConfigHash,
@@ -2304,6 +2304,12 @@ func (s *DocumentService) ListChunks(ctx context.Context, docID string, page, si
 	}
 	records := make([]dto.ChunkResp, 0, len(chunks))
 	for _, c := range chunks {
+		if c.TokenCount <= 0 && strings.TrimSpace(c.Content) != "" {
+			c.TokenCount = HeuristicTokenCount(c.Content)
+			if err := s.chunkRepo.UpdateTokenCount(ctx, c.ID, c.TokenCount); err != nil {
+				return nil, 0, fmt.Errorf("backfill chunk token count: %w", err)
+			}
+		}
 		records = append(records, *s.chunkToResp(&c))
 	}
 	return records, total, nil
@@ -2344,7 +2350,7 @@ func (s *DocumentService) CreateChunk(ctx context.Context, docID string, req dto
 		Content:     content,
 		ContentHash: fmt.Sprintf("%x", hash[:]),
 		CharCount:   len([]rune(content)),
-		TokenCount:  len(strings.Fields(content)),
+		TokenCount:  HeuristicTokenCount(content),
 		Enabled:     1,
 		CreatedBy:   userID,
 		UpdatedBy:   userID,
@@ -2420,7 +2426,7 @@ func (s *DocumentService) UpdateChunk(ctx context.Context, docID, chunkID string
 	chunk.Content = content
 	chunk.ContentHash = fmt.Sprintf("%x", hash[:])
 	chunk.CharCount = len([]rune(content))
-	chunk.TokenCount = len(strings.Fields(content))
+	chunk.TokenCount = HeuristicTokenCount(content)
 	chunk.UpdatedBy = userID
 	if err := s.chunkRepo.Update(ctx, chunk); err != nil {
 		return nil, fmt.Errorf("update chunk: %w", err)

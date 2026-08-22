@@ -153,6 +153,46 @@ func TestDocumentService_PreviewDocumentRejectsNonMarkdown(t *testing.T) {
 	}
 }
 
+func TestDocumentService_ListChunksBackfillsMissingTokenCount(t *testing.T) {
+	gdb, kb, svc := newDocumentServiceTestContext(t)
+	doc := &knowledgeModel.KnowledgeDocument{
+		KbID:      kb.ID,
+		DocName:   "会员说明.md",
+		FileURL:   "upload://会员说明.md",
+		FileType:  "md",
+		Status:    "success",
+		CreatedBy: "tester",
+	}
+	if err := gdb.Create(doc).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+	chunk := &knowledgeModel.KnowledgeChunk{
+		KbID:       kb.ID,
+		DocID:      doc.ID,
+		ChunkIndex: 0,
+		Content:    "知识库",
+		CreatedBy:  "tester",
+	}
+	if err := gdb.Create(chunk).Error; err != nil {
+		t.Fatalf("seed chunk: %v", err)
+	}
+
+	records, total, err := svc.ListChunks(context.Background(), doc.ID, 1, 10, nil)
+	if err != nil {
+		t.Fatalf("list chunks: %v", err)
+	}
+	if total != 1 || len(records) != 1 || records[0].TokenCount != 3 {
+		t.Fatalf("expected backfilled token count 3, total= %d records=%+v", total, records)
+	}
+	var stored knowledgeModel.KnowledgeChunk
+	if err := gdb.First(&stored, "id = ?", chunk.ID).Error; err != nil {
+		t.Fatalf("reload chunk: %v", err)
+	}
+	if stored.TokenCount != 3 {
+		t.Fatalf("expected persisted token count 3, got %d", stored.TokenCount)
+	}
+}
+
 func TestDocumentService_PreviewDocumentReadsMarkdownOriginalFile(t *testing.T) {
 	gdb, kb, svc := newDocumentServiceTestContext(t)
 	svc.fileStore = fakeFileReader{data: []byte("# 原始 Markdown\n会员权益说明")}
@@ -2646,7 +2686,7 @@ func TestDocumentService_CreateUpdateDeleteChunkSyncsVectorAndDocumentCount(t *t
 	if err != nil {
 		t.Fatalf("update chunk: %v", err)
 	}
-	if updated.ContentHash == created.ContentHash || updated.Content != "  更新 后 内容  " || updated.CharCount != len([]rune("  更新 后 内容  ")) || updated.TokenCount != 3 {
+	if updated.ContentHash == created.ContentHash || updated.Content != "  更新 后 内容  " || updated.CharCount != len([]rune("  更新 后 内容  ")) || updated.TokenCount != 5 {
 		t.Fatalf("expected refreshed content metadata, got %+v", updated)
 	}
 	if len(vecStore.updatedChunks) != 1 || vecStore.updatedChunks[0].Content != "  更新 后 内容  " {

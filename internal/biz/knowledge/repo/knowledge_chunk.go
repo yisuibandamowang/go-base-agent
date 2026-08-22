@@ -100,6 +100,20 @@ func (r *KnowledgeChunkRepo) Update(ctx context.Context, chunk *model.KnowledgeC
 	return nil
 }
 
+// UpdateTokenCount fills the token count without changing other chunk fields.
+func (r *KnowledgeChunkRepo) UpdateTokenCount(ctx context.Context, id string, count int) error {
+	result := r.gdb.WithContext(ctx).Model(&model.KnowledgeChunk{}).
+		Where("id = ? AND deleted = 0", id).
+		Update("token_count", count)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
 // SoftDelete 软删除分块。
 func (r *KnowledgeChunkRepo) SoftDelete(ctx context.Context, id string) error {
 	var chunk model.KnowledgeChunk
