@@ -808,12 +808,16 @@ func writeTaskNodeOutputJSON(value any) string {
 }
 
 func readMap(raw string) map[string]any {
+	empty := map[string]any{}
 	if strings.TrimSpace(raw) == "" {
-		return nil
+		return empty
 	}
 	var out map[string]any
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil
+		return empty
+	}
+	if out == nil {
+		return empty
 	}
 	return out
 }

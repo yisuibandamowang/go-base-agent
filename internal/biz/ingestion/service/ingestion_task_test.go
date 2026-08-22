@@ -407,6 +407,22 @@ func TestTaskService_NormalizesTaskAndNodeFieldsOnResponse(t *testing.T) {
 	}
 }
 
+func TestTaskResponsesFallbackToEmptyMapsForInvalidJSON(t *testing.T) {
+	for _, raw := range []string{"", " ", "null", "{invalid"} {
+		t.Run(raw, func(t *testing.T) {
+			task := taskToResp(&model.IngestionTask{MetadataJSON: raw})
+			if task.Metadata == nil || len(task.Metadata) != 0 {
+				t.Fatalf("expected empty metadata map for %q, got %#v", raw, task.Metadata)
+			}
+
+			node := taskNodeToResp(&model.IngestionTaskNode{OutputJSON: raw})
+			if node.Output == nil || len(node.Output) != 0 {
+				t.Fatalf("expected empty output map for %q, got %#v", raw, node.Output)
+			}
+		})
+	}
+}
+
 func TestTaskService_CreateRecordsAuditLogs(t *testing.T) {
 	gdb, pipelineID := setupTaskServiceTestDB(t)
 	if err := gdb.AutoMigrate(&auditModel.BizChangeLog{}); err != nil {
