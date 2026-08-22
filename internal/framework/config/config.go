@@ -91,6 +91,9 @@ type MinerUConfig struct {
 	OCR              bool   `mapstructure:"ocr"`
 	Language         string `mapstructure:"language"`
 	ConcurrencyLimit int64  `mapstructure:"concurrency-limit"`
+	SemaphoreName    string `mapstructure:"semaphore-name"`
+	MaxWaitSeconds   int    `mapstructure:"max-wait-seconds"`
+	LeaseSeconds     int    `mapstructure:"lease-seconds"`
 }
 
 type RAGConfig struct {
@@ -787,6 +790,18 @@ func applyDefaults(cfg *Config) {
 	}
 	if limit.PollIntervalMs <= 0 {
 		limit.PollIntervalMs = 200
+	}
+	if cfg.MinerU.ConcurrencyLimit <= 0 {
+		cfg.MinerU.ConcurrencyLimit = 16
+	}
+	if strings.TrimSpace(cfg.MinerU.SemaphoreName) == "" {
+		cfg.MinerU.SemaphoreName = "rag:mineru:parse"
+	}
+	if cfg.MinerU.MaxWaitSeconds <= 0 {
+		cfg.MinerU.MaxWaitSeconds = 30
+	}
+	if cfg.MinerU.LeaseSeconds <= 0 {
+		cfg.MinerU.LeaseSeconds = 900
 	}
 }
 

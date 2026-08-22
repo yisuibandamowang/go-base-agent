@@ -321,6 +321,9 @@ mineru:
   ocr: false
   language: ch
   concurrency-limit: 16
+  semaphore-name: rag:mineru:parse
+  max-wait-seconds: 30
+  lease-seconds: 900
 
 rustfs:
   url: ${RUSTFS_URL}

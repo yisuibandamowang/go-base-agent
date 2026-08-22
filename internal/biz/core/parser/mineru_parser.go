@@ -22,6 +22,14 @@ type MinerUOptions struct {
 	OCR              bool
 	Language         string
 	ConcurrencyLimit int64
+	MaxWait          time.Duration
+	Lease            time.Duration
+	PermitRunner     MinerUPermitRunner
+}
+
+// MinerUPermitRunner 在获取解析许可后执行一个 MinerU 任务。
+type MinerUPermitRunner interface {
+	Run(context.Context, time.Duration, time.Duration, func() error) error
 }
 
 // MinerUParser 调用 MinerU SaaS 解析复杂版面文档。
@@ -35,7 +43,7 @@ type MinerUParser struct {
 // NewMinerUParser 创建 MinerUParser。
 func NewMinerUParser(client *MinerUClient, unpacker *MinerUResultUnpacker, opts MinerUOptions) *MinerUParser {
 	var sem *semaphore.Weighted
-	if opts.ConcurrencyLimit > 0 {
+	if opts.PermitRunner == nil && opts.ConcurrencyLimit > 0 {
 		sem = semaphore.NewWeighted(opts.ConcurrencyLimit)
 	}
 	return &MinerUParser{
@@ -75,6 +83,25 @@ func (p *MinerUParser) Parse(ctx context.Context, data []byte, mimeType string, 
 	if p.client == nil || p.unpacker == nil {
 		return nil, fmt.Errorf("mineru parser is not configured")
 	}
+	parse := func() (*rag.ParsedDocument, error) {
+		return p.parse(ctx, data, mimeType, options)
+	}
+	if p.opts.PermitRunner != nil {
+		var parsed *rag.ParsedDocument
+		var parseErr error
+		err := p.opts.PermitRunner.Run(ctx, p.opts.MaxWait, p.opts.Lease, func() error {
+			parsed, parseErr = parse()
+			return parseErr
+		})
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if err != nil {
+			return nil, fmt.Errorf("acquire mineru distributed permit: %w", err)
+		}
+		return parsed, nil
+	}
+
 	acquireCtx := ctx
 	if p.opts.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -87,6 +114,10 @@ func (p *MinerUParser) Parse(ctx context.Context, data []byte, mimeType string, 
 		}
 		defer p.sem.Release(1)
 	}
+	return parse()
+}
+
+func (p *MinerUParser) parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 
 	sourceFile := parseOption(options, "sourceFile")
 	documentID := parseOption(options, "documentId")

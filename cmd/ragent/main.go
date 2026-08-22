@@ -77,11 +77,15 @@ func main() {
 	}
 
 	rdb := cfg.Redis.NewClient()
+	redisAvailable := false
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer pingCancel()
 	if _, err := rdb.Ping(pingCtx).Result(); err != nil {
 		slog.Warn("redis not available, rate limiter disabled", "err", err)
-	} else if strings.TrimSpace(os.Getenv("SNOWFLAKE_WORKER_ID")) == "" {
+	} else {
+		redisAvailable = true
+	}
+	if redisAvailable && strings.TrimSpace(os.Getenv("SNOWFLAKE_WORKER_ID")) == "" {
 		idCtx, idCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := snowflake.ConfigureFromRedis(idCtx, rdb); err != nil {
 			slog.Warn("snowflake redis allocation failed, fallback to local worker id", "err", err)
@@ -177,7 +181,21 @@ func main() {
 	docSvc.SetMQProducer(mqProducer, mqEnabled)
 	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeDocumentChunkTopic, docSvc.CheckChunkTransaction)
 	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeBaseCleanupTopic, kbSvc.CheckCleanupTransaction)
-	if parserRegistry := buildDocumentParserRegistry(cfg, vlmService, hasVLM, fileStore); parserRegistry != nil {
+	var minerUPermitRunner coreparser.MinerUPermitRunner
+	if redisAvailable && cfg.MinerU.ConcurrencyLimit > 0 {
+		minerUSemaphoreName := strings.TrimSpace(cfg.MinerU.SemaphoreName)
+		if minerUSemaphoreName == "" {
+			minerUSemaphoreName = "rag:mineru:parse"
+		}
+		minerUSemaphore := ratelimit.NewExpirableSemaphore(
+			minerUSemaphoreName,
+			rdb,
+			int(cfg.MinerU.ConcurrencyLimit),
+		)
+		defer minerUSemaphore.Shutdown()
+		minerUPermitRunner = minerUSemaphore
+	}
+	if parserRegistry := buildDocumentParserRegistryWithPermitRunner(cfg, vlmService, hasVLM, fileStore, minerUPermitRunner); parserRegistry != nil {
 		docSvc.SetParserRegistry(parserRegistry)
 	}
 	docHandler := knowledgeHandler.NewDocumentHandler(docSvc, fileStore)
@@ -1069,6 +1087,10 @@ func buildVlmClients(aiCfg config.AIConfig) []vlm.Client {
 }
 
 func buildDocumentParserRegistry(cfg *config.Config, vlmService vlm.Service, hasVLM bool, fileStore *knowledgeHandler.FileStore) *coreparser.Registry {
+	return buildDocumentParserRegistryWithPermitRunner(cfg, vlmService, hasVLM, fileStore, nil)
+}
+
+func buildDocumentParserRegistryWithPermitRunner(cfg *config.Config, vlmService vlm.Service, hasVLM bool, fileStore *knowledgeHandler.FileStore, permitRunner coreparser.MinerUPermitRunner) *coreparser.Registry {
 	coreparser.SetDefaultTikaURL(cfg.RAG.Parser.TikaURL)
 	reg := coreparser.NewRegistry(nil)
 	assetUploader, err := storage.NewRustFSUploader(context.Background(), cfg.RustFS, cfg.RustFS.AssetBucket)
@@ -1087,6 +1109,9 @@ func buildDocumentParserRegistry(cfg *config.Config, vlmService vlm.Service, has
 			OCR:              cfg.MinerU.OCR,
 			Language:         firstNonEmpty(cfg.MinerU.Language, "ch"),
 			ConcurrencyLimit: cfg.MinerU.ConcurrencyLimit,
+			MaxWait:          time.Duration(cfg.MinerU.MaxWaitSeconds) * time.Second,
+			Lease:            time.Duration(cfg.MinerU.LeaseSeconds) * time.Second,
+			PermitRunner:     permitRunner,
 		}
 		reg.Register(coreparser.NewMinerUParser(minerUClient, unpacker, opts))
 	}

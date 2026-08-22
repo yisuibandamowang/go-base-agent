@@ -796,6 +796,21 @@ func TestRAGUploadLimitsDefault(t *testing.T) {
 	}
 }
 
+func TestMinerUDistributedSemaphoreDefaults(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+
+	if cfg.MinerU.ConcurrencyLimit != 16 {
+		t.Fatalf("expected MinerU concurrency limit 16, got %d", cfg.MinerU.ConcurrencyLimit)
+	}
+	if cfg.MinerU.SemaphoreName != "rag:mineru:parse" {
+		t.Fatalf("unexpected MinerU semaphore name: %q", cfg.MinerU.SemaphoreName)
+	}
+	if cfg.MinerU.MaxWaitSeconds != 30 || cfg.MinerU.LeaseSeconds != 900 {
+		t.Fatalf("unexpected MinerU semaphore timings: wait=%d lease=%d", cfg.MinerU.MaxWaitSeconds, cfg.MinerU.LeaseSeconds)
+	}
+}
+
 func TestLoadParsesRAGKnowledgeGeelibImportTaskTimeout(t *testing.T) {
 	yaml := `
 rag:
