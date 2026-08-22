@@ -2,6 +2,7 @@ package rag
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -22,6 +23,55 @@ func NewConditionEvaluator() *ConditionEvaluator {
 // 未知或畸形的条件结构 fail-closed 返回 false：放行畸形条件会让节点绕过配置意图执行，
 // 宁可漏执行也不可错执行。对齐 Java ConditionEvaluator 的 isStructurallyValid 校验。
 func (e *ConditionEvaluator) Evaluate(ctx *IngestionContext, condition any) bool {
+	if !conditionStructurallyValid(condition) {
+		return false
+	}
+	return e.evaluateValid(ctx, condition)
+}
+
+func conditionStructurallyValid(condition any) bool {
+	if condition == nil {
+		return true
+	}
+	switch c := condition.(type) {
+	case bool:
+		return true
+	case string:
+		return true
+	case map[string]any:
+		if all, ok := c["all"]; ok {
+			items := anySlice(all)
+			if items == nil {
+				return false
+			}
+			return conditionItemsStructurallyValid(items)
+		}
+		if anyValue, ok := c["any"]; ok {
+			items := anySlice(anyValue)
+			if items == nil {
+				return false
+			}
+			return conditionItemsStructurallyValid(items)
+		}
+		if not, ok := c["not"]; ok {
+			return conditionStructurallyValid(not)
+		}
+		return strings.TrimSpace(stringValue(c["field"])) != ""
+	default:
+		return false
+	}
+}
+
+func conditionItemsStructurallyValid(items []any) bool {
+	for _, item := range items {
+		if !conditionStructurallyValid(item) {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *ConditionEvaluator) evaluateValid(ctx *IngestionContext, condition any) bool {
 	if condition == nil {
 		return true
 	}
@@ -95,7 +145,7 @@ func (e *ConditionEvaluator) evaluateObject(ctx *IngestionContext, condition map
 			return false
 		}
 		for _, item := range items {
-			if !e.Evaluate(ctx, item) {
+			if !e.evaluateValid(ctx, item) {
 				return false
 			}
 		}
@@ -108,14 +158,14 @@ func (e *ConditionEvaluator) evaluateObject(ctx *IngestionContext, condition map
 			return false
 		}
 		for _, item := range items {
-			if e.Evaluate(ctx, item) {
+			if e.evaluateValid(ctx, item) {
 				return true
 			}
 		}
 		return false
 	}
 	if not, ok := condition["not"]; ok {
-		return !e.Evaluate(ctx, not)
+		return !e.evaluateValid(ctx, not)
 	}
 
 	field := strings.TrimSpace(stringValue(condition["field"]))
@@ -384,15 +434,20 @@ func conditionFloat(value any) (float64, bool) {
 	case int64:
 		return float64(v), true
 	case float64:
-		return v, true
+		return v, isFiniteConditionNumber(v)
 	case float32:
-		return float64(v), true
+		n := float64(v)
+		return n, isFiniteConditionNumber(n)
 	case string:
 		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		return n, err == nil
+		return n, err == nil && isFiniteConditionNumber(n)
 	default:
 		return 0, false
 	}
+}
+
+func isFiniteConditionNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func stringValue(value any) string {

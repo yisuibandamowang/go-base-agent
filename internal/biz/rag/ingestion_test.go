@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 )
@@ -307,11 +308,15 @@ func TestConditionEvaluatorFailClosedOnMalformedStructures(t *testing.T) {
 	if evaluator.Evaluate(ctx, map[string]any{"all": "not-an-array"}) {
 		t.Fatal("non-array all should fail closed")
 	}
-	// not 包内含畸形结构（not 取反后畸形应得 false 的反例：not(malformed)=not(false)=true 是错的，
-	// Java 语义是 not 内部先按 fail-closed 求值为 false，再取反为 true；此处畸形在 not 内层同样先判 false）
+	// not 包内含畸形结构时，整棵条件树应 fail-closed，不能把非法结构反转成 true。
 	inner := evaluator.Evaluate(ctx, map[string]any{"fields": "rawText"})
 	if inner {
 		t.Fatal("malformed inner condition should fail closed before negation")
+	}
+	if evaluator.Evaluate(ctx, map[string]any{
+		"not": map[string]any{"fields": "rawText"},
+	}) {
+		t.Fatal("not should fail closed when its nested condition is malformed")
 	}
 	// 未知类型（数字等）
 	if evaluator.Evaluate(ctx, 42) {
@@ -330,7 +335,7 @@ func TestConditionEvaluatorFailClosedOnMalformedStructures(t *testing.T) {
 // 对齐 Java 修复：让非法数值条件安全返回 false。
 func TestConditionEvaluatorInvalidNumericComparisonSafeFalse(t *testing.T) {
 	evaluator := NewConditionEvaluator()
-	ctx := &IngestionContext{}
+	ctx := &IngestionContext{RawText: "NaN"}
 
 	// 数值字段与非数值比较：不 panic，安全返回 false
 	result := evaluator.Evaluate(ctx, map[string]any{
@@ -346,6 +351,42 @@ func TestConditionEvaluatorInvalidNumericComparisonSafeFalse(t *testing.T) {
 	})
 	if result {
 		t.Fatal("non-numeric gte comparison should safely return false")
+	}
+
+	for _, testCase := range []struct {
+		name       string
+		field      string
+		left       any
+		right      any
+		contextFor func(any) *IngestionContext
+	}{
+		{name: "nan string", field: "rawText", left: "NaN", right: 10,
+			contextFor: func(left any) *IngestionContext { return &IngestionContext{RawText: left.(string)} }},
+		{name: "positive infinity string", field: "rawText", left: "Infinity", right: 10,
+			contextFor: func(left any) *IngestionContext { return &IngestionContext{RawText: left.(string)} }},
+		{name: "negative infinity string", field: "rawText", left: "-Infinity", right: 10,
+			contextFor: func(left any) *IngestionContext { return &IngestionContext{RawText: left.(string)} }},
+		{name: "nan number", field: "metadata.score", left: math.NaN(), right: 10,
+			contextFor: func(left any) *IngestionContext {
+				return &IngestionContext{Metadata: map[string]any{"score": left}}
+			}},
+		{name: "positive infinity number", field: "metadata.score", left: math.Inf(1), right: 10,
+			contextFor: func(left any) *IngestionContext {
+				return &IngestionContext{Metadata: map[string]any{"score": left}}
+			}},
+		{name: "infinite right operand", field: "rawText", left: "10", right: math.Inf(1),
+			contextFor: func(left any) *IngestionContext { return &IngestionContext{RawText: left.(string)} }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := testCase.contextFor(testCase.left)
+			for _, operator := range []string{"gt", "gte", "lt", "lte"} {
+				if evaluator.Evaluate(ctx, map[string]any{
+					"field": testCase.field, "operator": operator, "value": testCase.right,
+				}) {
+					t.Fatalf("%s must reject non-finite operands", operator)
+				}
+			}
+		})
 	}
 }
 
