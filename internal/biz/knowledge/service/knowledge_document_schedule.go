@@ -173,7 +173,7 @@ func (s *DocumentScheduleService) RecoverStuckRunningDocuments(ctx context.Conte
 	cutoff := s.now().Add(-s.runningTimeout())
 	result := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
 		Model(&model.KnowledgeDocument{}).
-		Where("status = ? AND update_time < ?", "running", cutoff).
+		Where("status = ? AND enabled = ? AND update_time < ?", "running", 1, cutoff).
 		Updates(map[string]any{
 			"status":      "failed",
 			"updated_by":  "system",

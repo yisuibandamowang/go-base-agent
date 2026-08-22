@@ -1362,6 +1362,23 @@ func TestDocumentScheduleService_RecoverStuckRunningDocuments(t *testing.T) {
 	if err := gdb.Exec("UPDATE t_knowledge_document SET update_time = ? WHERE id = ?", now.Add(-5*time.Minute), freshDoc.ID).Error; err != nil {
 		t.Fatalf("backdate fresh doc: %v", err)
 	}
+	disabledDoc := &knowledgeModel.KnowledgeDocument{
+		KbID:      "kb-1",
+		DocName:   "disabled-running.md",
+		Enabled:   0,
+		FileURL:   "upload://disabled-running.md",
+		FileType:  "md",
+		Status:    "running",
+		CreatedBy: "user-1",
+		UpdatedBy: "user-1",
+	}
+	disabledDoc.ID = "doc-disabled"
+	if err := gdb.Create(disabledDoc).Error; err != nil {
+		t.Fatalf("seed disabled doc: %v", err)
+	}
+	if err := gdb.Exec("UPDATE t_knowledge_document SET enabled = 0, update_time = ? WHERE id = ?", now.Add(-20*time.Minute), disabledDoc.ID).Error; err != nil {
+		t.Fatalf("backdate disabled doc: %v", err)
+	}
 
 	svc := NewDocumentScheduleService(gdb, nil, nil, nil, nil, nil, config.RAGKnowledgeScheduleConfig{RunningTimeoutMinutes: 10})
 	svc.now = func() time.Time { return now }
@@ -1381,11 +1398,18 @@ func TestDocumentScheduleService_RecoverStuckRunningDocuments(t *testing.T) {
 	if err := gdb.First(&freshStored, "id = ?", freshDoc.ID).Error; err != nil {
 		t.Fatalf("load fresh doc: %v", err)
 	}
+	var disabledStored knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&disabledStored, "id = ?", disabledDoc.ID).Error; err != nil {
+		t.Fatalf("load disabled doc: %v", err)
+	}
 	if oldStored.Status != "failed" {
 		t.Fatalf("expected old doc to be failed, got %s", oldStored.Status)
 	}
 	if freshStored.Status != "running" {
 		t.Fatalf("expected fresh doc to remain running, got %s", freshStored.Status)
+	}
+	if disabledStored.Status != "running" {
+		t.Fatalf("expected disabled doc to remain running, got %s", disabledStored.Status)
 	}
 }
 
