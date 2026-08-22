@@ -53,6 +53,12 @@ type DocumentService struct {
 	scheduleMinIntervalSeconds int
 	mqProducer                 mq.Producer
 	mqEnabled                  bool
+	chunkLock                  chunkLocker
+}
+
+type chunkLocker interface {
+	Acquire(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	Release(ctx context.Context, key string) error
 }
 
 type knowledgeBaseFinder interface {
@@ -179,6 +185,11 @@ func (s *DocumentService) GetKnowledgeBase(ctx context.Context, kbID string) (*d
 func (s *DocumentService) SetMQProducer(producer mq.Producer, enabled bool) {
 	s.mqProducer = producer
 	s.mqEnabled = enabled
+}
+
+// SetChunkLock 设置文档分块分布式锁。
+func (s *DocumentService) SetChunkLock(locker chunkLocker) {
+	s.chunkLock = locker
 }
 
 // CreateDocument 创建文档记录，状态为 pending。
@@ -771,6 +782,28 @@ func (s *DocumentService) RunChunkNow(ctx context.Context, docID string, userID 
 }
 
 func (s *DocumentService) startChunk(ctx context.Context, docID string, userID string, async bool) error {
+	lockKey := "knowledge:chunk:lock:" + strings.TrimSpace(docID)
+	lockHeld := false
+	releaseChunkLock := func() {
+		if !lockHeld {
+			return
+		}
+		lockHeld = false
+		if err := s.chunkLock.Release(context.Background(), lockKey); err != nil {
+			slog.Warn("release document chunk lock failed", "docId", docID, "err", err)
+		}
+	}
+	if s.chunkLock != nil {
+		acquired, lockErr := s.chunkLock.Acquire(ctx, lockKey, 30*time.Second)
+		if lockErr != nil {
+			slog.Warn("acquire document chunk lock failed, continue with database guard", "docId", docID, "err", lockErr)
+		} else if !acquired {
+			return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
+		} else {
+			lockHeld = true
+			defer releaseChunkLock()
+		}
+	}
 	doc, err := s.docRepo.FindByID(ctx, docID)
 	if err != nil {
 		return fmt.Errorf("文档不存在")
@@ -779,6 +812,7 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
 	if isInternalURLFolderDocument(doc) {
+		releaseChunkLock()
 		return s.markFolderDocumentChunkSkipped(ctx, doc, userID)
 	}
 	if async {
@@ -831,6 +865,7 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 			if err != nil {
 				return fmt.Errorf("failed to send chunk event: %w", err)
 			}
+			releaseChunkLock()
 			return nil
 		}
 		result := s.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
@@ -846,6 +881,7 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 		if result.RowsAffected == 0 {
 			return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 		}
+		releaseChunkLock()
 		go func() {
 			_ = s.executeChunk(context.Background(), docID)
 		}()
@@ -864,6 +900,7 @@ func (s *DocumentService) startChunk(ctx context.Context, docID string, userID s
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("文档分块操作正在进行中，请稍后再试")
 	}
+	releaseChunkLock()
 	return s.executeChunk(ctx, docID)
 }
 

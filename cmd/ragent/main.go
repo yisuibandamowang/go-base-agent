@@ -179,6 +179,7 @@ func main() {
 	docSvc.SetLLMService(llmService)
 	docSvc.SetDefaultCollectionName(cfg.RAG.Default.CollectionName)
 	docSvc.SetMQProducer(mqProducer, mqEnabled)
+	docSvc.SetChunkLock(redislock.New(rdb))
 	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeDocumentChunkTopic, docSvc.CheckChunkTransaction)
 	mqProducer.RegisterTransactionChecker(knowledgeService.KnowledgeBaseCleanupTopic, kbSvc.CheckCleanupTransaction)
 	var minerUPermitRunner coreparser.MinerUPermitRunner

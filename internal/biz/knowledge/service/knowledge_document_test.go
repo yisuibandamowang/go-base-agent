@@ -10,6 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+	redislock "go-base-agent/internal/framework/lock"
+
 	auditModel "go-base-agent/internal/biz/audit/model"
 	auditRepo "go-base-agent/internal/biz/audit/repo"
 	auditService "go-base-agent/internal/biz/audit/service"
@@ -81,6 +85,23 @@ func testSHA256Hex(value string) string {
 
 type fakeKnowledgeBaseFinder struct {
 	kb *knowledgeModel.KnowledgeBase
+}
+
+type capturingChunkLocker struct {
+	acquired bool
+	err      error
+	keys     []string
+	released []string
+}
+
+func (l *capturingChunkLocker) Acquire(_ context.Context, key string, _ time.Duration) (bool, error) {
+	l.keys = append(l.keys, key)
+	return l.acquired, l.err
+}
+
+func (l *capturingChunkLocker) Release(_ context.Context, key string) error {
+	l.released = append(l.released, key)
+	return nil
 }
 
 func (f fakeKnowledgeBaseFinder) FindByID(context.Context, string) (*knowledgeModel.KnowledgeBase, error) {
@@ -453,6 +474,122 @@ func TestDocumentService_StartChunkPublishesMQEventWhenEnabled(t *testing.T) {
 	}
 	if event.DocID != "doc-1" || event.Operator != "operator-1" {
 		t.Fatalf("unexpected chunk event: %+v", event)
+	}
+}
+
+func TestDocumentService_StartChunkRejectsWhenDistributedChunkLockIsHeld(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate document table: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocument{
+		BaseModel: db.BaseModel{ID: "doc-lock-held"},
+		KbID:      "kb-1",
+		DocName:   "doc.md",
+		FileURL:   "upload://doc.md",
+		FileType:  "md",
+		Status:    "pending",
+		CreatedBy: "user-1",
+	}).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+
+	locker := &capturingChunkLocker{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:        gdb,
+		chunkLock: locker,
+	}
+
+	err = svc.StartChunk(context.Background(), "doc-lock-held", "operator-1")
+	if err == nil || !strings.Contains(err.Error(), "文档分块操作正在进行中") {
+		t.Fatalf("expected lock contention error, got %v", err)
+	}
+	if len(locker.keys) != 1 || locker.keys[0] != "knowledge:chunk:lock:doc-lock-held" {
+		t.Fatalf("unexpected lock key: %+v", locker.keys)
+	}
+	if len(locker.released) != 0 {
+		t.Fatalf("held lock must not be released by the current request: %+v", locker.released)
+	}
+
+	var doc knowledgeModel.KnowledgeDocument
+	if err := gdb.First(&doc, "id = ?", "doc-lock-held").Error; err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if doc.Status != "pending" {
+		t.Fatalf("lock contention must leave document unchanged, got status=%s", doc.Status)
+	}
+}
+
+func TestDocumentService_StartChunkReleasesDistributedChunkLockAfterSubmit(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&knowledgeModel.KnowledgeDocument{}); err != nil {
+		t.Fatalf("migrate document table: %v", err)
+	}
+	if err := gdb.Create(&knowledgeModel.KnowledgeDocument{
+		BaseModel: db.BaseModel{ID: "doc-lock-release"},
+		KbID:      "kb-1",
+		DocName:   "doc.md",
+		FileURL:   "upload://doc.md",
+		FileType:  "md",
+		Status:    "pending",
+		CreatedBy: "user-1",
+	}).Error; err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+
+	locker := &capturingChunkLocker{acquired: true}
+	producer := &capturingKnowledgeMQProducer{}
+	svc := &DocumentService{
+		docRepo:   knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		db:        gdb,
+		chunkLock: locker,
+	}
+	svc.SetMQProducer(producer, true)
+
+	if err := svc.StartChunk(context.Background(), "doc-lock-release", "operator-1"); err != nil {
+		t.Fatalf("start chunk: %v", err)
+	}
+	if len(locker.released) != 1 || locker.released[0] != "knowledge:chunk:lock:doc-lock-release" {
+		t.Fatalf("expected acquired lock to be released, got %+v", locker.released)
+	}
+}
+
+func TestDocumentChunkLockUsesSharedRedisKeyAcrossInstances(t *testing.T) {
+	server := miniredis.RunT(t)
+	clientA := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	clientB := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() {
+		_ = clientA.Close()
+		_ = clientB.Close()
+	})
+
+	lockA := redislock.New(clientA)
+	lockB := redislock.New(clientB)
+	key := "knowledge:chunk:lock:doc-shared"
+	acquired, err := lockA.Acquire(context.Background(), key, 30*time.Second)
+	if err != nil || !acquired {
+		t.Fatalf("first instance should acquire chunk lock, acquired=%v err=%v", acquired, err)
+	}
+	acquired, err = lockB.Acquire(context.Background(), key, 30*time.Second)
+	if err != nil {
+		t.Fatalf("second instance lock attempt failed: %v", err)
+	}
+	if acquired {
+		t.Fatal("second instance must not acquire an active chunk lock")
+	}
+	if err := lockA.Release(context.Background(), key); err != nil {
+		t.Fatalf("release chunk lock: %v", err)
+	}
+	acquired, err = lockB.Acquire(context.Background(), key, 30*time.Second)
+	if err != nil || !acquired {
+		t.Fatalf("second instance should acquire after release, acquired=%v err=%v", acquired, err)
 	}
 }
 
