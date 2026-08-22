@@ -408,6 +408,37 @@ func TestBuildLocalPreferredChatConfig_SynthesizesOllamaCandidate(t *testing.T) 
 	}
 }
 
+func TestBuildLocalPreferredChatConfig_DoesNotInheritCloudTiers(t *testing.T) {
+	aiCfg := config.AIConfig{
+		Providers: config.AIProvidersConfig{
+			"ollama":  {Protocol: "ollama"},
+			"bailian": {Protocol: "openai-compatible"},
+		},
+		Chat: config.AIChatConfig{
+			DefaultTier:      "standard",
+			DeepThinkingTier: "deep",
+			Tiers: map[string]config.AIChatTierConfig{
+				"fast":     {Candidates: []string{"qwen-plus"}, TimeoutMs: 5000},
+				"standard": {Candidates: []string{"qwen-plus"}, TimeoutMs: 30000},
+				"deep":     {Candidates: []string{"qwen3-max"}, TimeoutMs: 120000},
+			},
+			Candidates: []config.AICandidateConfig{
+				{ID: "qwen-plus", Provider: "bailian", Model: "qwen-plus"},
+				{ID: preferredLocalChatID, Provider: preferredLocalChatProvider, Model: preferredLocalChatModel},
+				{ID: "qwen3-max", Provider: "bailian", Model: "qwen3-max", SupportsThinking: true},
+			},
+		},
+	}
+
+	got, ok := buildLocalPreferredChatConfig(aiCfg)
+	if !ok {
+		t.Fatal("expected local preferred config")
+	}
+	if got.Chat.DefaultTier != "" || got.Chat.DeepThinkingTier != "" || len(got.Chat.Tiers) != 0 {
+		t.Fatalf("local preferred config should not inherit cloud tiers, got default=%q deep=%q tiers=%+v", got.Chat.DefaultTier, got.Chat.DeepThinkingTier, got.Chat.Tiers)
+	}
+}
+
 func TestBuildPreferredLLMService_UsesLocalFallbackWrapper(t *testing.T) {
 	aiCfg := config.AIConfig{
 		Providers: config.AIProvidersConfig{

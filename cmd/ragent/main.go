@@ -946,13 +946,15 @@ func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool
 
 	for _, candidate := range aiCfg.Chat.Candidates {
 		if candidate.Provider == preferredLocalChatProvider && strings.TrimSpace(candidate.Model) == preferredLocalChatModel {
-			localCfg.Chat.Candidates = []config.AICandidateConfig{candidate}
-			if strings.TrimSpace(candidate.ID) != "" {
-				localCfg.Chat.DefaultModel = candidate.ID
+			if strings.TrimSpace(candidate.ID) == "" {
+				candidate.ID = preferredLocalChatID
 			}
+			localCfg.Chat.Candidates = []config.AICandidateConfig{candidate}
+			localCfg.Chat.DefaultModel = candidate.ID
 			if provider, ok := localCfg.Providers[preferredLocalChatProvider]; ok {
 				localCfg.Providers[preferredLocalChatProvider] = normalizeOllamaProvider(provider)
 			}
+			filterLocalPreferredChatTiers(&localCfg.Chat)
 			return localCfg, true
 		}
 	}
@@ -966,10 +968,23 @@ func buildLocalPreferredChatConfig(aiCfg config.AIConfig) (config.AIConfig, bool
 			Model:    preferredLocalChatModel,
 			Priority: -1000,
 		}}
+		filterLocalPreferredChatTiers(&localCfg.Chat)
 		return localCfg, true
 	}
 
 	return aiCfg, false
+}
+
+func filterLocalPreferredChatTiers(chatCfg *config.AIChatConfig) {
+	if chatCfg == nil || len(chatCfg.Tiers) == 0 {
+		return
+	}
+	// The local-only service must not inherit cloud tier membership: an
+	// explicit "fast" request should still reach the local candidate when the
+	// cloud configuration has no matching tier or excludes that candidate.
+	chatCfg.DefaultTier = ""
+	chatCfg.DeepThinkingTier = ""
+	chatCfg.Tiers = nil
 }
 
 func normalizeOllamaProvider(provider config.AIProviderConfig) config.AIProviderConfig {
