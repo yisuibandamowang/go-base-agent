@@ -733,24 +733,25 @@ func parseWebSearchChunks(body []byte, max int) []RetrievedChunk {
 		return nil
 	}
 	items := append(payload.Results.Web, payload.Results.News...)
-	if max > 0 && len(items) > max {
-		items = items[:max]
-	}
 	chunks := make([]RetrievedChunk, 0, len(items))
-	for idx, item := range items {
+	for _, item := range items {
 		text := strings.TrimSpace(strings.Join([]string{item.Title, item.Description, strings.Join(item.Snippets, "\n"), item.URL}, "\n"))
 		if text == "" {
 			continue
 		}
+		rank := len(chunks)
 		chunks = append(chunks, RetrievedChunk{
-			ID:    firstSearchText(item.URL, fmt.Sprintf("web-%d", idx)),
+			ID:    firstSearchText(item.URL, fmt.Sprintf("web-%d", rank)),
 			Text:  text,
-			Score: 1 / float64(idx+1),
+			Score: 1 / float64(rank+1),
 			Metadata: map[string]string{
 				"doc_name":   firstSearchText(item.Title, item.URL),
 				"source_url": item.URL,
 			},
 		})
+	}
+	if max > 0 && len(chunks) > max {
+		chunks = chunks[:max]
 	}
 	return chunks
 }

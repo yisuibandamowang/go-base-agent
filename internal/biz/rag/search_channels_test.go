@@ -563,6 +563,18 @@ func TestParseWebSearchChunksKeepsSourceURL(t *testing.T) {
 	}
 }
 
+func TestParseWebSearchChunksAppliesLimitAfterDroppingEmptyResults(t *testing.T) {
+	body := []byte(`{"results":{"web":[{}, {"url":"https://example.com/a","title":"有效网页","description":"网页说明"}],"news":[{"url":"https://example.com/news","title":"有效新闻","description":"新闻说明"}]}}`)
+
+	chunks := parseWebSearchChunks(body, 2)
+	if len(chunks) != 2 {
+		t.Fatalf("expected two valid chunks after filtering, got %+v", chunks)
+	}
+	if chunks[0].ID != "https://example.com/a" || chunks[1].ID != "https://example.com/news" {
+		t.Fatalf("unexpected result order after filtering: %+v", chunks)
+	}
+}
+
 // TestIntentDirectedTargetsExpandMultipleCollections 验证意图节点关联多个知识库时，
 // 检索目标按 EffectiveCollectionNames 展开到全部绑定库。
 func TestIntentDirectedTargetsExpandMultipleCollections(t *testing.T) {

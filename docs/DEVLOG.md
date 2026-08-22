@@ -17,6 +17,10 @@
 | 鉴权 | 自实现 JWT 中间件 (对齐 Sa-Token) |
 | 迁移计划 | `../MIGRATION_PLAN.md`（位于 Java 仓库） |
 
+## 2026-08-22 — 对齐联网检索结果数量语义
+
+- 联网检索通道现在先过滤空结果，再按 `count` 截断；有效结果的排名分数也按过滤后的顺序计算，避免空结果占用返回配额。
+
 ## 2026-08-10 — pg_jieba 关键词召回增强
 
 - 关键词召回按保守方案接入 `pg_jieba + ts_rank_cd`：`t_knowledge_vector.search_vector` 存储文档名 A 权重和 chunk 正文 D 权重，迁移脚本负责创建 `pg_jieba` 扩展、补字段、回填并创建 GIN 索引。
