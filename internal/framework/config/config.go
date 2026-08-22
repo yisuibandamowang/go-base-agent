@@ -346,9 +346,44 @@ type RAGSearchChannelConfig struct {
 }
 
 type RAGSearchFusionConfig struct {
-	Strategy             string `mapstructure:"strategy"`
-	RRFK                 int    `mapstructure:"rrf-k"`
-	RerankCandidateLimit int    `mapstructure:"rerank-candidate-limit"`
+	Strategy             string                        `mapstructure:"strategy"`
+	RRFK                 int                           `mapstructure:"rrf-k"`
+	RerankCandidateLimit int                           `mapstructure:"rerank-candidate-limit"`
+	ChannelWeights       RAGSearchChannelWeightsConfig `mapstructure:"channel-weights"`
+}
+
+// RAGSearchChannelWeightsConfig controls each channel's contribution to RRF.
+type RAGSearchChannelWeightsConfig struct {
+	Vector    float64 `mapstructure:"vector"`
+	Keyword   float64 `mapstructure:"keyword"`
+	Graph     float64 `mapstructure:"graph"`
+	WebSearch float64 `mapstructure:"web-search"`
+}
+
+// ChannelWeight returns a configured channel weight, falling back to the Java-compatible default.
+func (c RAGSearchFusionConfig) ChannelWeight(channel string) float64 {
+	var weight float64
+	switch channel {
+	case "vector":
+		weight = c.ChannelWeights.Vector
+	case "keyword":
+		weight = c.ChannelWeights.Keyword
+	case "graph":
+		weight = c.ChannelWeights.Graph
+	case "web-search":
+		weight = c.ChannelWeights.WebSearch
+	}
+	if weight > 0 {
+		return weight
+	}
+	switch channel {
+	case "graph":
+		return 0.8
+	case "web-search":
+		return 0.5
+	default:
+		return 1
+	}
 }
 
 type RAGGuidanceConfig struct {
@@ -736,6 +771,10 @@ func applyDefaults(cfg *Config) {
 	if search.Fusion.RerankCandidateLimit <= 0 {
 		search.Fusion.RerankCandidateLimit = 50
 	}
+	search.Fusion.ChannelWeights.Vector = search.Fusion.ChannelWeight("vector")
+	search.Fusion.ChannelWeights.Keyword = search.Fusion.ChannelWeight("keyword")
+	search.Fusion.ChannelWeights.Graph = search.Fusion.ChannelWeight("graph")
+	search.Fusion.ChannelWeights.WebSearch = search.Fusion.ChannelWeight("web-search")
 	limit := &cfg.RAG.RateLimit.Global
 	if limit.MaxConcurrent <= 0 {
 		limit.MaxConcurrent = 50

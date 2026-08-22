@@ -164,6 +164,11 @@ rag:
       strategy: rrf
       rrf-k: 60
       rerank-candidate-limit: 50
+      channel-weights:
+        vector: 1.0
+        keyword: 1.0
+        graph: 0.8
+        web-search: 0.5
 
   guidance:
     enabled: false

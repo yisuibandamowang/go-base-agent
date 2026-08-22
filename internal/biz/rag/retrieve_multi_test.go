@@ -143,6 +143,29 @@ func TestFusionPostProcessor_RRFReordersByCrossChannelHits(t *testing.T) {
 	}
 }
 
+func TestFusionPostProcessor_UsesConfiguredChannelWeights(t *testing.T) {
+	pp := NewFusionPostProcessorWithWeights(60, 0, FusionChannelWeights{
+		Vector:  1,
+		Keyword: 3,
+	})
+	chunks := []RetrievedChunk{
+		{ID: "a", Text: "alpha"},
+		{ID: "b", Text: "beta"},
+	}
+	results := []SearchChannelResult{
+		{ChannelType: ChannelVectorGlobal, Chunks: []RetrievedChunk{{ID: "a"}, {ID: "b"}}},
+		{ChannelType: ChannelKeyword, Chunks: []RetrievedChunk{{ID: "b"}, {ID: "a"}}},
+	}
+
+	result := pp.Process(chunks, results)
+	if result[0].ID != "b" {
+		t.Fatalf("expected keyword weight to promote b, got %+v", result)
+	}
+	if result[0].Score <= result[1].Score {
+		t.Fatalf("expected weighted RRF scores to be ordered, got %+v", result)
+	}
+}
+
 func TestFusionPostProcessor_TruncatesRerankCandidates(t *testing.T) {
 	pp := NewFusionPostProcessorWithLimit(60, 2)
 	chunks := []RetrievedChunk{

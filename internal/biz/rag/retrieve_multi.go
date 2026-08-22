@@ -44,6 +44,14 @@ type SearchChannelResult struct {
 	LatencyMs   int64
 }
 
+// FusionChannelWeights controls the relative contribution of retrieval channels to RRF.
+type FusionChannelWeights struct {
+	Vector    float64
+	Keyword   float64
+	Graph     float64
+	WebSearch float64
+}
+
 // SearchChannel is a retrievable search channel.
 // Aligns with Java SearchChannel.
 type SearchChannel interface {
@@ -398,6 +406,7 @@ func dedupChannelPriority(typ SearchChannelType) int {
 type FusionPostProcessor struct {
 	rrfK                 int
 	rerankCandidateLimit int
+	weights              FusionChannelWeights
 }
 
 // NewFusionPostProcessor creates an RRF post-processor.
@@ -407,10 +416,20 @@ func NewFusionPostProcessor(rrfK int) *FusionPostProcessor {
 
 // NewFusionPostProcessorWithLimit creates an RRF post-processor with an optional candidate limit.
 func NewFusionPostProcessorWithLimit(rrfK int, rerankCandidateLimit int) *FusionPostProcessor {
+	return NewFusionPostProcessorWithWeights(rrfK, rerankCandidateLimit, FusionChannelWeights{
+		Vector:    1,
+		Keyword:   1,
+		Graph:     1,
+		WebSearch: 1,
+	})
+}
+
+// NewFusionPostProcessorWithWeights creates an RRF post-processor with channel weights.
+func NewFusionPostProcessorWithWeights(rrfK int, rerankCandidateLimit int, weights FusionChannelWeights) *FusionPostProcessor {
 	if rrfK <= 0 {
 		rrfK = 60
 	}
-	return &FusionPostProcessor{rrfK: rrfK, rerankCandidateLimit: rerankCandidateLimit}
+	return &FusionPostProcessor{rrfK: rrfK, rerankCandidateLimit: rerankCandidateLimit, weights: weights}
 }
 
 func (f *FusionPostProcessor) Name() string { return "fusion" }
@@ -426,8 +445,9 @@ func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchC
 
 	scores := make(map[string]float64)
 	for _, result := range results {
+		weight := f.weightOf(result.ChannelType)
 		for rank, chunk := range result.Chunks {
-			scores[chunkKey(chunk)] += 1.0 / float64(f.rrfK+rank+1)
+			scores[chunkKey(chunk)] += weight / float64(f.rrfK+rank+1)
 		}
 	}
 
@@ -446,6 +466,22 @@ func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchC
 		return fused[i].Score > fused[j].Score
 	})
 	return f.truncateCandidates(fused)
+}
+
+func (f *FusionPostProcessor) weightOf(channelType SearchChannelType) float64 {
+	weights := f.weights
+	switch channelType {
+	case ChannelVectorGlobal, ChannelIntentDirected:
+		return weights.Vector
+	case ChannelKeyword:
+		return weights.Keyword
+	case ChannelGraph:
+		return weights.Graph
+	case ChannelWebSearch:
+		return weights.WebSearch
+	default:
+		return 1
+	}
 }
 
 func (f *FusionPostProcessor) truncateCandidates(chunks []RetrievedChunk) []RetrievedChunk {

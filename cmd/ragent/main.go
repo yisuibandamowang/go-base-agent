@@ -410,9 +410,15 @@ func main() {
 	postProcessors := []rag.SearchResultPostProcessor{&rag.DedupPostProcessor{}}
 	fusionStrategy := strings.TrimSpace(cfg.RAG.Search.Fusion.Strategy)
 	if fusionStrategy == "" || strings.EqualFold(fusionStrategy, "rrf") {
-		postProcessors = append(postProcessors, rag.NewFusionPostProcessorWithLimit(
+		postProcessors = append(postProcessors, rag.NewFusionPostProcessorWithWeights(
 			cfg.RAG.Search.Fusion.RRFK,
 			cfg.RAG.Search.Fusion.RerankCandidateLimit,
+			rag.FusionChannelWeights{
+				Vector:    cfg.RAG.Search.Fusion.ChannelWeight("vector"),
+				Keyword:   cfg.RAG.Search.Fusion.ChannelWeight("keyword"),
+				Graph:     cfg.RAG.Search.Fusion.ChannelWeight("graph"),
+				WebSearch: cfg.RAG.Search.Fusion.ChannelWeight("web-search"),
+			},
 		))
 	}
 	multiEngine := rag.NewMultiChannelRetrievalEngine(searchChannels, postProcessors)

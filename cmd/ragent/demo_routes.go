@@ -394,19 +394,19 @@ func buildRAGSearchSettings(cfg *config.Config) map[string]any {
 			"timeoutMs": cfg.RAG.Search.Channels.TimeoutMs,
 			"vector": map[string]any{
 				"enabled": vectorGlobal.IsEnabledByDefault(),
-				"weight":  1.0,
+				"weight":  cfg.RAG.Search.Fusion.ChannelWeight("vector"),
 			},
 			"keyword": map[string]any{
 				"enabled": keyword.IsEnabledByDefault(),
-				"weight":  1.0,
+				"weight":  cfg.RAG.Search.Fusion.ChannelWeight("keyword"),
 			},
 			"graph": map[string]any{
 				"enabled": graph.IsEnabledByDefaultWith(false),
-				"weight":  0.8,
+				"weight":  cfg.RAG.Search.Fusion.ChannelWeight("graph"),
 			},
 			"webSearch": map[string]any{
 				"enabled":          webSearch.Enabled,
-				"weight":           1.0,
+				"weight":           cfg.RAG.Search.Fusion.ChannelWeight("web-search"),
 				"count":            webSearch.Count,
 				"timeoutSeconds":   webSearch.TimeoutSeconds,
 				"apiKeyConfigured": strings.TrimSpace(webSearch.APIKey) != "",

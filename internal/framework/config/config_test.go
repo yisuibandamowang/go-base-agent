@@ -324,6 +324,11 @@ rag:
       strategy: rrf
       rrf-k: 42
       rerank-candidate-limit: 25
+      channel-weights:
+        vector: 1.2
+        keyword: 0.9
+        graph: 0.4
+        web-search: 0.3
 `
 
 	tmpDir := t.TempDir()
@@ -345,6 +350,10 @@ rag:
 	}
 	if cfg.RAG.Search.Fusion.RerankCandidateLimit != 25 {
 		t.Fatalf("unexpected rerank candidate limit: %d", cfg.RAG.Search.Fusion.RerankCandidateLimit)
+	}
+	weights := cfg.RAG.Search.Fusion.ChannelWeights
+	if weights.Vector != 1.2 || weights.Keyword != 0.9 || weights.Graph != 0.4 || weights.WebSearch != 0.3 {
+		t.Fatalf("unexpected channel weights: %+v", weights)
 	}
 	if cfg.RAG.Search.DefaultTopK != 12 {
 		t.Fatalf("unexpected default topK: %d", cfg.RAG.Search.DefaultTopK)
@@ -470,7 +479,11 @@ func TestLoadAppliesRAGSearchJavaDefaults(t *testing.T) {
 	}
 	if search.Fusion.Strategy != "rrf" ||
 		search.Fusion.RRFK != 60 ||
-		search.Fusion.RerankCandidateLimit != 50 {
+		search.Fusion.RerankCandidateLimit != 50 ||
+		search.Fusion.ChannelWeights.Vector != 1 ||
+		search.Fusion.ChannelWeights.Keyword != 1 ||
+		search.Fusion.ChannelWeights.Graph != 0.8 ||
+		search.Fusion.ChannelWeights.WebSearch != 0.5 {
 		t.Fatalf("unexpected fusion defaults: %+v", search.Fusion)
 	}
 }

@@ -597,6 +597,12 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 					Strategy:             "rrf",
 					RRFK:                 61,
 					RerankCandidateLimit: 40,
+					ChannelWeights: config.RAGSearchChannelWeightsConfig{
+						Vector:    1.1,
+						Keyword:   0.9,
+						Graph:     0.7,
+						WebSearch: 0.4,
+					},
 				},
 			},
 			Trace: config.RAGTraceConfig{Enabled: &traceEnabled},
@@ -754,6 +760,13 @@ func TestRagSettingsExposesFullConfig(t *testing.T) {
 	}
 	if search["fusion"].(map[string]any)["rrfK"].(float64) != 61 {
 		t.Fatalf("unexpected fusion settings: %#v", search["fusion"])
+	}
+	channels = search["channels"].(map[string]any)
+	if channels["vector"].(map[string]any)["weight"].(float64) != 1.1 ||
+		channels["keyword"].(map[string]any)["weight"].(float64) != 0.9 ||
+		channels["graph"].(map[string]any)["weight"].(float64) != 0.7 ||
+		channels["webSearch"].(map[string]any)["weight"].(float64) != 0.4 {
+		t.Fatalf("unexpected channel weights: %#v", channels)
 	}
 	if ragCfg["memory"].(map[string]any)["titleMaxLength"].(float64) != 30 {
 		t.Fatalf("unexpected memory settings: %#v", ragCfg["memory"])
