@@ -54,6 +54,7 @@ func TestLimiter_AcquireWaitsForOnAcquire(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	done := make(chan struct{})
+	timeouted := make(chan struct{}, 1)
 	go func() {
 		defer close(done)
 		_ = l.Acquire(context.Background(), ratelimit.AcquireRequest{
@@ -63,7 +64,7 @@ func TestLimiter_AcquireWaitsForOnAcquire(t *testing.T) {
 				<-release
 			},
 			OnTimeout: func() {
-				t.Fatal("unexpected timeout")
+				timeouted <- struct{}{}
 			},
 		})
 	}()
@@ -86,6 +87,11 @@ func TestLimiter_AcquireWaitsForOnAcquire(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("acquire did not return after onAcquire completed")
+	}
+	select {
+	case <-timeouted:
+		t.Fatal("unexpected timeout")
+	default:
 	}
 }
 
