@@ -1,8 +1,12 @@
 # go-base-agent — Go 复刻开发日志
 
+- 2026-08-23：补齐 XLSX 多工作表解析；原生解析器会按工作簿顺序解析所有可见 Sheet、跳过隐藏与非常隐藏 Sheet，并为每个 Sheet 保留独立来源名称，避免后续工作表内容静默丢失。
+- 2026-08-23：补齐当前用户修改密码的业务审计；`PUT /user/password` 成功后记录 `USER/UPDATE`，前后快照只保留非敏感用户字段，不记录密码或哈希。
+- 2026-08-23：修复初始化器确认边界；`cleanup` 与非 dry-run 的 `initialize` 只接受命令行显式传入且与配置确认词完全一致的 `--confirm`，未传确认词不再被程序自动回填，避免误触发破坏性清理。
 - 2026-08-22：补齐卡死分块恢复启用状态边界；定时恢复只处理 `enabled=1` 且超时的 `running` 文档，禁用文档保持原状态，对齐 Java `DocumentStatusHelper.recoverStuckRunning`。
 - 2026-08-22：补齐文档分块同文档分布式锁；分块提交入口使用 `knowledge:chunk:lock:{docId}` 保护多实例并发，锁竞争时保持文档状态不变，Redis 锁异常时继续使用数据库状态条件作为降级保护。
 - 2026-08-22：补齐流式任务跨实例取消能力；Redis 可用时通过 `ragent:stream:cancel` Pub/Sub 广播取消事件，并以 30 分钟标记保证尚未注册的任务也能立即收取消状态，Redis 不可用时继续使用单实例取消路径。
+- 2026-08-22：补齐远程文档定时刷新变更检测；HTTP 来源先按 Java 语义使用 ETag，再回退 Last-Modified，验证器无法判断时下载并用 SHA-256 兜底，同时持久化 `ETag` / `Last-Modified` 元信息，避免无变化文档重复下载和分块。
 
 > 从 Java 版 Ragent 用 Go 重写，目标功能 100% 对齐，前端零改动复用。
 
