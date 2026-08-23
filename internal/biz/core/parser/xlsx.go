@@ -14,7 +14,7 @@ import (
 	"go-base-agent/internal/biz/rag"
 )
 
-// XLSXParser 解析 XLSX 文件的首个工作表为表格块。
+// XLSXParser 解析 XLSX 文件中所有可见工作表为表格块。
 type XLSXParser struct{}
 
 func (p *XLSXParser) Type() rag.ParserType { return rag.ParserExcelPOI }
@@ -39,33 +39,45 @@ func (p *XLSXParser) Parse(ctx context.Context, data []byte, mimeType string, op
 	if err != nil {
 		return nil, err
 	}
-	sheetRef, err := readXLSXFirstSheetRef(zr)
+	sheetRefs, err := readXLSXSheetRefs(zr)
 	if err != nil {
 		return nil, err
 	}
-	hyperlinkTargets, err := readXLSXHyperlinkTargets(zr, sheetRef.Path)
-	if err != nil {
-		return nil, err
+	blocks := make([]rag.Block, 0, len(sheetRefs))
+	for _, sheetRef := range sheetRefs {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		hyperlinkTargets, err := readXLSXHyperlinkTargets(zr, sheetRef.Path)
+		if err != nil {
+			return nil, err
+		}
+		hyperlinks, err := collectXLSXSheetHyperlinks(zr, sheetRef.Path, hyperlinkTargets)
+		if err != nil {
+			return nil, err
+		}
+		sheet, err := openZipFile(zr, sheetRef.Path)
+		if err != nil {
+			return nil, fmt.Errorf("open xlsx sheet %s: %w", sheetRef.Path, err)
+		}
+		records, err := readXLSXSheet(sheet, sharedStrings, hyperlinks)
+		sheet.Close()
+		if err != nil {
+			return nil, fmt.Errorf("parse xlsx sheet %s: %w", sheetRef.Name, err)
+		}
+		if len(records) == 0 {
+			continue
+		}
+		provenance := rag.Provenance{SourceFile: parseOption(options, "sourceFile"), SheetName: sheetRef.Name}
+		blocks = append(blocks, tableBlockFromRecords(records, provenance))
 	}
-	hyperlinks, err := collectXLSXSheetHyperlinks(zr, sheetRef.Path, hyperlinkTargets)
-	if err != nil {
-		return nil, err
-	}
-	sheet, err := openZipFile(zr, sheetRef.Path)
-	if err != nil {
-		return nil, fmt.Errorf("open xlsx sheet %s: %w", sheetRef.Path, err)
-	}
-	defer sheet.Close()
-	records, err := readXLSXSheet(sheet, sharedStrings, hyperlinks)
-	if err != nil {
-		return nil, fmt.Errorf("parse xlsx sheet: %w", err)
-	}
-	if len(records) == 0 {
+	if len(blocks) == 0 {
 		return nil, fmt.Errorf("parse xlsx: empty content")
 	}
-	provenance := rag.Provenance{SourceFile: parseOption(options, "sourceFile"), SheetName: sheetRef.Name}
 	return &rag.ParsedDocument{
-		Blocks:   []rag.Block{tableBlockFromRecords(records, provenance)},
+		Blocks:   blocks,
 		Metadata: map[string]string{"mime": mimeType, "method": "xlsx"},
 	}, nil
 }
@@ -79,18 +91,19 @@ func defaultXLSXSheetRef() xlsxSheetRef {
 	return xlsxSheetRef{Name: "sheet1", Path: "xl/worksheets/sheet1.xml"}
 }
 
-func readXLSXFirstSheetRef(zr *zip.Reader) (xlsxSheetRef, error) {
+func readXLSXSheetRefs(zr *zip.Reader) ([]xlsxSheetRef, error) {
 	rc, err := openZipFile(zr, "xl/workbook.xml")
 	if err != nil {
-		return defaultXLSXSheetRef(), nil
+		return []xlsxSheetRef{defaultXLSXSheetRef()}, nil
 	}
 	defer rc.Close()
 
 	relationships, err := readXLSXWorkbookRelationships(zr)
 	if err != nil {
-		return xlsxSheetRef{}, err
+		return nil, err
 	}
 
+	refs := make([]xlsxSheetRef, 0)
 	decoder := xml.NewDecoder(rc)
 	for {
 		token, err := decoder.Token()
@@ -98,7 +111,7 @@ func readXLSXFirstSheetRef(zr *zip.Reader) (xlsxSheetRef, error) {
 			break
 		}
 		if err != nil {
-			return xlsxSheetRef{}, fmt.Errorf("parse xlsx workbook.xml: %w", err)
+			return nil, fmt.Errorf("parse xlsx workbook.xml: %w", err)
 		}
 		start, ok := token.(xml.StartElement)
 		if !ok || start.Name.Local != "sheet" {
@@ -126,9 +139,12 @@ func readXLSXFirstSheetRef(zr *zip.Reader) (xlsxSheetRef, error) {
 		if target := relationships[relID]; target != "" {
 			ref.Path = normalizeXLSXWorkbookTarget(target)
 		}
-		return ref, nil
+		refs = append(refs, ref)
 	}
-	return defaultXLSXSheetRef(), nil
+	if len(refs) == 0 {
+		return []xlsxSheetRef{defaultXLSXSheetRef()}, nil
+	}
+	return refs, nil
 }
 
 func readXLSXWorkbookRelationships(zr *zip.Reader) (map[string]string, error) {

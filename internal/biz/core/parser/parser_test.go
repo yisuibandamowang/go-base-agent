@@ -248,6 +248,69 @@ func TestXLSXParserUsesWorkbookRelationshipForFirstSheet(t *testing.T) {
 	}
 }
 
+func TestXLSXParserParsesAllVisibleSheetsAndSkipsHiddenSheets(t *testing.T) {
+	data := zipBytes(t, map[string]string{
+		"xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="权益表" sheetId="1" r:id="rId1"/>
+    <sheet name="隐藏数据" sheetId="2" state="hidden" r:id="rId2"/>
+    <sheet name="积分表" sheetId="3" state="veryHidden" r:id="rId3"/>
+    <sheet name="等级表" sheetId="4" r:id="rId4"/>
+  </sheets>
+</workbook>`,
+		"xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>
+</Relationships>`,
+		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <si><t>能力</t></si><si><t>说明</t></si><si><t>权益查询</t></si><si><t>可见</t></si>
+  <si><t>隐藏内容</t></si><si><t>积分查询</t></si><si><t>等级查询</t></si><si><t>等级说明</t></si>
+</sst>`,
+		"xl/worksheets/sheet1.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+  <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+  <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row>
+</sheetData></worksheet>`,
+		"xl/worksheets/sheet2.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+  <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+  <row r="2"><c r="A2" t="s"><v>4</v></c><c r="B2" t="s"><v>4</v></c></row>
+</sheetData></worksheet>`,
+		"xl/worksheets/sheet3.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+  <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+  <row r="2"><c r="A2" t="s"><v>5</v></c><c r="B2" t="s"><v>5</v></c></row>
+</sheetData></worksheet>`,
+		"xl/worksheets/sheet4.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+  <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+  <row r="2"><c r="A2" t="s"><v>6</v></c><c r="B2" t="s"><v>7</v></c></row>
+</sheetData></worksheet>`,
+	})
+
+	parsed, err := (&XLSXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil)
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	if len(parsed.Blocks) != 2 {
+		t.Fatalf("expected two visible sheet blocks, got %+v", parsed.Blocks)
+	}
+	if got := parsed.Blocks[0].Provenance.SheetName; got != "权益表" {
+		t.Fatalf("expected first visible sheet, got %q", got)
+	}
+	if got := parsed.Blocks[1].Provenance.SheetName; got != "等级表" {
+		t.Fatalf("expected second visible sheet, got %q", got)
+	}
+	if got := parsed.Blocks[1].Rows[0][0]; got != "等级查询" {
+		t.Fatalf("expected second visible sheet data, got %q", got)
+	}
+}
+
 func TestXLSXParserPreservesFormulaResultsAndHyperlinks(t *testing.T) {
 	data := zipBytes(t, map[string]string{
 		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>
