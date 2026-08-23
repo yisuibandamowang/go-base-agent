@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -13,18 +14,24 @@ import (
 
 // PromptResolver resolves runtime prompts from agent profiles.
 type PromptResolver struct {
-	repo *agentRepo.AgentRepo
-	mode string
+	repo  *agentRepo.AgentRepo
+	mode  string
+	cache PromptCacheManager
 
 	mu      sync.RWMutex
 	prompts map[string]string
 }
 
 // NewPromptResolver creates a prompt resolver.
-func NewPromptResolver(repo *agentRepo.AgentRepo, mode string) *PromptResolver {
+func NewPromptResolver(repo *agentRepo.AgentRepo, mode string, caches ...PromptCacheManager) *PromptResolver {
+	var promptCache PromptCacheManager
+	if len(caches) > 0 {
+		promptCache = caches[0]
+	}
 	return &PromptResolver{
 		repo:    repo,
 		mode:    normalizeMode(mode),
+		cache:   promptCache,
 		prompts: make(map[string]string),
 	}
 }
@@ -62,6 +69,11 @@ func (r *PromptResolver) Refresh(ctx context.Context) error {
 	r.mu.Lock()
 	r.prompts = next
 	r.mu.Unlock()
+	if r.cache != nil {
+		if err := r.cache.Save(context.Background(), next); err != nil {
+			slog.Warn("save agent prompts cache failed", "err", err)
+		}
+	}
 	return nil
 }
 
@@ -69,6 +81,15 @@ func (r *PromptResolver) Refresh(ctx context.Context) error {
 func (r *PromptResolver) Resolve(slotKey string) string {
 	if r == nil {
 		return ""
+	}
+	if r.cache != nil {
+		if prompts, hit, err := r.cache.Load(context.Background()); err != nil {
+			slog.Warn("load agent prompts cache failed", "err", err)
+		} else if hit {
+			r.mu.Lock()
+			r.prompts = prompts
+			r.mu.Unlock()
+		}
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()

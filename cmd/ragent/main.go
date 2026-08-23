@@ -296,7 +296,11 @@ func main() {
 	}
 
 	agentRepoObj := agentRepo.NewAgentRepo(gormDB)
-	agentPromptResolver := agentService.NewPromptResolver(agentRepoObj, resolveEngineType(cfg))
+	agentPromptResolver := agentService.NewPromptResolver(
+		agentRepoObj,
+		resolveEngineType(cfg),
+		agentService.NewRedisPromptCacheManager(rdb),
+	)
 	if err := agentPromptResolver.Refresh(context.Background()); err != nil {
 		slog.Warn("failed to load agent prompts", "err", err)
 	}
