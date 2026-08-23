@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -875,9 +876,12 @@ func TestDocumentScheduleService_ScanDueKeepsLockAliveDuringLongRefresh(t *testi
 		chunkStarter,
 		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 1},
 	)
+	var renewMu sync.Mutex
 	var renewCount int
 	var lastRenew time.Time
 	svc.lockRenewObserver = func(_ string, lockUntil time.Time) {
+		renewMu.Lock()
+		defer renewMu.Unlock()
 		renewCount++
 		lastRenew = lockUntil
 	}
@@ -892,8 +896,12 @@ func TestDocumentScheduleService_ScanDueKeepsLockAliveDuringLongRefresh(t *testi
 	}()
 
 	time.Sleep(1500 * time.Millisecond)
-	if renewCount == 0 || !lastRenew.After(baseNow.Add(1500*time.Millisecond)) {
-		t.Fatalf("expected heartbeat to renew lock, count=%d lastRenew=%v", renewCount, lastRenew)
+	renewMu.Lock()
+	gotRenewCount := renewCount
+	gotLastRenew := lastRenew
+	renewMu.Unlock()
+	if gotRenewCount == 0 || !gotLastRenew.After(baseNow.Add(1500*time.Millisecond)) {
+		t.Fatalf("expected heartbeat to renew lock, count=%d lastRenew=%v", gotRenewCount, gotLastRenew)
 	}
 
 	close(release)
