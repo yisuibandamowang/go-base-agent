@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"image/png"
+	"os"
 	"strings"
 	"testing"
 
@@ -371,6 +372,38 @@ func TestXLSXParserExpandsMergedDataCellsAndPreservesSparseColumns(t *testing.T)
 	}
 	if len(block.Rows) != 2 || strings.Join(block.Rows[1], ",") != "华北,80" {
 		t.Fatalf("expected merged value and sparse column alignment, got %+v", block.Rows)
+	}
+}
+
+func TestDefaultRegistrySupportsLegacyXLS(t *testing.T) {
+	if !DefaultRegistry().Supports("application/vnd.ms-excel") {
+		t.Fatal("expected default parser registry to support legacy xls")
+	}
+}
+
+func TestDefaultRegistryParsesLegacyXLS(t *testing.T) {
+	data, err := os.ReadFile("testdata/legacy.xls")
+	if err != nil {
+		t.Fatalf("read xls fixture: %v", err)
+	}
+	parsed, err := DefaultRegistry().Parse(context.Background(), data, "application/vnd.ms-excel", map[string]string{
+		"sourceFile": "legacy.xls",
+	})
+	if err != nil {
+		t.Fatalf("parse legacy xls: %v", err)
+	}
+	if len(parsed.Blocks) != 1 {
+		t.Fatalf("expected one xls table block, got %+v", parsed.Blocks)
+	}
+	block := parsed.Blocks[0]
+	if block.Provenance.SourceFile != "legacy.xls" || block.Provenance.SheetName != "Table" {
+		t.Fatalf("expected xls provenance, got %+v", block.Provenance)
+	}
+	if got := strings.Join(block.Headers, ","); got != "Code,Name,Description" {
+		t.Fatalf("unexpected xls headers: %q", got)
+	}
+	if len(block.Rows) == 0 || strings.Join(block.Rows[0], ",") != "code1,name1,description1" {
+		t.Fatalf("unexpected xls rows: %+v", block.Rows)
 	}
 }
 

@@ -1133,6 +1133,7 @@ func buildDocumentParserRegistryWithPermitRunner(cfg *config.Config, vlmService 
 	}
 	reg.Register(&coreparser.MarkdownParser{})
 	reg.Register(&coreparser.CSVParser{})
+	reg.Register(&coreparser.XLSParser{})
 	reg.Register(&coreparser.XLSXParser{})
 	reg.Register(&coreparser.PDFParser{})
 	reg.Register(&coreparser.DOCXParser{})

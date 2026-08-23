@@ -94,6 +94,7 @@ func DefaultRegistry() *Registry {
 	reg := NewRegistry(nil)
 	reg.Register(&MarkdownParser{})
 	reg.Register(&CSVParser{})
+	reg.Register(&XLSParser{})
 	reg.Register(&XLSXParser{})
 	reg.Register(&PDFParser{})
 	reg.Register(&DOCXParser{})
