@@ -311,6 +311,69 @@ func TestXLSXParserParsesAllVisibleSheetsAndSkipsHiddenSheets(t *testing.T) {
 	}
 }
 
+func TestXLSXParserFlattensMergedMultiRowHeaders(t *testing.T) {
+	data := zipBytes(t, map[string]string{
+		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <si><t>财务</t></si><si><t>地区</t></si><si><t>一月</t></si><si><t>二月</t></si>
+  <si><t>100</t></si><si><t>80</t></si><si><t>华北</t></si>
+</sst>`,
+		"xl/worksheets/sheet1.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>
+    <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row>
+    <row r="3"><c r="A3" t="s"><v>4</v></c><c r="B3" t="s"><v>5</v></c><c r="C3" t="s"><v>6</v></c></row>
+  </sheetData>
+  <mergeCells count="2"><mergeCell ref="A1:B1"/><mergeCell ref="C1:C2"/></mergeCells>
+</worksheet>`,
+	})
+
+	parsed, err := (&XLSXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", map[string]string{
+		"headerRows": "2",
+	})
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	block := parsed.Blocks[0]
+	if got := strings.Join(block.Headers, ","); got != "财务|一月,财务|二月,地区" {
+		t.Fatalf("expected flattened headers, got %q", got)
+	}
+	if len(block.Rows) != 1 || strings.Join(block.Rows[0], ",") != "100,80,华北" {
+		t.Fatalf("expected data after two header rows, got %+v", block.Rows)
+	}
+}
+
+func TestXLSXParserExpandsMergedDataCellsAndPreservesSparseColumns(t *testing.T) {
+	data := zipBytes(t, map[string]string{
+		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <si><t>地区</t></si><si><t>销售额</t></si><si><t>华北</t></si><si><t>100</t></si><si><t>80</t></si>
+</sst>`,
+		"xl/worksheets/sheet1.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>
+    <row r="2"><c r="A2" t="s"><v>2</v></c><c r="C2" t="s"><v>3</v></c></row>
+    <row r="3"><c r="C3" t="s"><v>4</v></c></row>
+  </sheetData>
+  <mergeCells count="1"><mergeCell ref="A2:A3"/></mergeCells>
+</worksheet>`,
+	})
+
+	parsed, err := (&XLSXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil)
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	block := parsed.Blocks[0]
+	if got := strings.Join(block.Headers, ","); got != "地区,销售额" {
+		t.Fatalf("expected empty middle column to be removed, got %q", got)
+	}
+	if len(block.Rows) != 2 || strings.Join(block.Rows[1], ",") != "华北,80" {
+		t.Fatalf("expected merged value and sparse column alignment, got %+v", block.Rows)
+	}
+}
+
 func TestXLSXParserPreservesFormulaResultsAndHyperlinks(t *testing.T) {
 	data := zipBytes(t, map[string]string{
 		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>

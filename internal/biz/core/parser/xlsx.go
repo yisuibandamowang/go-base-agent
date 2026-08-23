@@ -39,6 +39,10 @@ func (p *XLSXParser) Parse(ctx context.Context, data []byte, mimeType string, op
 	if err != nil {
 		return nil, err
 	}
+	headerRows, err := parseXLSXHeaderRows(options)
+	if err != nil {
+		return nil, err
+	}
 	sheetRefs, err := readXLSXSheetRefs(zr)
 	if err != nil {
 		return nil, err
@@ -62,11 +66,12 @@ func (p *XLSXParser) Parse(ctx context.Context, data []byte, mimeType string, op
 		if err != nil {
 			return nil, fmt.Errorf("open xlsx sheet %s: %w", sheetRef.Path, err)
 		}
-		records, err := readXLSXSheet(sheet, sharedStrings, hyperlinks)
+		sheetData, err := readXLSXSheet(sheet, sharedStrings, hyperlinks)
 		sheet.Close()
 		if err != nil {
 			return nil, fmt.Errorf("parse xlsx sheet %s: %w", sheetRef.Name, err)
 		}
+		records := normalizeXLSXSheet(sheetData, headerRows)
 		if len(records) == 0 {
 			continue
 		}
@@ -87,8 +92,35 @@ type xlsxSheetRef struct {
 	Path string
 }
 
+type xlsxSheetData struct {
+	Records      [][]string
+	MergedRanges []xlsxCellRange
+}
+
+type xlsxCellRange struct {
+	FirstRow int
+	FirstCol int
+	LastRow  int
+	LastCol  int
+}
+
 func defaultXLSXSheetRef() xlsxSheetRef {
 	return xlsxSheetRef{Name: "sheet1", Path: "xl/worksheets/sheet1.xml"}
+}
+
+func parseXLSXHeaderRows(options map[string]string) (int, error) {
+	value := parseOption(options, "headerRows")
+	if value == "" {
+		return 1, nil
+	}
+	headerRows, err := strconv.Atoi(value)
+	if err != nil {
+		return 1, nil
+	}
+	if headerRows < 1 {
+		return 0, fmt.Errorf("parse xlsx: headerRows must be >= 1")
+	}
+	return headerRows, nil
 }
 
 func readXLSXSheetRefs(zr *zip.Reader) ([]xlsxSheetRef, error) {
@@ -321,10 +353,17 @@ func readXLSXSharedStrings(zr *zip.Reader) ([]string, error) {
 	return values, nil
 }
 
-func readXLSXSheet(r io.Reader, sharedStrings []string, hyperlinks map[string]string) ([][]string, error) {
+func readXLSXSheet(r io.Reader, sharedStrings []string, hyperlinks map[string]string) (xlsxSheetData, error) {
 	decoder := xml.NewDecoder(r)
-	var records [][]string
-	var currentRow []string
+	cells := make(map[int]map[int]string)
+	mergedRanges := make([]xlsxCellRange, 0)
+	currentRowIndex := -1
+	nextRowIndex := 0
+	currentCellRow := -1
+	currentCellCol := -1
+	nextCellCol := 0
+	maxRow := -1
+	maxCol := -1
 	var currentCellType string
 	var currentCellRef string
 	var currentFormula strings.Builder
@@ -339,17 +378,30 @@ func readXLSXSheet(r io.Reader, sharedStrings []string, hyperlinks map[string]st
 			break
 		}
 		if err != nil {
-			return nil, err
+			return xlsxSheetData{}, err
 		}
 		switch t := token.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "row":
-				currentRow = nil
+				currentRowIndex = nextRowIndex
+				for _, attr := range t.Attr {
+					if attr.Name.Local != "r" {
+						continue
+					}
+					rowNumber, err := strconv.Atoi(strings.TrimSpace(attr.Value))
+					if err == nil && rowNumber > 0 {
+						currentRowIndex = rowNumber - 1
+					}
+				}
+				nextRowIndex = currentRowIndex + 1
+				nextCellCol = 0
 			case "c":
 				inCell = true
 				currentCellType = ""
 				currentCellRef = ""
+				currentCellRow = currentRowIndex
+				currentCellCol = nextCellCol
 				currentFormula.Reset()
 				currentValue.Reset()
 				for _, attr := range t.Attr {
@@ -358,8 +410,13 @@ func readXLSXSheet(r io.Reader, sharedStrings []string, hyperlinks map[string]st
 						currentCellType = attr.Value
 					case "r":
 						currentCellRef = attr.Value
+						if row, col, ok := parseXLSXCellPosition(attr.Value); ok {
+							currentCellRow = row
+							currentCellCol = col
+						}
 					}
 				}
+				nextCellCol = currentCellCol + 1
 			case "f":
 				if inCell {
 					inFormula = true
@@ -368,6 +425,19 @@ func readXLSXSheet(r io.Reader, sharedStrings []string, hyperlinks map[string]st
 			case "v", "t":
 				if inCell {
 					inValue = true
+				}
+			case "mergeCell":
+				for _, attr := range t.Attr {
+					if attr.Name.Local != "ref" {
+						continue
+					}
+					mergedRange, ok := parseXLSXCellRange(attr.Value)
+					if !ok {
+						continue
+					}
+					mergedRanges = append(mergedRanges, mergedRange)
+					maxRow = max(maxRow, mergedRange.LastRow)
+					maxCol = max(maxCol, mergedRange.LastCol)
 				}
 			}
 		case xml.CharData:
@@ -388,18 +458,144 @@ func readXLSXSheet(r io.Reader, sharedStrings []string, hyperlinks map[string]st
 				if hyperlink := hyperlinks[currentCellRef]; hyperlink != "" {
 					value = wrapXLSXHyperlink(value, hyperlink)
 				}
-				currentRow = append(currentRow, value)
+				if currentCellRow >= 0 && currentCellCol >= 0 {
+					if cells[currentCellRow] == nil {
+						cells[currentCellRow] = make(map[int]string)
+					}
+					cells[currentCellRow][currentCellCol] = value
+					maxRow = max(maxRow, currentCellRow)
+					maxCol = max(maxCol, currentCellCol)
+				}
 				currentValue.Reset()
 				currentFormula.Reset()
 				inCell = false
-			case "row":
-				if len(currentRow) > 0 {
-					records = append(records, currentRow)
-				}
 			}
 		}
 	}
-	return records, nil
+	if maxRow < 0 || maxCol < 0 {
+		return xlsxSheetData{MergedRanges: mergedRanges}, nil
+	}
+	records := make([][]string, maxRow+1)
+	for row := range records {
+		records[row] = make([]string, maxCol+1)
+		for col, value := range cells[row] {
+			records[row][col] = value
+		}
+	}
+	return xlsxSheetData{Records: records, MergedRanges: mergedRanges}, nil
+}
+
+func parseXLSXCellPosition(ref string) (int, int, bool) {
+	ref = strings.ReplaceAll(strings.TrimSpace(ref), "$", "")
+	index := 0
+	column := 0
+	for index < len(ref) {
+		char := ref[index]
+		if char >= 'a' && char <= 'z' {
+			char -= 'a' - 'A'
+		}
+		if char < 'A' || char > 'Z' {
+			break
+		}
+		column = column*26 + int(char-'A'+1)
+		index++
+	}
+	if index == 0 || index == len(ref) {
+		return 0, 0, false
+	}
+	row, err := strconv.Atoi(ref[index:])
+	if err != nil || row < 1 {
+		return 0, 0, false
+	}
+	return row - 1, column - 1, true
+}
+
+func parseXLSXCellRange(ref string) (xlsxCellRange, bool) {
+	startRef, endRef, found := strings.Cut(strings.TrimSpace(ref), ":")
+	if !found {
+		endRef = startRef
+	}
+	firstRow, firstCol, ok := parseXLSXCellPosition(startRef)
+	if !ok {
+		return xlsxCellRange{}, false
+	}
+	lastRow, lastCol, ok := parseXLSXCellPosition(endRef)
+	if !ok {
+		return xlsxCellRange{}, false
+	}
+	return xlsxCellRange{
+		FirstRow: min(firstRow, lastRow),
+		FirstCol: min(firstCol, lastCol),
+		LastRow:  max(firstRow, lastRow),
+		LastCol:  max(firstCol, lastCol),
+	}, true
+}
+
+func normalizeXLSXSheet(sheet xlsxSheetData, headerRows int) [][]string {
+	if len(sheet.Records) == 0 {
+		return nil
+	}
+	for _, mergedRange := range sheet.MergedRanges {
+		value := sheet.Records[mergedRange.FirstRow][mergedRange.FirstCol]
+		if value == "" {
+			continue
+		}
+		for row := mergedRange.FirstRow; row <= mergedRange.LastRow; row++ {
+			for col := mergedRange.FirstCol; col <= mergedRange.LastCol; col++ {
+				sheet.Records[row][col] = value
+			}
+		}
+	}
+
+	columns := selectXLSXNonEmptyColumns(sheet.Records)
+	if len(columns) == 0 {
+		return nil
+	}
+	effectiveHeaderRows := min(headerRows, len(sheet.Records))
+	headers := make([]string, len(columns))
+	for index, col := range columns {
+		parts := make([]string, 0, effectiveHeaderRows)
+		previous := ""
+		for row := 0; row < effectiveHeaderRows; row++ {
+			value := sheet.Records[row][col]
+			if value == "" || value == previous {
+				continue
+			}
+			parts = append(parts, value)
+			previous = value
+		}
+		headers[index] = strings.Join(parts, "|")
+	}
+
+	records := make([][]string, 0, len(sheet.Records)-effectiveHeaderRows+1)
+	records = append(records, headers)
+	for row := effectiveHeaderRows; row < len(sheet.Records); row++ {
+		values := make([]string, len(columns))
+		nonEmpty := false
+		for index, col := range columns {
+			values[index] = sheet.Records[row][col]
+			if values[index] != "" {
+				nonEmpty = true
+			}
+		}
+		if nonEmpty {
+			records = append(records, values)
+		}
+	}
+	return records
+}
+
+func selectXLSXNonEmptyColumns(records [][]string) []int {
+	columns := make([]int, 0, len(records[0]))
+	for col := range len(records[0]) {
+		for row := range records {
+			if records[row][col] != "" {
+				columns = append(columns, col)
+				break
+			}
+		}
+	}
+	return columns
 }
 
 func resolveXLSXCellValue(value, formula, cellType string, sharedStrings []string) string {
