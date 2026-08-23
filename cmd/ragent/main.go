@@ -140,6 +140,7 @@ func main() {
 	authSvc := userService.NewAuthService(userRepo, cfg.Auth, cache.New(rdb))
 	authHandler := userHandler.NewAuthHandler(authSvc)
 	auditSvc := auditService.NewBizChangeLogService(auditRepo.NewBizChangeLogRepo(gormDB))
+	authSvc.SetAuditRecorder(auditSvc)
 
 	kbRepo := knowledgeRepo.NewKnowledgeBaseRepo(gormDB)
 	kbSvc := knowledgeService.NewKnowledgeBaseService(kbRepo)

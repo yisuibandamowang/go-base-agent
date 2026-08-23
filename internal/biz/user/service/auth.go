@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
+	auditService "go-base-agent/internal/biz/audit/service"
+	userModel "go-base-agent/internal/biz/user/model"
 	"go-base-agent/internal/biz/user/repo"
 	"go-base-agent/internal/framework/config"
 	framework "go-base-agent/internal/framework/context"
@@ -22,6 +25,12 @@ type AuthService struct {
 	ttl       time.Duration
 	key       []byte
 	blacklist tokenBlacklist
+	audit     *auditService.BizChangeLogService
+}
+
+// SetAuditRecorder 设置用户变更审计记录器。
+func (s *AuthService) SetAuditRecorder(recorder *auditService.BizChangeLogService) {
+	s.audit = recorder
 }
 
 type tokenBlacklist interface {
@@ -192,7 +201,52 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID, oldPwd, newPwd
 	if err != nil {
 		return fmt.Errorf("加密密码失败")
 	}
-	return s.repo.UpdatePassword(ctx, userID, string(hashed))
+	before := buildUserAuditSnapshot(user)
+	if err := s.repo.UpdatePassword(ctx, userID, string(hashed)); err != nil {
+		return fmt.Errorf("更新密码失败: %w", err)
+	}
+	if s.audit != nil {
+		afterUser, err := s.repo.FindByID(ctx, userID)
+		if err != nil {
+			slog.Warn("load user after password change for audit failed", "err", err, "user_id", userID)
+			return nil
+		}
+		after := buildUserAuditSnapshot(afterUser)
+		if err := s.audit.Record(ctx, auditService.RecordReq{
+			BizType:        auditService.BizTypeUser,
+			BizID:          userID,
+			OperationType:  auditService.OperationUpdate,
+			ActionDesc:     "修改当前用户密码",
+			BeforeSnapshot: before,
+			AfterSnapshot:  after,
+		}); err != nil {
+			slog.Warn("audit password change failed", "err", err, "user_id", userID)
+		}
+	}
+	return nil
+}
+
+type userAuditSnapshot struct {
+	ID         string    `json:"id"`
+	Username   string    `json:"username"`
+	Role       string    `json:"role"`
+	Avatar     string    `json:"avatar"`
+	CreateTime time.Time `json:"createTime"`
+	UpdateTime time.Time `json:"updateTime"`
+}
+
+func buildUserAuditSnapshot(user *userModel.User) userAuditSnapshot {
+	if user == nil {
+		return userAuditSnapshot{}
+	}
+	return userAuditSnapshot{
+		ID:         user.ID,
+		Username:   user.Username,
+		Role:       user.Role,
+		Avatar:     user.Avatar,
+		CreateTime: user.CreateTime,
+		UpdateTime: user.UpdateTime,
+	}
 }
 
 func resolveAvatar(avatar string) string {
