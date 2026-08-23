@@ -22,6 +22,7 @@ import (
 	"go-base-agent/internal/framework/db"
 	"go-base-agent/internal/framework/lock"
 	initializerCleanup "go-base-agent/internal/initializer/cleanup"
+	initializerConfig "go-base-agent/internal/initializer/config"
 	initializerInitialize "go-base-agent/internal/initializer/initialize"
 	initializerMigrate "go-base-agent/internal/initializer/migrate"
 	initializerPreflight "go-base-agent/internal/initializer/preflight"
@@ -51,6 +52,125 @@ func firstNonEmptyInitializer(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func loadInitializerProperties(agentTypeDir, explicitPath string) (*initializerConfig.Config, error) {
+	path := strings.TrimSpace(explicitPath)
+	if path == "" {
+		dir := strings.TrimSpace(agentTypeDir)
+		if dir == "" {
+			return nil, nil
+		}
+		path = filepath.Join(dir, "initializer.properties")
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("检查初始化器配置失败: %w", err)
+		}
+	}
+	return initializerConfig.Load(path)
+}
+
+func resolveInitializerConfigPath(props *initializerConfig.Config, cliPath string) (string, error) {
+	if path := strings.TrimSpace(cliPath); path != "" {
+		return path, nil
+	}
+	if props != nil {
+		if path := props.Get("application.config", ""); path != "" {
+			return props.ResolvePath("application.config")
+		}
+	}
+	return "configs/config.yaml", nil
+}
+
+func resolveInitializerString(props *initializerConfig.Config, cliValue, key, defaultValue string) string {
+	if value := strings.TrimSpace(cliValue); value != "" {
+		return value
+	}
+	if props != nil {
+		if value := props.Get(key, ""); value != "" {
+			return value
+		}
+	}
+	return defaultValue
+}
+
+func resolveInitializerBackends(cfg *config.Config, props *initializerConfig.Config) map[string]string {
+	backends := expectedInitializerBackends(cfg)
+	if props == nil {
+		return backends
+	}
+	for name, key := range map[string]string{
+		"vector":  "execution.expected-vector-type",
+		"storage": "execution.expected-storage-type",
+		"keyword": "execution.expected-keyword-type",
+		"graph":   "execution.expected-graph-type",
+	} {
+		if value := props.Get(key, ""); value != "" {
+			backends[name] = value
+		}
+	}
+	return backends
+}
+
+func initializerFlagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+func resolveCleanupConfirmation(fs *flag.FlagSet, value string) string {
+	if !initializerFlagSet(fs, "confirm") {
+		return ""
+	}
+	return value
+}
+
+func initializerDurationSeconds(props *initializerConfig.Config, key string, defaultValue time.Duration) time.Duration {
+	if props == nil {
+		return defaultValue
+	}
+	seconds, err := props.GetInt(key, int(defaultValue/time.Second))
+	if err != nil || seconds <= 0 {
+		return defaultValue
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func initializerInt(props *initializerConfig.Config, key string, defaultValue int) int {
+	if props == nil {
+		return defaultValue
+	}
+	value, err := props.GetInt(key, defaultValue)
+	if err != nil {
+		return defaultValue
+	}
+	return value
+}
+
+func resolveCleanupPath(props *initializerConfig.Config, cliPath, agentTypeDir string) string {
+	if path := strings.TrimSpace(cliPath); path != "" {
+		return resolveCleanupFile(path)
+	}
+	if props != nil {
+		if path := props.Get("cleanup.file", ""); path != "" {
+			if resolved, err := props.ResolvePath("cleanup.file"); err == nil {
+				return resolved
+			}
+		}
+	}
+	if dir := strings.TrimSpace(agentTypeDir); dir != "" {
+		path := filepath.Join(dir, "cleanup.sql")
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return resolveCleanupFile("resources/database/cleanup_pg.sql")
 }
 
 func main() {
@@ -91,23 +211,33 @@ func main() {
 
 func runPreflight(args []string) error {
 	fs := flag.NewFlagSet("preflight", flag.ContinueOnError)
-	configPath := fs.String("config", "configs/config.yaml", "config file path")
+	configPath := fs.String("config", "", "config file path")
+	agentTypeDir := fs.String("agent-type-dir", "", "agent type dataset directory")
+	initializerConfigPath := fs.String("initializer-config", "", "initializer properties file path")
 	baseURL := fs.String("base-url", "", "service base url")
-	adminUsername := fs.String("admin-username", "admin", "admin username")
-	adminPassword := fs.String("admin-password", "admin", "admin password")
+	adminUsername := fs.String("admin-username", "", "admin username")
+	adminPassword := fs.String("admin-password", "", "admin password")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	cfg, err := config.Load(strings.TrimSpace(*configPath))
+	props, err := loadInitializerProperties(*agentTypeDir, *initializerConfigPath)
+	if err != nil {
+		return err
+	}
+	resolvedConfigPath, err := resolveInitializerConfigPath(props, *configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(strings.TrimSpace(resolvedConfigPath))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	serviceBaseURL := strings.TrimSpace(*baseURL)
-	if serviceBaseURL == "" {
-		serviceBaseURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port)
-	}
+	serviceBaseURL := resolveInitializerString(props, *baseURL, "server.base-url", fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port))
+	username := resolveInitializerString(props, *adminUsername, "auth.username", "admin")
+	password := resolveInitializerString(props, *adminPassword, "auth.password", "admin")
+	requestTimeout := initializerDurationSeconds(props, "server.request-timeout-seconds", 10*time.Second)
 
 	gormDB, err := db.NewDB(cfg.Database)
 	if err != nil {
@@ -135,9 +265,9 @@ func runPreflight(args []string) error {
 	slog.Info("preflight checks start", "base_url", serviceBaseURL)
 	if err := initializerPreflight.Run(context.Background(), initializerPreflight.Options{
 		BaseURL:       serviceBaseURL,
-		AdminUsername: *adminUsername,
-		AdminPassword: *adminPassword,
-		HTTPClient:    &http.Client{Timeout: 10 * time.Second},
+		AdminUsername: username,
+		AdminPassword: password,
+		HTTPClient:    &http.Client{Timeout: requestTimeout},
 		CheckDB: func(ctx context.Context) error {
 			return db.Ping(ctx, gormDB)
 		},
@@ -149,7 +279,7 @@ func runPreflight(args []string) error {
 		CheckIdle: func(ctx context.Context) error {
 			return checkInitializerIdle(ctx, gormDB, redisClient)
 		},
-		ExpectedBackends: expectedInitializerBackends(cfg),
+		ExpectedBackends: resolveInitializerBackends(cfg, props),
 	}); err != nil {
 		return err
 	}
@@ -159,28 +289,42 @@ func runPreflight(args []string) error {
 
 func runCleanup(args []string) error {
 	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	configPath := fs.String("config", "configs/config.yaml", "config file path")
+	configPath := fs.String("config", "", "config file path")
+	agentTypeDir := fs.String("agent-type-dir", "", "agent type dataset directory")
+	initializerConfigPath := fs.String("initializer-config", "", "initializer properties file path")
 	baseURL := fs.String("base-url", "", "service base url")
-	adminUsername := fs.String("admin-username", "admin", "admin username")
-	adminPassword := fs.String("admin-password", "admin", "admin password")
+	adminUsername := fs.String("admin-username", "", "admin username")
+	adminPassword := fs.String("admin-password", "", "admin password")
 	confirm := fs.String("confirm", "", "confirmation token")
-	cleanupFile := fs.String("cleanup-file", "resources/database/cleanup_pg.sql", "cleanup sql file path")
+	cleanupFile := fs.String("cleanup-file", "", "cleanup sql file path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*confirm) != "RESET-ENTERPRISE-KNOWLEDGE-BASE" {
-		return fmt.Errorf("请传入确认词 --confirm RESET-ENTERPRISE-KNOWLEDGE-BASE")
-	}
 
-	cfg, err := config.Load(strings.TrimSpace(*configPath))
+	props, err := loadInitializerProperties(*agentTypeDir, *initializerConfigPath)
+	if err != nil {
+		return err
+	}
+	resolvedConfigPath, err := resolveInitializerConfigPath(props, *configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(strings.TrimSpace(resolvedConfigPath))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	serviceBaseURL := strings.TrimSpace(*baseURL)
-	if serviceBaseURL == "" {
-		serviceBaseURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port)
+	expectedConfirmation := resolveInitializerString(props, "", "cleanup.confirmation", "RESET-ENTERPRISE-KNOWLEDGE-BASE")
+	confirmation := resolveCleanupConfirmation(fs, *confirm)
+	if strings.TrimSpace(confirmation) != expectedConfirmation {
+		return fmt.Errorf("请传入确认词 --confirm %s", expectedConfirmation)
 	}
+	username := resolveInitializerString(props, *adminUsername, "auth.username", "admin")
+	password := resolveInitializerString(props, *adminPassword, "auth.password", "admin")
+	serviceBaseURL := resolveInitializerString(props, *baseURL, "server.base-url", fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port))
+	cleanupPath := resolveCleanupPath(props, *cleanupFile, *agentTypeDir)
+	requestTimeout := initializerDurationSeconds(props, "server.request-timeout-seconds", 10*time.Second)
+	lockTTL := initializerDurationSeconds(props, "cleanup.lock-seconds", time.Hour)
 
 	gormDB, err := db.NewDB(cfg.Database)
 	if err != nil {
@@ -201,12 +345,14 @@ func runCleanup(args []string) error {
 
 	slog.Info("cleanup preflight start", "base_url", serviceBaseURL)
 	if err := initializerCleanup.Run(context.Background(), initializerCleanup.Options{
-		BaseURL:       serviceBaseURL,
-		AdminUsername: *adminUsername,
-		AdminPassword: *adminPassword,
-		Confirm:       *confirm,
-		CleanupFile:   resolveCleanupFile(*cleanupFile),
-		HTTPClient:    &http.Client{Timeout: 10 * time.Second},
+		BaseURL:           serviceBaseURL,
+		AdminUsername:     username,
+		AdminPassword:     password,
+		Confirm:           confirmation,
+		ConfirmationToken: expectedConfirmation,
+		CleanupFile:       cleanupPath,
+		LockTTL:           lockTTL,
+		HTTPClient:        &http.Client{Timeout: requestTimeout},
 		CheckDB: func(ctx context.Context) error {
 			return db.Ping(ctx, gormDB)
 		},
@@ -218,7 +364,7 @@ func runCleanup(args []string) error {
 		CheckIdle: func(ctx context.Context) error {
 			return checkInitializerIdle(ctx, gormDB, redisClient)
 		},
-		ExpectedBackends: expectedInitializerBackends(cfg),
+		ExpectedBackends: resolveInitializerBackends(cfg, props),
 		RunPreflight:     initializerPreflight.Run,
 		AcquireLock: func(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 			return lock.New(redisClient).Acquire(ctx, key, ttl)
@@ -304,13 +450,14 @@ func runMigrate(args []string) error {
 
 func runInitialize(args []string) error {
 	fs := flag.NewFlagSet("initialize", flag.ContinueOnError)
-	configPath := fs.String("config", "configs/config.yaml", "config file path")
+	configPath := fs.String("config", "", "config file path")
+	initializerConfigPath := fs.String("initializer-config", "", "initializer properties file path")
 	baseURL := fs.String("base-url", "", "service base url")
-	adminUsername := fs.String("admin-username", "admin", "admin username")
-	adminPassword := fs.String("admin-password", "admin", "admin password")
+	adminUsername := fs.String("admin-username", "", "admin username")
+	adminPassword := fs.String("admin-password", "", "admin password")
 	agentTypeDir := fs.String("agent-type-dir", "", "agent type dataset directory")
 	confirm := fs.String("confirm", "", "confirmation token")
-	cleanupFile := fs.String("cleanup-file", "resources/database/cleanup_pg.sql", "cleanup sql file path")
+	cleanupFile := fs.String("cleanup-file", "", "cleanup sql file path")
 	dryRun := fs.Bool("dry-run", false, "print planned actions without mutating")
 	skipWarmup := fs.Bool("skip-warmup", false, "skip warmup phase")
 	replaceExisting := fs.Bool("replace-existing", true, "replace same-name documents; set false to keep successful documents")
@@ -323,15 +470,21 @@ func runInitialize(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	shuffleSeed, err := parseWarmupSeed(*warmupShuffleSeed)
-	if err != nil {
-		return err
-	}
 	if strings.TrimSpace(*agentTypeDir) == "" {
 		return fmt.Errorf("必须传入 --agent-type-dir <智能体类型目录>")
 	}
-	if !*dryRun && strings.TrimSpace(*confirm) != "RESET-ENTERPRISE-KNOWLEDGE-BASE" {
-		return fmt.Errorf("这是破坏性操作，请传入确认词 --confirm RESET-ENTERPRISE-KNOWLEDGE-BASE")
+	props, err := loadInitializerProperties(*agentTypeDir, *initializerConfigPath)
+	if err != nil {
+		return err
+	}
+	resolvedConfigPath, err := resolveInitializerConfigPath(props, *configPath)
+	if err != nil {
+		return err
+	}
+	expectedConfirmation := resolveInitializerString(props, "", "cleanup.confirmation", "RESET-ENTERPRISE-KNOWLEDGE-BASE")
+	confirmation := resolveCleanupConfirmation(fs, *confirm)
+	if !*dryRun && strings.TrimSpace(confirmation) != expectedConfirmation {
+		return fmt.Errorf("这是破坏性操作，请传入确认词 --confirm %s", expectedConfirmation)
 	}
 	if err := initializerInitialize.VerifyChecksums(*agentTypeDir); err != nil {
 		return fmt.Errorf("校验数据集 checksum 失败: %w", err)
@@ -342,14 +495,50 @@ func runInitialize(args []string) error {
 		return fmt.Errorf("load dataset: %w", err)
 	}
 
-	cfg, err := config.Load(strings.TrimSpace(*configPath))
+	cfg, err := config.Load(strings.TrimSpace(resolvedConfigPath))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	serviceBaseURL := strings.TrimSpace(*baseURL)
-	if serviceBaseURL == "" {
-		serviceBaseURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port)
+	serviceBaseURL := resolveInitializerString(props, *baseURL, "server.base-url", fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port))
+	username := resolveInitializerString(props, *adminUsername, "auth.username", "admin")
+	password := resolveInitializerString(props, *adminPassword, "auth.password", "admin")
+	cleanupPath := resolveCleanupPath(props, *cleanupFile, *agentTypeDir)
+	requestTimeout := initializerDurationSeconds(props, "server.request-timeout-seconds", 120*time.Second)
+	documentTimeoutValue := *documentTimeout
+	if !initializerFlagSet(fs, "document-timeout") {
+		documentTimeoutValue = initializerDurationSeconds(props, "document.chunk-timeout-seconds", 20*time.Minute)
+	}
+	documentPollIntervalValue := *documentPollInterval
+	if !initializerFlagSet(fs, "document-poll-interval") {
+		documentPollIntervalValue = initializerDurationSeconds(props, "document.poll-interval-seconds", 3*time.Second)
+	}
+	replaceExistingValue := *replaceExisting
+	if !initializerFlagSet(fs, "replace-existing") && props != nil {
+		replaceExistingValue, err = props.GetBool("document.replace-existing", true)
+		if err != nil {
+			return err
+		}
+	}
+	warmupMaxAttemptsValue := *warmupMaxAttempts
+	if !initializerFlagSet(fs, "warmup-max-attempts") {
+		warmupMaxAttemptsValue = initializerInt(props, "warmup.max-attempts", 3)
+	}
+	warmupRetryIntervalValue := *warmupRetryInterval
+	if !initializerFlagSet(fs, "warmup-retry-interval") {
+		warmupRetryIntervalValue = initializerDurationSeconds(props, "warmup.retry-interval-seconds", 10*time.Second)
+	}
+	warmupIntervalValue := *warmupInterval
+	if !initializerFlagSet(fs, "warmup-interval") {
+		warmupIntervalValue = initializerDurationSeconds(props, "warmup.interval-seconds", 3*time.Second)
+	}
+	shuffleSeedValue := *warmupShuffleSeed
+	if !initializerFlagSet(fs, "warmup-shuffle-seed") && props != nil {
+		shuffleSeedValue = props.Get("warmup.shuffle-seed", "")
+	}
+	shuffleSeed, err := parseWarmupSeed(shuffleSeedValue)
+	if err != nil {
+		return err
 	}
 
 	gormDB, err := db.NewDB(cfg.Database)
@@ -376,31 +565,31 @@ func runInitialize(args []string) error {
 		"intents", len(dataset.Intents),
 		"questions", len(dataset.Questions),
 		"dry_run", *dryRun,
-		"replace_existing", *replaceExisting,
-		"document_timeout", *documentTimeout,
-		"document_poll_interval", *documentPollInterval,
-		"warmup_max_attempts", *warmupMaxAttempts,
-		"warmup_retry_interval", *warmupRetryInterval,
-		"warmup_interval", *warmupInterval,
-		"warmup_shuffle_seed", *warmupShuffleSeed,
+		"replace_existing", replaceExistingValue,
+		"document_timeout", documentTimeoutValue,
+		"document_poll_interval", documentPollIntervalValue,
+		"warmup_max_attempts", warmupMaxAttemptsValue,
+		"warmup_retry_interval", warmupRetryIntervalValue,
+		"warmup_interval", warmupIntervalValue,
+		"warmup_shuffle_seed", shuffleSeedValue,
 	)
 
 	return initializerInitialize.Run(context.Background(), initializerInitialize.Options{
 		BaseURL:              serviceBaseURL,
-		AdminUsername:        *adminUsername,
-		AdminPassword:        *adminPassword,
+		AdminUsername:        username,
+		AdminPassword:        password,
 		AgentTypeDir:         *agentTypeDir,
-		HTTPClient:           &http.Client{Timeout: 120 * time.Second},
+		HTTPClient:           &http.Client{Timeout: requestTimeout},
 		DryRun:               *dryRun,
 		SkipWarmup:           *skipWarmup,
-		ReplaceExisting:      replaceExisting,
-		DocumentTimeout:      *documentTimeout,
-		DocumentPollInterval: *documentPollInterval,
+		ReplaceExisting:      &replaceExistingValue,
+		DocumentTimeout:      documentTimeoutValue,
+		DocumentPollInterval: documentPollIntervalValue,
 		Preflight: func(ctx context.Context) error {
 			return initializerPreflight.Run(ctx, initializerPreflight.Options{
 				BaseURL:       serviceBaseURL,
-				AdminUsername: *adminUsername,
-				AdminPassword: *adminPassword,
+				AdminUsername: username,
+				AdminPassword: password,
 				HTTPClient:    &http.Client{Timeout: 10 * time.Second},
 				CheckDB: func(ctx context.Context) error {
 					return db.Ping(ctx, gormDB)
@@ -413,17 +602,19 @@ func runInitialize(args []string) error {
 				CheckIdle: func(ctx context.Context) error {
 					return checkInitializerIdle(ctx, gormDB, redisClient)
 				},
-				ExpectedBackends: expectedInitializerBackends(cfg),
+				ExpectedBackends: resolveInitializerBackends(cfg, props),
 			})
 		},
 		Cleanup: func(ctx context.Context) error {
 			return initializerCleanup.Run(ctx, initializerCleanup.Options{
-				BaseURL:       serviceBaseURL,
-				AdminUsername: *adminUsername,
-				AdminPassword: *adminPassword,
-				Confirm:       *confirm,
-				CleanupFile:   resolveCleanupFile(*cleanupFile),
-				HTTPClient:    &http.Client{Timeout: 10 * time.Second},
+				BaseURL:           serviceBaseURL,
+				AdminUsername:     username,
+				AdminPassword:     password,
+				Confirm:           confirmation,
+				ConfirmationToken: expectedConfirmation,
+				CleanupFile:       cleanupPath,
+				LockTTL:           initializerDurationSeconds(props, "cleanup.lock-seconds", time.Hour),
+				HTTPClient:        &http.Client{Timeout: 10 * time.Second},
 				CheckDB: func(ctx context.Context) error {
 					return db.Ping(ctx, gormDB)
 				},
@@ -435,7 +626,7 @@ func runInitialize(args []string) error {
 				CheckIdle: func(ctx context.Context) error {
 					return checkInitializerIdle(ctx, gormDB, redisClient)
 				},
-				ExpectedBackends: expectedInitializerBackends(cfg),
+				ExpectedBackends: resolveInitializerBackends(cfg, props),
 				RunPreflight: func(ctx context.Context, opts initializerPreflight.Options) error {
 					if opts.CheckIdle != nil {
 						return opts.CheckIdle(ctx)
@@ -468,10 +659,10 @@ func runInitialize(args []string) error {
 			})
 		},
 		Warmup: func(ctx context.Context, questions []initializerInitialize.Question) error {
-			return runWarmupWithOptions(ctx, serviceBaseURL, *adminUsername, *adminPassword, questions, warmupOptions{
-				MaxAttempts:   *warmupMaxAttempts,
-				RetryInterval: *warmupRetryInterval,
-				Interval:      *warmupInterval,
+			return runWarmupWithOptions(ctx, serviceBaseURL, username, password, questions, warmupOptions{
+				MaxAttempts:   warmupMaxAttemptsValue,
+				RetryInterval: warmupRetryIntervalValue,
+				Interval:      warmupIntervalValue,
 				ShuffleSeed:   shuffleSeed,
 			})
 		},

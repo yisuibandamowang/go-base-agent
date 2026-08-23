@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +17,49 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestResolveCleanupConfirmationRequiresExplicitFlag(t *testing.T) {
+	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
+	confirm := fs.String("confirm", "", "confirmation token")
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	if got := resolveCleanupConfirmation(fs, *confirm); got != "" {
+		t.Fatalf("expected missing --confirm to stay empty, got %q", got)
+	}
+
+	fs = flag.NewFlagSet("cleanup", flag.ContinueOnError)
+	confirm = fs.String("confirm", "", "confirmation token")
+	if err := fs.Parse([]string{"--confirm", "CUSTOM-CONFIRM"}); err != nil {
+		t.Fatalf("parse explicit confirm: %v", err)
+	}
+	if got := resolveCleanupConfirmation(fs, *confirm); got != "CUSTOM-CONFIRM" {
+		t.Fatalf("expected explicit confirmation token, got %q", got)
+	}
+}
+
+func TestLoadInitializerPropertiesUsesAgentTypeDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "initializer.properties"), []byte("auth.username=operator\n"), 0o644); err != nil {
+		t.Fatalf("write initializer properties: %v", err)
+	}
+
+	loaded, err := loadInitializerProperties(dir, "")
+	if err != nil {
+		t.Fatalf("load initializer properties: %v", err)
+	}
+	if got := loaded.Get("auth.username", ""); got != "operator" {
+		t.Fatalf("unexpected initializer username: %q", got)
+	}
+}
+
+func TestLoadInitializerPropertiesRejectsExplicitMissingFile(t *testing.T) {
+	_, err := loadInitializerProperties(t.TempDir(), filepath.Join(t.TempDir(), "missing.properties"))
+	if err == nil {
+		t.Fatal("expected missing initializer properties error")
+	}
+}
 
 func TestWarmupAskRequiresNormalFinishBeforeDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

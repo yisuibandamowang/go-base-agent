@@ -21,19 +21,21 @@ const confirmationToken = "RESET-ENTERPRISE-KNOWLEDGE-BASE"
 
 // Options describes the cleanup workflow.
 type Options struct {
-	BaseURL          string
-	AdminUsername    string
-	AdminPassword    string
-	Confirm          string
-	CleanupFile      string
-	HTTPClient       *http.Client
-	CheckDB          func(context.Context) error
-	CheckRedis       func(context.Context) error
-	CheckIdle        func(context.Context) error
-	ExpectedBackends map[string]string
-	RunPreflight     func(context.Context, initializerPreflight.Options) error
-	AcquireLock      func(context.Context, string, time.Duration) (bool, error)
-	ReleaseLock      func(context.Context, string) error
+	BaseURL           string
+	AdminUsername     string
+	AdminPassword     string
+	Confirm           string
+	ConfirmationToken string
+	CleanupFile       string
+	LockTTL           time.Duration
+	HTTPClient        *http.Client
+	CheckDB           func(context.Context) error
+	CheckRedis        func(context.Context) error
+	CheckIdle         func(context.Context) error
+	ExpectedBackends  map[string]string
+	RunPreflight      func(context.Context, initializerPreflight.Options) error
+	AcquireLock       func(context.Context, string, time.Duration) (bool, error)
+	ReleaseLock       func(context.Context, string) error
 	// DeleteDocuments 在执行 SQL 清理前物理删除远端文档及其关联资源。
 	DeleteDocuments func(context.Context) error
 	// ClearCache 在 SQL 清理后删除初始化相关 Redis 缓存。
@@ -46,8 +48,12 @@ func Run(ctx context.Context, opts Options) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if strings.TrimSpace(opts.Confirm) != confirmationToken {
-		return fmt.Errorf("请传入确认词 --confirm %s", confirmationToken)
+	expectedConfirmation := strings.TrimSpace(opts.ConfirmationToken)
+	if expectedConfirmation == "" {
+		expectedConfirmation = confirmationToken
+	}
+	if strings.TrimSpace(opts.Confirm) != expectedConfirmation {
+		return fmt.Errorf("请传入确认词 --confirm %s", expectedConfirmation)
 	}
 	if strings.TrimSpace(opts.CleanupFile) == "" {
 		return errors.New("cleanup file 不能为空")
@@ -89,7 +95,11 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	ok, err := acquireLock(ctx, defaultLockKey, defaultLockTTL)
+	lockTTL := opts.LockTTL
+	if lockTTL <= 0 {
+		lockTTL = defaultLockTTL
+	}
+	ok, err := acquireLock(ctx, defaultLockKey, lockTTL)
 	if err != nil {
 		return fmt.Errorf("acquire cleanup lock: %w", err)
 	}

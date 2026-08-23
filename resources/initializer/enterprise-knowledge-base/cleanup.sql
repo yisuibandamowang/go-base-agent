@@ -1,3 +1,5 @@
+BEGIN;
+
 SET LOCAL lock_timeout = '10s';
 SET LOCAL statement_timeout = '120s';
 
@@ -7,9 +9,8 @@ TRUNCATE TABLE
     t_conversation_summary,
     t_message,
     t_conversation,
-    t_agent_state,
-    t_agent_message,
-    t_agent_conversation,
+    t_agent_prompt,
+    t_agent_profile,
     t_rag_trace_node,
     t_rag_trace_run,
     t_ingestion_task_node,
@@ -20,6 +21,7 @@ TRUNCATE TABLE
     t_knowledge_document_schedule,
     t_knowledge_document_chunk_log,
     t_knowledge_chunk,
+    t_knowledge_internal_url_import_task,
     t_knowledge_document,
     t_knowledge_vector,
     t_intent_node,
@@ -28,3 +30,5 @@ TRUNCATE TABLE
     t_knowledge_base,
     t_biz_change_log
 RESTART IDENTITY;
+
+COMMIT;

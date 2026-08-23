@@ -102,6 +102,47 @@ func TestRunRejectsBadConfirm(t *testing.T) {
 	}
 }
 
+func TestRunRejectsMissingConfirmEvenWhenConfigured(t *testing.T) {
+	err := Run(context.Background(), Options{
+		Confirm:           "",
+		ConfirmationToken: "CUSTOM-CONFIRM",
+		CleanupFile:       "cleanup.sql",
+		RunPreflight: func(context.Context, initializerPreflight.Options) error {
+			t.Fatal("preflight should not run")
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "CUSTOM-CONFIRM") {
+		t.Fatalf("expected configured confirmation error, got %v", err)
+	}
+}
+
+func TestRunUsesConfiguredConfirmationAndLockTTL(t *testing.T) {
+	var gotTTL time.Duration
+	err := Run(context.Background(), Options{
+		Confirm:           "CUSTOM-CONFIRM",
+		ConfirmationToken: "CUSTOM-CONFIRM",
+		CleanupFile:       "cleanup.sql",
+		LockTTL:           17 * time.Minute,
+		RunPreflight: func(context.Context, initializerPreflight.Options) error {
+			return nil
+		},
+		AcquireLock: func(_ context.Context, _ string, ttl time.Duration) (bool, error) {
+			gotTTL = ttl
+			return true, nil
+		},
+		ReleaseLock:     func(context.Context, string) error { return nil },
+		DeleteDocuments: func(context.Context) error { return nil },
+		ExecuteCleanup:  func(context.Context, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run cleanup: %v", err)
+	}
+	if gotTTL != 17*time.Minute {
+		t.Fatalf("unexpected lock ttl: %s", gotTTL)
+	}
+}
+
 func TestDeleteRemoteDocumentsDeletesCompletedDocuments(t *testing.T) {
 	var deletedID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
