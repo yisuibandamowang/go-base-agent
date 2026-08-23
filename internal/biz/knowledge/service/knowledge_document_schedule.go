@@ -223,9 +223,24 @@ func (s *DocumentScheduleService) refreshOne(ctx context.Context, schedule model
 		}
 		return s.refreshInternalURLTree(ctx, schedule, doc, treeSource, location, startedAt, stopHeartbeat)
 	}
-	remoteDoc, err := source.FetchDocument(ctx, location)
+	var remoteDoc *crawler.Document
+	changed := true
+	if conditionalSource, ok := source.(crawler.ConditionalSource); ok {
+		remoteDoc, changed, err = conditionalSource.FetchDocumentIfChanged(
+			ctx,
+			location,
+			schedule.LastETag,
+			schedule.LastModified,
+			schedule.LastContentHash,
+		)
+	} else {
+		remoteDoc, err = source.FetchDocument(ctx, location)
+	}
 	if err != nil {
 		return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("fetch remote document: %w", err), nil)
+	}
+	if !changed {
+		return s.markSkipped(ctx, schedule, startedAt, "远程文件未变化", remoteDoc, schedule.LastContentHash)
 	}
 	if remoteDoc == nil || len(remoteDoc.Content) == 0 {
 		return s.markFailed(ctx, schedule, startedAt, fmt.Errorf("remote document content is empty"), remoteDoc)

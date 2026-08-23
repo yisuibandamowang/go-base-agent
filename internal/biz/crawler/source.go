@@ -17,14 +17,14 @@ import (
 
 // DocumentMeta 文档元信息，来源无关。
 type DocumentMeta struct {
-	ID          string
-	Title       string
-	URL         string
-	MimeType    string
-	Size        int64
-	UpdatedAt   time.Time
-	SourceName  string
-	Extra       map[string]string
+	ID         string
+	Title      string
+	URL        string
+	MimeType   string
+	Size       int64
+	UpdatedAt  time.Time
+	SourceName string
+	Extra      map[string]string
 }
 
 // Document 完整文档内容。
@@ -46,6 +46,12 @@ type Source interface {
 	ListDocuments(ctx context.Context) ([]DocumentMeta, error)
 	FetchDocument(ctx context.Context, id string) (*Document, error)
 	WatchChanges(ctx context.Context, since time.Time) (<-chan ChangeEvent, error)
+}
+
+// ConditionalSource 支持在下载前使用远程验证器判断文档是否变化。
+type ConditionalSource interface {
+	Source
+	FetchDocumentIfChanged(ctx context.Context, id, lastETag, lastModified, lastContentHash string) (*Document, bool, error)
 }
 
 // Scheduler 管理多个 Source 的定时抓取与变更监听。

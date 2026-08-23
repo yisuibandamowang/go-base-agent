@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"mime"
@@ -99,6 +100,54 @@ func (s *HTTPSource) FetchDocument(ctx context.Context, id string) (*Document, e
 	return &Document{Meta: meta, Content: body}, nil
 }
 
+// FetchDocumentIfChanged 先使用 HTTP 验证器判断文档是否变化，必要时再下载内容。
+func (s *HTTPSource) FetchDocumentIfChanged(ctx context.Context, id, lastETag, lastModified, lastContentHash string) (*Document, bool, error) {
+	targetURL := strings.TrimSpace(id)
+	if targetURL == "" {
+		targetURL = strings.TrimSpace(s.cfg.URL)
+	}
+	if targetURL == "" {
+		return nil, false, fmt.Errorf("http source url is empty")
+	}
+
+	var headMeta *DocumentMeta
+	if meta, err := s.headMeta(ctx, targetURL); err == nil {
+		headMeta = &meta
+		currentETag := strings.TrimSpace(meta.Extra["etag"])
+		currentLastModified := strings.TrimSpace(meta.Extra["last_modified"])
+		previousETag := strings.TrimSpace(lastETag)
+		previousLastModified := strings.TrimSpace(lastModified)
+		unchanged := false
+		if currentETag != "" && previousETag != "" {
+			unchanged = currentETag == previousETag
+		} else if currentLastModified != "" && previousLastModified != "" {
+			unchanged = currentLastModified == previousLastModified
+		}
+		if unchanged {
+			return &Document{Meta: meta}, false, nil
+		}
+	}
+
+	doc, err := s.FetchDocument(ctx, targetURL)
+	if err != nil {
+		return nil, false, err
+	}
+	if doc != nil && headMeta != nil {
+		if doc.Meta.Extra == nil {
+			doc.Meta.Extra = make(map[string]string)
+		}
+		for _, key := range []string{"etag", "last_modified"} {
+			if strings.TrimSpace(doc.Meta.Extra[key]) == "" {
+				doc.Meta.Extra[key] = headMeta.Extra[key]
+			}
+		}
+	}
+	if doc != nil && strings.TrimSpace(lastContentHash) != "" && sha256Hex(doc.Content) == strings.TrimSpace(lastContentHash) {
+		return doc, false, nil
+	}
+	return doc, true, nil
+}
+
 func (s *HTTPSource) WatchChanges(ctx context.Context, since time.Time) (<-chan ChangeEvent, error) {
 	ch := make(chan ChangeEvent)
 	close(ch)
@@ -127,6 +176,13 @@ func (s *HTTPSource) metaFromHeaders(rawURL string, header http.Header) Document
 			size = parsed
 		}
 	}
+	extra := map[string]string{"source_type": "url"}
+	if value := strings.TrimSpace(header.Get("ETag")); value != "" {
+		extra["etag"] = value
+	}
+	if value := strings.TrimSpace(header.Get("Last-Modified")); value != "" {
+		extra["last_modified"] = value
+	}
 	return DocumentMeta{
 		ID:         rawURL,
 		Title:      fileName,
@@ -134,8 +190,33 @@ func (s *HTTPSource) metaFromHeaders(rawURL string, header http.Header) Document
 		MimeType:   mimeType,
 		Size:       size,
 		SourceName: s.Name(),
-		Extra:      map[string]string{"source_type": "url"},
+		Extra:      extra,
 	}
+}
+
+func (s *HTTPSource) headMeta(ctx context.Context, targetURL string) (DocumentMeta, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, targetURL, nil)
+	if err != nil {
+		return DocumentMeta{}, fmt.Errorf("build http head request: %w", err)
+	}
+	s.applyHeaders(req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return DocumentMeta{}, fmt.Errorf("http source head failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return DocumentMeta{}, fmt.Errorf("http source head status: %d", resp.StatusCode)
+	}
+	if err := s.checkSize(resp.ContentLength); err != nil {
+		return DocumentMeta{}, err
+	}
+	return s.metaFromHeaders(targetURL, resp.Header), nil
+}
+
+func sha256Hex(data []byte) string {
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("%x", hash[:])
 }
 
 func (s *HTTPSource) checkSize(size int64) error {
