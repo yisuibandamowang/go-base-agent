@@ -343,9 +343,11 @@ func main() {
 	}
 	intentTreeHandler := intentHandler.NewIntentHandler(intentSvc)
 	cachedIntentTreeLister := rag.NewCachedIntentNodeLister(intentTreeRepo, intentNodeCacheManager)
+	// 意图分类准入使用 Java RAGConstant 的固定阈值（0.35 / 3 个），
+	// 不再借用检索通道的 min-intent-score（0.4，仅作用于检索作用域判定）。
 	intentResolverSvc := rag.NewIntentResolver(cachedIntentTreeLister, rag.IntentResolverOptions{
-		MinScore:   cfg.RAG.Search.Channels.IntentDirected.MinIntentScore,
-		MaxIntents: 5,
+		MinScore:   rag.IntentMinScore,
+		MaxIntents: rag.MaxIntentCount,
 	})
 	intentResolverSvc.SetLLMService(preferredLLMService)
 	intentGuidanceSvc := rag.NewIntentGuidanceService(rag.GuidanceOptions{

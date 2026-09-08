@@ -26,6 +26,13 @@ const (
 	IntentKindMCP    IntentKind = 2
 )
 
+// IntentMinScore 意图分类候选的准入分数，对齐 Java RAGConstant.INTENT_MIN_SCORE。
+// 注意与 rag.search.scope.min-intent-score（检索作用域判定阈值）语义不同，后者只作用于检索。
+const IntentMinScore = 0.35
+
+// MaxIntentCount 意图候选总量上限，对齐 Java RAGConstant.MAX_INTENT_COUNT。
+const MaxIntentCount = 3
+
 // IntentNode 是 Go 侧使用的意图节点视图。
 type IntentNode struct {
 	ID                  string
@@ -168,10 +175,10 @@ type IntentResolver struct {
 // NewIntentResolver creates a new resolver.
 func NewIntentResolver(lister IntentNodeLister, opts IntentResolverOptions) *IntentResolver {
 	if opts.MinScore <= 0 {
-		opts.MinScore = 0.1
+		opts.MinScore = IntentMinScore
 	}
 	if opts.MaxIntents <= 0 {
-		opts.MaxIntents = 5
+		opts.MaxIntents = MaxIntentCount
 	}
 	return &IntentResolver{lister: lister, opts: opts}
 }
@@ -977,9 +984,6 @@ func isComparableName(normalizedName string) bool {
 	return len([]rune(normalizedName)) >= minComparableNameLength
 }
 
-// guidanceIntentMinScore 歧义候选准入分数，对齐 Java RAGConstant.INTENT_MIN_SCORE。
-const guidanceIntentMinScore = 0.35
-
 // minComparableNameLength 参与重名比较的最短名称长度。
 const minComparableNameLength = 2
 
@@ -993,7 +997,7 @@ func filterCandidates(scores []NodeScore) []NodeScore {
 		if score.Node.Kind != IntentKindKB {
 			continue
 		}
-		if score.Score < guidanceIntentMinScore {
+		if score.Score < IntentMinScore {
 			continue
 		}
 		out = append(out, score)

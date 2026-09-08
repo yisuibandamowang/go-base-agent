@@ -22,6 +22,18 @@ func (l fakeIntentNodeLister) ListAll(ctx context.Context) ([]intentModel.Intent
 	return l.nodes, l.err
 }
 
+// TestNewIntentResolverDefaultsToJavaConstants 验证未显式传参时意图准入阈值与数量上限
+// 使用 Java RAGConstant 的固定值（0.35 / 3），而非检索通道的 min-intent-score。
+func TestNewIntentResolverDefaultsToJavaConstants(t *testing.T) {
+	resolver := NewIntentResolver(fakeIntentNodeLister{}, IntentResolverOptions{})
+	if resolver.opts.MinScore != IntentMinScore || resolver.opts.MaxIntents != MaxIntentCount {
+		t.Fatalf("expected defaults %v/%d, got %v/%d", IntentMinScore, MaxIntentCount, resolver.opts.MinScore, resolver.opts.MaxIntents)
+	}
+	if IntentMinScore != 0.35 || MaxIntentCount != 3 {
+		t.Fatalf("expected java constants 0.35/3, got %v/%d", IntentMinScore, MaxIntentCount)
+	}
+}
+
 func TestIntentResolverClassifiesLeafNodesAndGroupsKinds(t *testing.T) {
 	resolver := NewIntentResolver(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
 		{BaseModel: db.BaseModel{ID: "root"}, IntentCode: "member", Name: "会员系统", Enabled: 1},
