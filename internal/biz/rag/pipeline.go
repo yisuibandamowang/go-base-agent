@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -531,9 +532,12 @@ func (p *Pipeline) retrieveChunksWithContext(ctx context.Context, question strin
 		return deduplicateChunks(result.Chunks), result.DirectedIntentIDs, nil
 	}
 
-	allChunks := make([]RetrievedChunk, 0)
-	directedIntentIDs := make(map[string]struct{})
-	for _, subIntent := range subIntents {
+	// 子问题级并行检索，对齐 Java RetrievalEngine.retrieve：每个子问题独立并发执行，
+	// 单个子问题失败降级为空结果继续（error 日志），不中断其余子问题。
+	// 按索引回填保持子问题顺序，避免并发下合并结果不稳定。
+	results := make([]RetrievalResult, len(subIntents))
+	var wg sync.WaitGroup
+	for i, subIntent := range subIntents {
 		query := strings.TrimSpace(subIntent.SubQuestion)
 		if query == "" {
 			query = question
@@ -545,10 +549,22 @@ func (p *Pipeline) retrieveChunksWithContext(ctx context.Context, question strin
 			Intents:           []SubQuestionIntent{subIntent},
 			TopK:              topK,
 		}
-		result, err := retrieveWithScope(ctx, aware, sc)
-		if err != nil {
-			return nil, nil, err
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := retrieveWithScope(ctx, aware, sc)
+			if err != nil {
+				slog.Error("子问题上下文构建失败，降级为空上下文", "question", query, "err", err)
+				return
+			}
+			results[i] = result
+		}()
+	}
+	wg.Wait()
+
+	allChunks := make([]RetrievedChunk, 0)
+	directedIntentIDs := make(map[string]struct{})
+	for _, result := range results {
 		allChunks = append(allChunks, result.Chunks...)
 		for id := range result.DirectedIntentIDs {
 			directedIntentIDs[id] = struct{}{}

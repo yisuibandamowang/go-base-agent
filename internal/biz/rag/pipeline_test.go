@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2084,5 +2085,47 @@ func TestPipeline_StreamChat_Error(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: done") {
 		t.Fatal("missing done event on error")
+	}
+}
+
+type failingQueryIntentAwareRetriever struct {
+	failQueries map[string]struct{}
+	chunks      []RetrievedChunk
+}
+
+func (r *failingQueryIntentAwareRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
+	return r.chunks, nil
+}
+
+func (r *failingQueryIntentAwareRetriever) RetrieveWithContext(ctx context.Context, sc SearchContext) ([]RetrievedChunk, error) {
+	if _, ok := r.failQueries[sc.RewrittenQuestion]; ok {
+		return nil, fmt.Errorf("boom")
+	}
+	return r.chunks, nil
+}
+
+func TestPipelineRetrieveChunksDegradesFailedSubQuestion(t *testing.T) {
+	// 对齐 Java RetrievalEngine：单个子问题构建失败降级为空上下文，不中断其余子问题
+	retriever := &failingQueryIntentAwareRetriever{
+		failQueries: map[string]struct{}{"会员等级规则": {}},
+		chunks:      []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段"}},
+	}
+	p := NewPipeline(nil, nil, nil, retriever, nil)
+
+	chunks, _, err := p.retrieveChunks(context.Background(), "主问题", nil, []SubQuestionIntent{
+		{SubQuestion: "会员等级规则", NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "intent-member", Kind: IntentKindKB, CollectionName: "member"},
+			Score: 0.9,
+		}}},
+		{SubQuestion: "会员积分规则", NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "intent-points", Kind: IntentKindKB, CollectionName: "points"},
+			Score: 0.8,
+		}}},
+	}, 5)
+	if err != nil {
+		t.Fatalf("expected failed sub-question to degrade instead of failing the batch: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].ID != "chunk-1" {
+		t.Fatalf("expected surviving sub-question chunks, got %+v", chunks)
 	}
 }
