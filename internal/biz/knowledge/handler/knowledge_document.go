@@ -772,7 +772,7 @@ func (h *DocumentHandler) finishInternalURLImportTask(ctx context.Context, taskI
 	if cause != nil {
 		updates["status"] = "failed"
 		updates["phase"] = "failed"
-		updates["error_message"] = cause.Error()
+		updates["error_message"] = truncateInternalURLError(cause.Error())
 		return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
 	}
 	resultJSON, err := json.Marshal(resp)
@@ -804,6 +804,15 @@ func (h *DocumentHandler) finishInternalURLImportTask(ctx context.Context, taskI
 	updates["skipped_chunked"] = resp.SkippedChunked
 	updates["current_doc_name"] = ""
 	return h.internalURLTaskDB.WithContext(ctx).Model(&model.KnowledgeInternalURLImportTask{}).Where("id = ?", taskID).Updates(updates).Error
+}
+
+// truncateInternalURLError 限制失败原因长度，避免聚合错误超长导致任务状态本身写不回、任务卡在 running
+func truncateInternalURLError(message string) string {
+	runes := []rune(message)
+	if len(runes) <= 1000 {
+		return message
+	}
+	return string(runes[:1000])
 }
 
 // GetInternalURLImportTask GET /knowledge-base/:id/docs/internal-url-import-tasks/:taskId

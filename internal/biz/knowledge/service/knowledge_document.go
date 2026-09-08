@@ -250,20 +250,20 @@ func (s *DocumentService) CreateDocument(ctx context.Context, kbID string, req d
 	} else if processMode == "chunk" || req.ChunkStrategy != "" || strings.TrimSpace(req.IngestionSpec) != "" {
 		doc.ProcessMode = "chunk"
 		doc.ChunkStrategy = req.ChunkStrategy
-		doc.ChunkConfig = req.ChunkConfig
+		doc.ChunkConfig = db.JSONText(req.ChunkConfig)
 		if processMode == "chunk" || isJavaChunkStrategy(req.ChunkStrategy) {
 			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
 			if err != nil {
 				return nil, err
 			}
 			doc.ChunkStrategy = strategy
-			doc.ChunkConfig = chunkConfig
+			doc.ChunkConfig = db.JSONText(chunkConfig)
 		}
 		normalizedSpec, err := NormalizeIngestionSpec(req.IngestionSpec)
 		if err != nil {
 			return nil, err
 		}
-		doc.IngestionSpec = normalizedSpec
+		doc.IngestionSpec = db.JSONText(normalizedSpec)
 	}
 
 	if err := s.docRepo.Create(ctx, doc); err != nil {
@@ -324,8 +324,8 @@ func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID st
 	doc.SourceNodeType = normalizeInternalURLNodeType(req.SourceNodeType)
 	oldProcessMode := doc.ProcessMode
 	oldChunkStrategy := doc.ChunkStrategy
-	oldChunkConfig := doc.ChunkConfig
-	oldIngestionSpec := doc.IngestionSpec
+	oldChunkConfig := string(doc.ChunkConfig)
+	oldIngestionSpec := string(doc.IngestionSpec)
 	oldPipelineID := doc.PipelineID
 	processingChanged := false
 	if hasCreateDocumentProcessingConfig(req) {
@@ -341,8 +341,8 @@ func (s *DocumentService) UpsertInternalURLDocument(ctx context.Context, kbID st
 			dto.CreateDocumentReq{
 				ProcessMode:   doc.ProcessMode,
 				ChunkStrategy: doc.ChunkStrategy,
-				ChunkConfig:   doc.ChunkConfig,
-				IngestionSpec: doc.IngestionSpec,
+				ChunkConfig:   string(doc.ChunkConfig),
+				IngestionSpec: string(doc.IngestionSpec),
 				PipelineID:    doc.PipelineID,
 			},
 		)
@@ -377,8 +377,8 @@ func (s *DocumentService) NormalizeCreateDocumentProcessingConfig(ctx context.Co
 	}
 	req.ProcessMode = doc.ProcessMode
 	req.ChunkStrategy = doc.ChunkStrategy
-	req.ChunkConfig = doc.ChunkConfig
-	req.IngestionSpec = doc.IngestionSpec
+	req.ChunkConfig = string(doc.ChunkConfig)
+	req.IngestionSpec = string(doc.IngestionSpec)
 	req.PipelineID = doc.PipelineID
 	return nil
 }
@@ -406,7 +406,7 @@ func (s *DocumentService) applyCreateDocumentProcessingConfig(ctx context.Contex
 	if processMode == "chunk" || req.ChunkStrategy != "" || strings.TrimSpace(req.IngestionSpec) != "" {
 		doc.ProcessMode = "chunk"
 		doc.ChunkStrategy = req.ChunkStrategy
-		doc.ChunkConfig = req.ChunkConfig
+		doc.ChunkConfig = db.JSONText(req.ChunkConfig)
 		doc.PipelineID = ""
 		if processMode == "chunk" || isJavaChunkStrategy(req.ChunkStrategy) {
 			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
@@ -414,13 +414,13 @@ func (s *DocumentService) applyCreateDocumentProcessingConfig(ctx context.Contex
 				return err
 			}
 			doc.ChunkStrategy = strategy
-			doc.ChunkConfig = chunkConfig
+			doc.ChunkConfig = db.JSONText(chunkConfig)
 		}
 		normalizedSpec, err := NormalizeIngestionSpec(req.IngestionSpec)
 		if err != nil {
 			return err
 		}
-		doc.IngestionSpec = normalizedSpec
+		doc.IngestionSpec = db.JSONText(normalizedSpec)
 	}
 	return nil
 }
@@ -1600,13 +1600,13 @@ func sourceTextByRange(text string, start, end int) (string, bool) {
 }
 
 func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOptions {
-	if doc != nil && strings.TrimSpace(doc.IngestionSpec) != "" {
-		if opts, _, err := chunkingOptionsForIngestionSpec(doc.IngestionSpec); err == nil {
+	if doc != nil && strings.TrimSpace(string(doc.IngestionSpec)) != "" {
+		if opts, _, err := chunkingOptionsForIngestionSpec(string(doc.IngestionSpec)); err == nil {
 			return opts
 		}
 	}
 	opts := rag.DefaultChunkingOptions()
-	if strings.TrimSpace(doc.ChunkConfig) == "" {
+	if strings.TrimSpace(string(doc.ChunkConfig)) == "" {
 		return opts
 	}
 	var raw map[string]any
@@ -1627,10 +1627,10 @@ func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOption
 }
 
 func documentParseProfile(doc *model.KnowledgeDocument) string {
-	if doc == nil || strings.TrimSpace(doc.IngestionSpec) == "" {
+	if doc == nil || strings.TrimSpace(string(doc.IngestionSpec)) == "" {
 		return "fast"
 	}
-	_, profile, err := chunkingOptionsForIngestionSpec(doc.IngestionSpec)
+	_, profile, err := chunkingOptionsForIngestionSpec(string(doc.IngestionSpec))
 	if err != nil {
 		return "fast"
 	}
@@ -1664,9 +1664,9 @@ func chunkConfigHash(doc *model.KnowledgeDocument) string {
 	if doc == nil {
 		return ""
 	}
-	config := strings.TrimSpace(doc.ChunkStrategy) + ":" + strings.TrimSpace(doc.ChunkConfig)
-	if strings.TrimSpace(doc.IngestionSpec) != "" {
-		config += ":" + strings.TrimSpace(doc.IngestionSpec)
+	config := strings.TrimSpace(doc.ChunkStrategy) + ":" + strings.TrimSpace(string(doc.ChunkConfig))
+	if strings.TrimSpace(string(doc.IngestionSpec)) != "" {
+		config += ":" + strings.TrimSpace(string(doc.IngestionSpec))
 	}
 	return stringSHA256Hex(config)
 }
@@ -1675,12 +1675,12 @@ func documentOverlapSize(doc *model.KnowledgeDocument) int {
 	if doc == nil {
 		return 0
 	}
-	if strings.TrimSpace(doc.IngestionSpec) != "" {
-		if opts, _, err := chunkingOptionsForIngestionSpec(doc.IngestionSpec); err == nil {
+	if strings.TrimSpace(string(doc.IngestionSpec)) != "" {
+		if opts, _, err := chunkingOptionsForIngestionSpec(string(doc.IngestionSpec)); err == nil {
 			return opts.OverlapSize
 		}
 	}
-	if strings.TrimSpace(doc.ChunkConfig) == "" {
+	if strings.TrimSpace(string(doc.ChunkConfig)) == "" {
 		return 0
 	}
 	var raw map[string]any
@@ -2108,31 +2108,31 @@ func (s *DocumentService) UpdateDocument(ctx context.Context, id string, req dto
 				return nil, err
 			}
 			doc.ChunkStrategy = strategy
-			doc.ChunkConfig = chunkConfig
+			doc.ChunkConfig = db.JSONText(chunkConfig)
 			normalizedSpec, err := NormalizeIngestionSpec(req.IngestionSpec)
 			if err != nil {
 				return nil, err
 			}
-			doc.IngestionSpec = normalizedSpec
+			doc.IngestionSpec = db.JSONText(normalizedSpec)
 			doc.PipelineID = ""
 		}
 	} else if req.ChunkStrategy != "" || strings.TrimSpace(req.IngestionSpec) != "" {
 		doc.ChunkStrategy = req.ChunkStrategy
-		doc.ChunkConfig = req.ChunkConfig
+		doc.ChunkConfig = db.JSONText(req.ChunkConfig)
 		if isJavaChunkStrategy(req.ChunkStrategy) {
 			strategy, chunkConfig, err := validateAndNormalizeDocumentChunkConfig(req.ChunkStrategy, req.ChunkConfig)
 			if err != nil {
 				return nil, err
 			}
 			doc.ChunkStrategy = strategy
-			doc.ChunkConfig = chunkConfig
+			doc.ChunkConfig = db.JSONText(chunkConfig)
 		}
 		if strings.TrimSpace(req.IngestionSpec) != "" {
 			normalizedSpec, err := NormalizeIngestionSpec(req.IngestionSpec)
 			if err != nil {
 				return nil, err
 			}
-			doc.IngestionSpec = normalizedSpec
+			doc.IngestionSpec = db.JSONText(normalizedSpec)
 		}
 	}
 	doc.ScheduleEnabled, doc.ScheduleCron = normalizeDocumentSchedule(doc, doc.ScheduleEnabled, doc.ScheduleCron)
@@ -3028,8 +3028,8 @@ func (s *DocumentService) docToResp(doc *model.KnowledgeDocument) *dto.DocumentR
 		ScheduleEnabled:    doc.ScheduleEnabled,
 		ScheduleCron:       doc.ScheduleCron,
 		ChunkStrategy:      doc.ChunkStrategy,
-		ChunkConfig:        doc.ChunkConfig,
-		IngestionSpec:      doc.IngestionSpec,
+		ChunkConfig:        string(doc.ChunkConfig),
+		IngestionSpec:      string(doc.IngestionSpec),
 		PipelineID:         doc.PipelineID,
 		CreatedBy:          doc.CreatedBy,
 		UpdatedBy:          doc.UpdatedBy,

@@ -106,7 +106,7 @@ func TestUploadURLDocumentFetchesAndStoresRemoteFile(t *testing.T) {
 	if storedDoc.FileURL != "upload://kb_collection/guide.md" {
 		t.Fatalf("expected upload file url to carry collection hint, got %q", storedDoc.FileURL)
 	}
-	if !strings.Contains(storedDoc.IngestionSpec, `"maxChars":256`) {
+	if !strings.Contains(string(storedDoc.IngestionSpec), `"maxChars":256`) {
 		t.Fatalf("expected ingestion spec to be persisted, got %q", storedDoc.IngestionSpec)
 	}
 	stored, err := fileStore.ReadWithCollection(context.Background(), kb.CollectionName, resp.Data.ID)

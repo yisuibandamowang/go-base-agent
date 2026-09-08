@@ -805,7 +805,7 @@ func TestDocumentService_CreateDocumentPersistsIngestionSpec(t *testing.T) {
 	if err := gdb.First(&stored, "id = ?", created.ID).Error; err != nil {
 		t.Fatalf("load document: %v", err)
 	}
-	if stored.IngestionSpec != created.IngestionSpec {
+	if string(stored.IngestionSpec) != created.IngestionSpec {
 		t.Fatalf("ingestion spec not persisted: stored=%q response=%q", stored.IngestionSpec, created.IngestionSpec)
 	}
 	if opts := chunkingOptionsForDocument(&stored); opts.ChunkSize != 256 || opts.OverlapSize != 32 || opts.RowsPerChunk != 7 || opts.ToleranceSize != 512 {
@@ -3192,7 +3192,7 @@ func ptrString(v string) *string {
 // 重叠缺省按块大小等比计算（1/8），而非照搬默认预算的 128。
 // 对齐 Java 修复：块重叠计算及相关配置说明。
 func TestChunkingOptionsForDocumentOverlapScalesWithSize(t *testing.T) {
-	doc := &knowledgeModel.KnowledgeDocument{ChunkConfig: `{"chunkSize":2048}`}
+	doc := &knowledgeModel.KnowledgeDocument{ChunkConfig: db.JSONText(`{"chunkSize":2048}`)}
 	opts := chunkingOptionsForDocument(doc)
 	if opts.ChunkSize != 2048 {
 		t.Fatalf("expected chunk size 2048, got %d", opts.ChunkSize)
@@ -3202,7 +3202,7 @@ func TestChunkingOptionsForDocumentOverlapScalesWithSize(t *testing.T) {
 	}
 
 	// 显式配置 overlap 时优先生效
-	doc = &knowledgeModel.KnowledgeDocument{ChunkConfig: `{"chunkSize":2048,"overlapChars":100}`}
+	doc = &knowledgeModel.KnowledgeDocument{ChunkConfig: db.JSONText(`{"chunkSize":2048,"overlapChars":100}`)}
 	opts = chunkingOptionsForDocument(doc)
 	if opts.OverlapSize != 100 {
 		t.Fatalf("explicit overlap should win, got %d", opts.OverlapSize)

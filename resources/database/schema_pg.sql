@@ -332,7 +332,7 @@ CREATE TABLE t_knowledge_internal_url_import_task (
     chunkable                   INTEGER      DEFAULT 0,
     skipped_chunked             INTEGER      DEFAULT 0,
     result_json                 JSONB,
-    error_message               VARCHAR(1024),
+    error_message               TEXT,
     current_doc_name            VARCHAR(512),
     created_by                  VARCHAR(20)       NOT NULL,
     updated_by                  VARCHAR(20),
