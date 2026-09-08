@@ -1313,6 +1313,73 @@ func TestPipeline_StreamChat_PersistsFallbackAndTraceAfterContextCancelled(t *te
 	}
 }
 
+// TestBuildKbSnippetSection 对齐 Java formatKbContext 的回答规则注入：
+// 单一归属意图注入该意图规则，多意图去重后编号合并，无归属意图不注入。
+func TestBuildKbSnippetSection(t *testing.T) {
+	single := buildKbSnippetSection([]NodeScore{
+		{Node: IntentNode{ID: "kb-a", Kind: IntentKindKB, PromptSnippet: "按保险条款口径回答"}, Score: 0.9},
+	}, map[string]struct{}{"kb-a": {}})
+	if single != "<rules>\n按保险条款口径回答\n</rules>\n" {
+		t.Fatalf("expected single snippet rules, got %q", single)
+	}
+
+	multi := buildKbSnippetSection([]NodeScore{
+		{Node: IntentNode{ID: "kb-a", Kind: IntentKindKB, PromptSnippet: "规则甲"}, Score: 0.9},
+		{Node: IntentNode{ID: "kb-b", Kind: IntentKindKB, PromptSnippet: "规则乙"}, Score: 0.8},
+		{Node: IntentNode{ID: "kb-c", Kind: IntentKindKB, PromptSnippet: "规则甲"}, Score: 0.7},
+	}, map[string]struct{}{"kb-a": {}, "kb-b": {}, "kb-c": {}})
+	expect := "<rules>\n1. 规则甲\n2. 规则乙\n</rules>\n"
+	if multi != expect {
+		t.Fatalf("expected numbered merged rules, got %q", multi)
+	}
+
+	if none := buildKbSnippetSection([]NodeScore{
+		{Node: IntentNode{ID: "kb-a", Kind: IntentKindKB}, Score: 0.9},
+	}, map[string]struct{}{"kb-a": {}}); none != "" {
+		t.Fatalf("expected no rules without snippet, got %q", none)
+	}
+}
+
+// TestSingleMcpIntentPromptTemplate 对齐 Java planMcpOnly：
+// MCP-only 且恰好一个 MCP 意图时使用该意图的提示词模板。
+func TestSingleMcpIntentPromptTemplate(t *testing.T) {
+	ctx := PromptContext{
+		McpContext: "<data>结果</data>",
+		McpIntents: []NodeScore{
+			{Node: IntentNode{ID: "mcp-a", Kind: IntentKindMCP, PromptTemplate: "按销售数据口径回答"}, Score: 0.9},
+		},
+	}
+	if got := singleMcpIntentPromptTemplate(ctx); got != "按销售数据口径回答" {
+		t.Fatalf("expected mcp intent template, got %q", got)
+	}
+
+	ctx.McpIntents = append(ctx.McpIntents, NodeScore{Node: IntentNode{ID: "mcp-b", Kind: IntentKindMCP}, Score: 0.8})
+	if got := singleMcpIntentPromptTemplate(ctx); got != "" {
+		t.Fatalf("expected no template for multiple mcp intents, got %q", got)
+	}
+
+	ctx.KbContext = "<content>知识</content>"
+	ctx.McpIntents = ctx.McpIntents[:1]
+	if got := singleMcpIntentPromptTemplate(ctx); got != "" {
+		t.Fatalf("expected no template in mixed scene, got %q", got)
+	}
+}
+
+// TestBuildMcpIntentPromptSnippets 验证 toolId → promptSnippet 映射构建。
+func TestBuildMcpIntentPromptSnippets(t *testing.T) {
+	snippets := buildMcpIntentPromptSnippets([]SubQuestionIntent{{
+		SubQuestion: "查销售数据",
+		NodeScores: []NodeScore{
+			{Node: IntentNode{ID: "mcp-a", Kind: IntentKindMCP, McpToolID: "sales_query", PromptSnippet: "金额单位统一为万元"}, Score: 0.9},
+			{Node: IntentNode{ID: "mcp-b", Kind: IntentKindMCP, McpToolID: "", PromptSnippet: "无工具绑定"}, Score: 0.8},
+			{Node: IntentNode{ID: "kb-a", Kind: IntentKindKB, PromptSnippet: "KB规则"}, Score: 0.7},
+		},
+	}})
+	if len(snippets) != 1 || snippets["sales_query"] != "金额单位统一为万元" {
+		t.Fatalf("expected only bound mcp tool snippet, got %+v", snippets)
+	}
+}
+
 func TestPipeline_StreamChat_SystemOnlyIntentSkipsRetrieval(t *testing.T) {
 	var capturedReq chat.Request
 	llm := &fakeLLMService{

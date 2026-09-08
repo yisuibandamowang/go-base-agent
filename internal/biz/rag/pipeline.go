@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -274,7 +275,8 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	eligibleIntentIDs := EligibleIntentIDs(chunks, mergedGroup.KBIntents, directedIntentIDs)
 	sources := AssembleSources(chunks)
 	grounding := AssembleGroundingChunks(chunks)
-	kbContext := EnrichCitationContext(withChunkSources(chunks, kbCtx), sources, p.citationEnabled)
+	kbContext := buildKbSnippetSection(mergedGroup.KBIntents, eligibleIntentIDs) +
+		EnrichCitationContext(withChunkSources(chunks, kbCtx), sources, p.citationEnabled)
 
 	req := p.prompt.Build(PromptContext{
 		Question:          q,
@@ -284,6 +286,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 		McpContext:        mcpCtx,
 		CodeContext:       codeCtx,
 		KbIntents:         mergedGroup.KBIntents,
+		McpIntents:        mergedGroup.MCPIntents,
 		EligibleIntentIds: eligibleIntentIDs,
 	})
 	thinkingVal := deepThinking
@@ -1060,6 +1063,46 @@ func runeLimit(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// buildKbSnippetSection 对齐 Java DefaultContextFormatter.formatKbContext 的回答规则注入：
+// 有证据归属的 KB 意图携带 promptSnippet 时，以 <rules> 段前置于文档块——
+// 单一归属意图注入该意图的规则；多个归属意图去重后编号合并；无归属意图不注入。
+func buildKbSnippetSection(kbIntents []NodeScore, eligibleIntentIDs map[string]struct{}) string {
+	if len(kbIntents) == 0 || len(eligibleIntentIDs) == 0 {
+		return ""
+	}
+	snippets := make([]string, 0, len(kbIntents))
+	seen := make(map[string]struct{}, len(kbIntents))
+	for _, ns := range kbIntents {
+		if ns.Node.Kind != IntentKindKB {
+			continue
+		}
+		if _, ok := eligibleIntentIDs[strings.TrimSpace(ns.Node.ID)]; !ok {
+			continue
+		}
+		snippet := strings.TrimSpace(ns.Node.PromptSnippet)
+		if snippet == "" {
+			continue
+		}
+		if _, dup := seen[snippet]; dup {
+			continue
+		}
+		seen[snippet] = struct{}{}
+		snippets = append(snippets, snippet)
+	}
+	if len(snippets) == 0 {
+		return ""
+	}
+	rules := snippets[0]
+	if len(snippets) > 1 {
+		numbered := make([]string, len(snippets))
+		for i, snippet := range snippets {
+			numbered[i] = fmt.Sprintf("%d. %s", i+1, snippet)
+		}
+		rules = strings.Join(numbered, "\n")
+	}
+	return "<rules>\n" + rules + "\n</rules>\n"
 }
 
 func withChunkSources(chunks []RetrievedChunk, fallback string) string {

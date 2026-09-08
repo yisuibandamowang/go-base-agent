@@ -18,6 +18,8 @@ type PromptContext struct {
 	CodeContext  string
 	// KbIntents KB 通道命中的意图候选（含分数）。
 	KbIntents []NodeScore
+	// McpIntents MCP 通道命中的意图候选（含分数），对齐 Java PromptContext.mcpIntents。
+	McpIntents []NodeScore
 	// EligibleIntentIds 允许参与模板选择和规则注入的意图 ID。
 	// 定向检索只保留真实归属的意图；全局回退保留全部候选意图。
 	EligibleIntentIds map[string]struct{}
@@ -104,6 +106,11 @@ func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
 	if tpl := singleKbIntentPromptTemplate(ctx); tpl != "" {
 		return tpl
 	}
+	// MCP-only 场景恰好一个 MCP 意图时，使用该意图的提示词模板
+	// 对齐 Java planMcpOnly
+	if tpl := singleMcpIntentPromptTemplate(ctx); tpl != "" {
+		return tpl
+	}
 	if b != nil && b.resolver != nil {
 		for _, slotKey := range systemPromptSlotCandidates(ctx, b.engineMode) {
 			if prompt := strings.TrimSpace(b.resolver.Resolve(slotKey)); prompt != "" {
@@ -150,6 +157,15 @@ func singleKbIntentPromptTemplate(ctx PromptContext) string {
 		return ""
 	}
 	return strings.TrimSpace(eligible[0].Node.PromptTemplate)
+}
+
+// singleMcpIntentPromptTemplate 对齐 Java planMcpOnly：
+// MCP-only 场景（无 KB 上下文）且恰好命中一个 MCP 意图时，返回该意图节点的提示词模板。
+func singleMcpIntentPromptTemplate(ctx PromptContext) string {
+	if strings.TrimSpace(ctx.KbContext) != "" || strings.TrimSpace(ctx.McpContext) == "" || len(ctx.McpIntents) != 1 {
+		return ""
+	}
+	return strings.TrimSpace(ctx.McpIntents[0].Node.PromptTemplate)
 }
 
 func systemPromptSlotCandidates(ctx PromptContext, mode string) []string {

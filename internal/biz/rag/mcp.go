@@ -159,7 +159,10 @@ func (p *DefaultMcpContextProvider) BuildContextWithIntents(ctx context.Context,
 	}
 
 	promptTemplates := buildMcpParameterPromptTemplates(subIntents)
-	results := p.executeExecutors(ctx, question, executors, promptTemplates)
+	// 对齐 Java DefaultContextFormatter.formatMcpContext：按 toolId → 意图映射，
+	// 在每个工具结果段前注入该意图的 promptSnippet（<rules> 段）。
+	intentRules := buildMcpIntentPromptSnippets(subIntents)
+	results := p.executeExecutors(ctx, question, executors, promptTemplates, intentRules)
 	successTexts := make([]string, 0, len(executors))
 	errorTexts := make([]string, 0)
 	for _, result := range results {
@@ -173,12 +176,39 @@ func (p *DefaultMcpContextProvider) BuildContextWithIntents(ctx context.Context,
 	return formatMcpContextSections(successTexts, errorTexts), nil
 }
 
+// buildMcpIntentPromptSnippets 构建 toolId → 意图 promptSnippet 映射。
+func buildMcpIntentPromptSnippets(subIntents []SubQuestionIntent) map[string]string {
+	if len(subIntents) == 0 {
+		return nil
+	}
+	snippets := make(map[string]string)
+	for _, si := range subIntents {
+		for _, ns := range si.NodeScores {
+			if ns.Node.Kind != IntentKindMCP {
+				continue
+			}
+			toolID := strings.TrimSpace(ns.Node.McpToolID)
+			snippet := strings.TrimSpace(ns.Node.PromptSnippet)
+			if toolID == "" || snippet == "" {
+				continue
+			}
+			if _, exists := snippets[toolID]; !exists {
+				snippets[toolID] = snippet
+			}
+		}
+	}
+	if len(snippets) == 0 {
+		return nil
+	}
+	return snippets
+}
+
 type mcpToolExecutionResult struct {
 	successText string
 	errorText   string
 }
 
-func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, question string, executors []McpToolExecutor, promptTemplates map[string]string) []mcpToolExecutionResult {
+func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, question string, executors []McpToolExecutor, promptTemplates map[string]string, intentRules map[string]string) []mcpToolExecutionResult {
 	results := make([]mcpToolExecutionResult, len(executors))
 	var wg sync.WaitGroup
 	wg.Add(len(executors))
@@ -211,7 +241,13 @@ func (p *DefaultMcpContextProvider) executeExecutors(ctx context.Context, questi
 			if text == "" {
 				return
 			}
-			results[idx].successText = "工具：" + tool.Name + "\n" + text
+			// 对齐 Java mcp-section 模板：工具意图配置了 promptSnippet 时，
+			// 该工具的结果段前置 <rules> 回答规则。
+			section := ""
+			if snippet := strings.TrimSpace(intentRules[tool.Name]); snippet != "" {
+				section = "<rules>\n" + snippet + "\n</rules>\n"
+			}
+			results[idx].successText = section + "工具：" + tool.Name + "\n" + text
 		}(i, executor)
 	}
 	wg.Wait()
