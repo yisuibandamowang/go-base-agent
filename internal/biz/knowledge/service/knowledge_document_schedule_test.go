@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1492,4 +1493,146 @@ func TestDocumentScheduleService_RecoverStuckRunningDocumentsUsesConfiguredTimeo
 
 func ptrTime(t time.Time) *time.Time {
 	return &t
+}
+
+// lockedScheduleFileStore / lockedScheduleChunkStarter 并发安全的采集 fake：
+// ScanDue 批内并行刷新后，多个 worker 会同时回调这两个接口，必须加锁才能过 -race。
+type lockedScheduleFileStore struct {
+	mu   sync.Mutex
+	puts []string
+}
+
+func (f *lockedScheduleFileStore) Put(docID string, _ string, _ []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.puts = append(f.puts, docID)
+}
+
+type lockedScheduleChunkStarter struct {
+	mu     sync.Mutex
+	docIDs []string
+}
+
+func (f *lockedScheduleChunkStarter) StartChunk(_ context.Context, docID string, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.docIDs = append(f.docIDs, docID)
+	return nil
+}
+
+func TestDocumentScheduleService_ScanDueRefreshesSchedulesInParallel(t *testing.T) {
+	// 对齐 Java knowledgeChunkExecutor：同批到期文档并行刷新，单个慢文档不得阻塞其余文档。
+	// 两路 fetch 在屏障处会合：若实现退回串行，第一个 fetch 永远等不到第二个，测试超时失败。
+	dbPath := filepath.Join(t.TempDir(), "parallel-refresh.db")
+	gdb, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(
+		&knowledgeModel.KnowledgeDocument{},
+		&knowledgeModel.KnowledgeDocumentSchedule{},
+		&knowledgeModel.KnowledgeDocumentScheduleExec{},
+	); err != nil {
+		t.Fatalf("migrate schedule tables: %v", err)
+	}
+
+	now := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	for i, sourceType := range []string{"url", "feishu"} {
+		doc := &knowledgeModel.KnowledgeDocument{
+			KbID:            "kb-1",
+			DocName:         fmt.Sprintf("doc-%d.md", i+1),
+			FileURL:         fmt.Sprintf("https://example.com/doc-%d.md", i+1),
+			FileType:        "md",
+			SourceType:      sourceType,
+			SourceLocation:  fmt.Sprintf("https://example.com/doc-%d.md", i+1),
+			ScheduleEnabled: 1,
+			ScheduleCron:    "@every 1h",
+			Status:          "success",
+			CreatedBy:       "user-1",
+		}
+		doc.ID = fmt.Sprintf("doc-%d", i+1)
+		if err := gdb.Create(doc).Error; err != nil {
+			t.Fatalf("seed doc: %v", err)
+		}
+		schedule := &knowledgeModel.KnowledgeDocumentSchedule{
+			DocID:       doc.ID,
+			KbID:        doc.KbID,
+			CronExpr:    "@every 1h",
+			Enabled:     1,
+			NextRunTime: ptrTime(now.Add(-time.Minute)),
+		}
+		if err := gdb.Create(schedule).Error; err != nil {
+			t.Fatalf("seed schedule: %v", err)
+		}
+	}
+
+	arrived := make(chan string, 2)
+	release := make(chan struct{})
+	newSource := func(name string) *fakeScheduleSource {
+		return &fakeScheduleSource{
+			name: name,
+			doc: &crawler.Document{
+				Meta: crawler.DocumentMeta{
+					URL:       "https://example.com/" + name + ".md",
+					MimeType:  "text/markdown",
+					SourceName: name,
+					UpdatedAt: now,
+				},
+				Content: []byte(name + " 文档内容"),
+			},
+			onFetch: func() {
+				arrived <- name
+				<-release
+			},
+		}
+	}
+
+	svc := NewDocumentScheduleService(
+		gdb,
+		knowledgeRepo.NewKnowledgeDocumentRepo(gdb),
+		knowledgeRepo.NewKnowledgeBaseRepo(gdb),
+		knowledgeRepo.NewKnowledgeDocumentScheduleRepo(gdb),
+		&lockedScheduleFileStore{},
+		&lockedScheduleChunkStarter{},
+		config.RAGKnowledgeScheduleConfig{BatchSize: 10, LockSeconds: 60},
+	)
+	svc.now = func() time.Time { return now }
+	svc.RegisterSource(newSource("url"))
+	svc.RegisterSource(newSource("feishu"))
+
+	type scanResult struct {
+		count int
+		err   error
+	}
+	done := make(chan scanResult, 1)
+	go func() {
+		count, err := svc.ScanDue(context.Background())
+		done <- scanResult{count: count, err: err}
+	}()
+
+	timeout := time.After(5 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-arrived:
+		case <-timeout:
+			close(release)
+			t.Fatal("expected both schedules to be fetched concurrently; refresh appears serialized")
+		}
+	}
+	close(release)
+
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("scan due: %v", res.err)
+	}
+	if res.count != 2 {
+		t.Fatalf("expected 2 processed schedules, got %d", res.count)
+	}
+	var successCount int64
+	if err := gdb.Model(&knowledgeModel.KnowledgeDocumentSchedule{}).Where("last_status = ?", "success").Count(&successCount).Error; err != nil {
+		t.Fatalf("count success schedules: %v", err)
+	}
+	if successCount != 2 {
+		t.Fatalf("expected both schedules to succeed, got %d", successCount)
+	}
 }

@@ -697,12 +697,6 @@ func main() {
 		api.GET("/ingestion/tasks", ingestionTaskH.List)
 	}
 
-	if gormDB != nil {
-		scheduleCtx, scheduleCancel := context.WithCancel(context.Background())
-		defer scheduleCancel()
-		go documentScheduleSvc.Run(scheduleCtx)
-	}
-
 	ragGroup := r.Group("/rag/v3")
 	{
 		ragGroup.GET("/chat", ragCtl.Chat)

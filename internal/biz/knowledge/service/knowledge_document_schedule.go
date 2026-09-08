@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go-base-agent/internal/biz/crawler"
@@ -121,6 +123,10 @@ func (s *DocumentScheduleService) Run(ctx context.Context) {
 	if delay <= 0 {
 		delay = 10 * time.Second
 	}
+	// 恢复任务对齐 Java fixedDelay=60s + initialDelay=30s：启动 30 秒后先跑一轮，
+	// 进程崩溃重启后卡死文档最多多等 30 秒而不是整一分钟。
+	firstRecovery := time.NewTimer(30 * time.Second)
+	defer firstRecovery.Stop()
 	recoveryTicker := time.NewTicker(time.Minute)
 	defer recoveryTicker.Stop()
 	ticker := time.NewTicker(delay)
@@ -129,12 +135,10 @@ func (s *DocumentScheduleService) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-firstRecovery.C:
+			s.recoverStuck(ctx)
 		case <-recoveryTicker.C:
-			if recovered, err := s.RecoverStuckRunningDocuments(ctx); err != nil {
-				slog.Warn("knowledge document running recovery failed", "err", err)
-			} else if recovered > 0 {
-				slog.Warn("reset stuck running documents", "count", recovered, "timeout", s.runningTimeout().String())
-			}
+			s.recoverStuck(ctx)
 		case <-ticker.C:
 			if _, err := s.ScanDue(ctx); err != nil {
 				slog.Warn("knowledge document schedule scan failed", "err", err)
@@ -142,6 +146,17 @@ func (s *DocumentScheduleService) Run(ctx context.Context) {
 		}
 	}
 }
+
+func (s *DocumentScheduleService) recoverStuck(ctx context.Context) {
+	if recovered, err := s.RecoverStuckRunningDocuments(ctx); err != nil {
+		slog.Warn("knowledge document running recovery failed", "err", err)
+	} else if recovered > 0 {
+		slog.Warn("reset stuck running documents", "count", recovered, "timeout", s.runningTimeout().String())
+	}
+}
+
+// scheduleQueueCapacity 到期任务的排队上限，队列满时拒绝新任务并释放锁（对齐 Java knowledgeChunkExecutor 队列 200 + AbortPolicy）。
+const scheduleQueueCapacity = 200
 
 // ScanDue 扫描并执行到期的文档刷新任务。
 func (s *DocumentScheduleService) ScanDue(ctx context.Context) (int, error) {
@@ -157,12 +172,50 @@ func (s *DocumentScheduleService) ScanDue(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("claim due document schedules: %w", err)
 	}
+	if len(schedules) == 0 {
+		return 0, nil
+	}
+	// 批内并行刷新，对齐 Java knowledgeChunkExecutor（CPU 数 worker）：单个慢文档不再推迟
+	// 同批其余文档与卡死恢复 ticker 的触发。
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan model.KnowledgeDocumentSchedule, scheduleQueueCapacity)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for schedule := range jobs {
+				if err := s.refreshOne(ctx, schedule, now); err != nil {
+					slog.Warn("knowledge document schedule refresh failed", "scheduleId", schedule.ID, "docId", schedule.DocID, "err", err)
+				}
+			}
+		}()
+	}
 	for _, schedule := range schedules {
-		if err := s.refreshOne(ctx, schedule, now); err != nil {
-			slog.Warn("knowledge document schedule refresh failed", "scheduleId", schedule.ID, "docId", schedule.DocID, "err", err)
+		select {
+		case jobs <- schedule:
+		default:
+			// 队列满被拒（对齐 Java AbortPolicy）：释放锁留给下一轮扫描，避免任务永久滞留
+			s.releaseSchedule(ctx, schedule, now)
 		}
 	}
+	close(jobs)
+	wg.Wait()
 	return len(schedules), nil
+}
+
+// releaseSchedule 队列满拒绝执行时释放调度锁，任务留给下一轮扫描重新认领。
+func (s *DocumentScheduleService) releaseSchedule(ctx context.Context, schedule model.KnowledgeDocumentSchedule, now time.Time) {
+	if _, err := s.updateScheduleIfOwned(ctx, schedule, map[string]any{
+		"lock_owner":  "",
+		"lock_until":  nil,
+		"update_time": now,
+	}); err != nil {
+		slog.Warn("knowledge document schedule queue full, release lock failed", "scheduleId", schedule.ID, "err", err)
+	}
 }
 
 // RecoverStuckRunningDocuments 将超时卡在 running 的文档重置为 failed。
