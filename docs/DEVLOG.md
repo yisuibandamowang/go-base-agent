@@ -860,3 +860,10 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 - 种子提示词 `init_data_pg.sql` 同步追加 5 条（内容取自 Java 同名种子，含围栏校验串/防注入声明/JSON 数组产物约定等完整约束），槽位总数与 Java 的 12 个对齐。
 - `CONVERSATION_SUMMARY` 生效范围从「通用（双模式）」修正为「WORKFLOW 专属、仅 WORKFLOW 生效」（对齐 Java：Agent 模式的长会话由「Agent 上下文压缩」承接，两份产物职责不可合并——这份是话题索引不含结论，那份必须留结论）；运行时消费方（摘要生成器）当前仅在 WORKFLOW 链路存在，不受影响。
 - 槽位元数据与响应新增 `editorHint` 编辑器提示语（对齐 Java `AgentPromptSlot.editorHint` → `AgentPromptConfigVO.editorHint`）：告诉提示词作者这个槽位的产物去哪、怎么写才对，5 个新槽位各带一段；`/agent` 管理面槽位列表接口 `slots[]` 新增 `editorHint` 字段返回。
+
+# 2026-09-08 — 二轮对齐：框架层锁持有者校验、消费幂等三态与档位枚举覆盖
+
+- `RedisLock.RunWithLock` 补锁持有者校验（对齐 Java Redisson `isHeldByCurrentThread`）：锁值携带随机 owner token，结束时经 Lua 脚本比对后才删除——长任务超过 TTL、锁被其他实例接管后，原持有者不会误删别人的锁；`Acquire/Release` 分离调用（文档分块互斥）保持原语义不变。
+- MQ 消费新增三态幂等守卫 `idempotent.ConsumeGuard`（对齐 Java `IdempotentConsumeAspect` + `IdempotentConsumeStatusEnum`）：`SET key CONSUMING NX GET PX` 原子脚本区分三态——无记录获得执行权、消费中（CONSUMING）触发延迟重试、已完成（CONSUMED）直接跳过；处理失败删除标记允许重投，幂等窗口默认 1 小时（对齐 Java `keyTimeout` 默认值）。文档分块消费者（最重的重复消费风险点）经 `WithConsumeGuard` 选项接入。
+- chat 档位配置启动校验补 Tier 枚举全覆盖（对齐 Java `validateTierEnumCoverage`）：配置了 `ai.chat.tiers` 时，代码按 Tier 调用的档位（fast/standard/deep）缺一即启动失败，避免漏配让调用静默落到别的档位。
+- token 计数 CJK 范围经逐块比对确认为等价实现（Go 用 `unicode.Han/Hiragana/Katakana/Hangul` + 部首/符号区段区间，覆盖 Java 16 个 `Character.UnicodeBlock` 的同一码位集合；`utf16.RuneLen` 对齐 Java char 计数），无需改动。

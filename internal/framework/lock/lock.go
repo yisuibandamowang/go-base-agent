@@ -2,6 +2,8 @@ package lock
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -44,15 +46,45 @@ func (l *RedisLock) IsLocked(ctx context.Context, key string) (bool, error) {
 	return n > 0, err
 }
 
+// releaseIfStillHeld deletes the lock only when it still carries our owner
+// token: after TTL expiry another holder may have taken over and releasing
+// theirs would break mutual exclusion（对齐 Java Redisson isHeldByCurrentThread
+// 的持有者校验，仅对异步长任务的 RunWithLock 生效）。
+func (l *RedisLock) releaseIfStillHeld(ctx context.Context, key, token string) {
+	script := redis.NewScript(`
+local value = redis.call('GET', KEYS[1])
+if value == ARGV[1] then
+	return redis.call('DEL', KEYS[1])
+end
+return 0
+`)
+	if _, err := script.Run(ctx, l.client, []string{key}, token).Result(); err != nil && err != redis.Nil {
+		// 释放失败不影响业务结果：锁最终会因 TTL 到期自动释放
+		_ = err
+	}
+}
+
+// newLockToken 生成随机的锁持有者标识，值域避开 Acquire 的 "locked" 字面量。
+func newLockToken() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("owner-%d", time.Now().UnixNano())
+	}
+	return "owner:" + hex.EncodeToString(buf)
+}
+
 // RunWithLock executes fn while holding the lock, releasing on completion.
+// 锁值携带随机持有者标识，释放前经 Lua 脚本比对：任务超过 TTL 后锁被他人
+// 接管时不会误删别人的锁。
 func (l *RedisLock) RunWithLock(ctx context.Context, key string, ttl time.Duration, fn func() error) error {
-	ok, err := l.Acquire(ctx, key, ttl)
+	token := newLockToken()
+	ok, err := l.client.SetNX(ctx, key, token, ttl).Result()
 	if err != nil {
-		return err
+		return fmt.Errorf("lock acquire: %w", err)
 	}
 	if !ok {
 		return fmt.Errorf("failed to acquire lock: %s", key)
 	}
-	defer l.Release(context.Background(), key)
+	defer l.releaseIfStillHeld(context.Background(), key, token)
 	return fn()
 }

@@ -974,6 +974,13 @@ func validateChatTiers(chatCfg AIChatConfig) error {
 			}
 		}
 	}
+	// 档位枚举覆盖（对齐 Java validateTierEnumCoverage）：代码里按 Tier 调用的档位
+	// 必须在 ai.chat.tiers 配置，漏配会让该调用静默落到别的档位
+	for _, tierKey := range []string{"fast", "standard", "deep"} {
+		if _, ok := chatCfg.Tiers[tierKey]; !ok {
+			return fmt.Errorf("validate ai.chat: tier %q required by Tier enum is missing from tiers config", tierKey)
+		}
+	}
 	deep := chatCfg.Tiers[chatCfg.DeepThinkingTier]
 	for _, id := range deep.Candidates {
 		candidate := registry[id]

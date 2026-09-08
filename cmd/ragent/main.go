@@ -262,7 +262,7 @@ func main() {
 	convHandler := conversationHandler.NewConversationHandler(convSvc)
 
 	if mqEnabled {
-		if err := knowledgeService.RegisterKnowledgeDocumentChunkConsumer(mqConsumer, docSvc); err != nil {
+		if err := knowledgeService.RegisterKnowledgeDocumentChunkConsumer(mqConsumer, docSvc, knowledgeService.WithConsumeGuard(idempotent.NewConsumeGuard(rdb))); err != nil {
 			slog.Warn("register knowledge document chunk consumer failed, fallback to inline chunking", "err", err)
 			mqEnabled = false
 			kbSvc.SetMQProducer(nil, false)

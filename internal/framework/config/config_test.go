@@ -1163,3 +1163,38 @@ rag:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestLoadRejectsChatTierMissingTierEnumCoverage(t *testing.T) {
+	yaml := `
+ai:
+  chat:
+    default-tier: standard
+    deep-thinking-tier: deep
+    tiers:
+      standard:
+        candidates: [model-a]
+        timeout-ms: 30000
+      deep:
+        candidates: [model-b]
+        timeout-ms: 60000
+    candidates:
+      - id: model-a
+        provider: noop
+        model: noop
+      - id: model-b
+        provider: noop
+        model: noop
+        supports-thinking: true
+`
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	// 配置了 tiers 但缺 fast 档：按 Tier 枚举全覆盖校验应拒绝（对齐 Java validateTierEnumCoverage）
+	_, err := Load(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "fast") {
+		t.Fatalf("expected missing tier enum coverage error, got: %v", err)
+	}
+}
