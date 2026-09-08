@@ -122,6 +122,34 @@ func TestBuildIntentClassifierPromptIncludesInteractionRoutingRules(t *testing.T
 	}
 }
 
+func TestBuildIntentClassifierPromptRendersJavaClassifierTemplate(t *testing.T) {
+	prompt := buildIntentClassifierPrompt([]IntentNode{{
+		ID:          "biz-oa-security",
+		IntentCode:  "biz-oa-security",
+		Name:        "数据安全",
+		Description: "OA 系统数据安全要求",
+		Kind:        IntentKindKB,
+	}}, nil)
+
+	// 对齐 Java intent-classifier.st 的完整规则段落，模板缺失时这些断言会提示内联兜底已偏离。
+	for _, fragment := range []string{
+		"# 角色定义",
+		"# 核心判断流程",
+		"歧义引导式问答",
+		"最多 3 个",
+		"# 评分标准",
+		"0.4-0.7 的多项候选",
+		"# 输出规范",
+		"# 分类列表",
+		"id=biz-oa-security",
+		"path=数据安全",
+	} {
+		if !strings.Contains(prompt, fragment) {
+			t.Fatalf("expected java classifier template fragment %q in prompt, got %q", fragment, prompt)
+		}
+	}
+}
+
 func TestIntentResolverFallsBackToHeuristicWhenLLMFails(t *testing.T) {
 	resolver := NewIntentResolver(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
 		{BaseModel: db.BaseModel{ID: "root"}, IntentCode: "member", Name: "会员系统", Enabled: 1},

@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,10 +9,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"text/template"
 	"unicode"
 
 	intentModel "go-base-agent/internal/biz/intent_tree/model"
 	"go-base-agent/internal/infra/chat"
+	"go-base-agent/prompts"
 )
 
 // IntentKind 区分知识库、系统和 MCP 意图。
@@ -340,7 +343,42 @@ func (r *IntentResolver) classifyWithLLM(ctx context.Context, question string, l
 	return scores, true
 }
 
+// intentClassifierTemplateFile 对齐 Java prompt/intent-classifier.st，通过占位符注入叶子节点清单。
+const intentClassifierTemplateFile = "intent_classifier.txt"
+
+var (
+	intentClassifierTemplateOnce sync.Once
+	intentClassifierTemplate     *template.Template
+)
+
+// loadIntentClassifierTemplate 惰性解析内嵌的意图分类提示词模板；模板缺失或非法时返回 nil，
+// 调用方回退到内联提示词，保证分类链路永不因模板问题中断。
+func loadIntentClassifierTemplate() *template.Template {
+	intentClassifierTemplateOnce.Do(func() {
+		content, err := prompts.FS.ReadFile(intentClassifierTemplateFile)
+		if err != nil {
+			slog.Warn("intent classifier prompt template missing, fallback to inline prompt", "err", err)
+			return
+		}
+		tmpl, err := template.New(intentClassifierTemplateFile).Parse(string(content))
+		if err != nil {
+			slog.Warn("intent classifier prompt template invalid, fallback to inline prompt", "err", err)
+			return
+		}
+		intentClassifierTemplate = tmpl
+	})
+	return intentClassifierTemplate
+}
+
 func buildIntentClassifierPrompt(leafNodes []IntentNode, rawNodes []intentModel.IntentNode) string {
+	nodeList := buildIntentClassifierNodeList(leafNodes, rawNodes)
+	if tmpl := loadIntentClassifierTemplate(); tmpl != nil {
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, map[string]string{"IntentList": nodeList}); err == nil {
+			return buf.String()
+		}
+	}
+	// 模板不可用时的内联兜底，规则与 intent_classifier.txt 保持同一语义的精简版。
 	var b strings.Builder
 	b.WriteString("你是企业内部助手的意图分类器，负责将用户输入路由到正确的分类叶子节点。\n")
 	b.WriteString("只输出 JSON 数组，例如 [{\"id\":\"node-id\",\"score\":0.9,\"reason\":\"...\"}]；没有匹配时输出 []。\n")
@@ -350,6 +388,12 @@ func buildIntentClassifierPrompt(leafNodes []IntentNode, rawNodes []intentModel.
 	b.WriteString("- 主题导向：没有具体实体名称时，匹配分类 path 和 description 中的主题词。\n")
 	b.WriteString("不要为了有结果强行选择弱相关分类；所有候选分数都低于 0.6 时返回 []。交互导向输入与某个 type=SYSTEM 节点的交际行为一致时按强匹配打分。\n\n")
 	b.WriteString("分类列表：\n")
+	b.WriteString(nodeList)
+	return b.String()
+}
+
+func buildIntentClassifierNodeList(leafNodes []IntentNode, rawNodes []intentModel.IntentNode) string {
+	var b strings.Builder
 	nodeIndex := make(map[string]IntentNode, len(rawNodes))
 	for _, node := range rawNodes {
 		if node.Enabled != 1 {
