@@ -278,11 +278,81 @@ func TestIntentService_UpdateNodeIgnoresImmutableJavaFields(t *testing.T) {
 	if updated.KbID != "" {
 		t.Fatalf("expected kbId to remain immutable, got %s", updated.KbID)
 	}
-	if updated.McpToolID != "tool-a" {
-		t.Fatalf("expected mcpToolId to remain immutable, got %s", updated.McpToolID)
+	// 对齐 Java updateNode：非 MCP 节点的 mcpToolId 一律清空，而不是保留旧值。
+	if updated.McpToolID != "" {
+		t.Fatalf("expected mcpToolId to be cleared for non-mcp node, got %s", updated.McpToolID)
 	}
 	if updated.Name != newName {
 		t.Fatalf("expected mutable fields to still update, got %s", updated.Name)
+	}
+}
+
+// TestIntentService_UpdateMcpToolIdAndRequireConfirm 对齐 Java updateNode 的 MCP 工具链路：
+// MCP 节点支持修改 mcpToolId 与 requireConfirm，改成非 MCP 后两者同时清空。
+func TestIntentService_UpdateMcpToolIdAndRequireConfirm(t *testing.T) {
+	svc := newIntentValidationService(t)
+	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode:     "member.tools.query",
+		Name:           "会员工具查询",
+		Level:          1,
+		McpToolID:      "tool-a",
+		RequireConfirm: 1,
+		Kind:           2,
+		Enabled:        1,
+		EnabledSet:     true,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	if created.RequireConfirm != 1 || created.McpToolID != "tool-a" {
+		t.Fatalf("expected mcp node to keep tool and confirm flag, got %+v", created)
+	}
+
+	newToolID := "tool-b"
+	confirmOff := int16(0)
+	updated, err := svc.UpdateNode(context.Background(), created.ID, dto.UpdateIntentReq{
+		McpToolID:      &newToolID,
+		RequireConfirm: &confirmOff,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("update node: %v", err)
+	}
+	if updated.McpToolID != "tool-b" {
+		t.Fatalf("expected mcpToolId to update for mcp node, got %s", updated.McpToolID)
+	}
+	if updated.RequireConfirm != 0 {
+		t.Fatalf("expected requireConfirm to update, got %d", updated.RequireConfirm)
+	}
+
+	kindKB := int16(0)
+	updated, err = svc.UpdateNode(context.Background(), created.ID, dto.UpdateIntentReq{
+		Kind: &kindKB,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("update node kind: %v", err)
+	}
+	if updated.McpToolID != "" || updated.RequireConfirm != 0 {
+		t.Fatalf("expected tool binding cleared after switching to non-mcp, got %+v", updated)
+	}
+}
+
+// TestIntentService_CreateNodeNormalizesRequireConfirm 对齐 Java normalizeRequireConfirm：
+// 非 MCP 节点一律落 0，确认标志只在工具调用链路上被读取。
+func TestIntentService_CreateNodeNormalizesRequireConfirm(t *testing.T) {
+	svc := newIntentValidationService(t)
+	created, err := svc.CreateNode(context.Background(), dto.CreateIntentReq{
+		IntentCode:     "member.kb.query",
+		Name:           "会员知识查询",
+		Level:          1,
+		RequireConfirm: 1,
+		Enabled:        1,
+		EnabledSet:     true,
+	}, "user-1")
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	if created.RequireConfirm != 0 {
+		t.Fatalf("expected requireConfirm to normalize to 0 for non-mcp node, got %d", created.RequireConfirm)
 	}
 }
 

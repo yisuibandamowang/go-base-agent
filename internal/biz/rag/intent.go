@@ -35,17 +35,20 @@ const MaxIntentCount = 3
 
 // IntentNode 是 Go 侧使用的意图节点视图。
 type IntentNode struct {
-	ID                  string
-	IntentCode          string
-	Name                string
-	Level               int16
-	ParentCode          string
-	Description         string
-	Examples            string
-	CollectionName      string
-	CollectionNames     []string
-	TopK                int
-	McpToolID           string
+	ID              string
+	IntentCode      string
+	Name            string
+	Level           int16
+	ParentCode      string
+	Description     string
+	Examples        string
+	CollectionName  string
+	CollectionNames []string
+	TopK            int
+	McpToolID       string
+	// RequireConfirm 执行 MCP 工具前是否需要用户确认（仅对 MCP 意图有意义），
+	// 对齐 Java IntentNode.requireConfirm，供 Agent 调用前确认链路消费。
+	RequireConfirm      bool
 	Kind                IntentKind
 	PromptSnippet       string
 	PromptTemplate      string
@@ -720,6 +723,7 @@ func toIntentNode(node intentModel.IntentNode) IntentNode {
 		CollectionNames:     node.CollectionNames,
 		TopK:                node.TopK,
 		McpToolID:           node.McpToolID,
+		RequireConfirm:      node.RequireConfirm == 1,
 		Kind:                kind,
 		PromptSnippet:       node.PromptSnippet,
 		PromptTemplate:      node.PromptTemplate,

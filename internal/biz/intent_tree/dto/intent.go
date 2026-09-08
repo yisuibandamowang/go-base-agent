@@ -58,18 +58,20 @@ func (e *IntentExamples) UnmarshalJSON(data []byte) error {
 
 // IntentNodeResp 意图节点响应。
 type IntentNodeResp struct {
-	ID                  string            `json:"id"`
-	KbID                string            `json:"kbId"`
-	IntentCode          string            `json:"intentCode"`
-	Name                string            `json:"name"`
-	Level               int16             `json:"level"`
-	ParentCode          string            `json:"parentCode"`
-	Description         string            `json:"description"`
-	Examples            string            `json:"examples"`
-	CollectionName      string            `json:"collectionName"`
-	CollectionNames     []string          `json:"collectionNames"`
-	TopK                int               `json:"topK"`
-	McpToolID           string            `json:"mcpToolId"`
+	ID              string   `json:"id"`
+	KbID            string   `json:"kbId"`
+	IntentCode      string   `json:"intentCode"`
+	Name            string   `json:"name"`
+	Level           int16    `json:"level"`
+	ParentCode      string   `json:"parentCode"`
+	Description     string   `json:"description"`
+	Examples        string   `json:"examples"`
+	CollectionName  string   `json:"collectionName"`
+	CollectionNames []string `json:"collectionNames"`
+	TopK            int      `json:"topK"`
+	McpToolID       string   `json:"mcpToolId"`
+	// RequireConfirm 执行前是否需要用户确认：0=否，1=是（仅对 kind=2 有意义）。
+	RequireConfirm      int16             `json:"requireConfirm"`
 	Kind                int16             `json:"kind"`
 	PromptSnippet       string            `json:"promptSnippet"`
 	PromptTemplate      string            `json:"promptTemplate"`
@@ -83,25 +85,27 @@ type IntentNodeResp struct {
 
 // CreateIntentReq 创建意图节点请求。
 type CreateIntentReq struct {
-	KbID                string         `json:"kbId"`
-	IntentCode          string         `json:"intentCode" binding:"required"`
-	Name                string         `json:"name" binding:"required"`
-	Level               int16          `json:"level"`
-	ParentCode          string         `json:"parentCode"`
-	Description         string         `json:"description"`
-	Examples            IntentExamples `json:"examples"`
-	CollectionName      string         `json:"collectionName"`
-	CollectionNames     []string       `json:"collectionNames"`
-	TopK                int            `json:"topK"`
-	McpToolID           string         `json:"mcpToolId"`
-	Kind                int16          `json:"kind"`
-	PromptSnippet       string         `json:"promptSnippet"`
-	PromptTemplate      string         `json:"promptTemplate"`
-	ParamPromptTemplate string         `json:"paramPromptTemplate"`
-	SortOrder           int            `json:"sortOrder"`
-	Enabled             int16          `json:"enabled"`
-	TopKSet             bool           `json:"-"`
-	EnabledSet          bool           `json:"-"`
+	KbID            string         `json:"kbId"`
+	IntentCode      string         `json:"intentCode" binding:"required"`
+	Name            string         `json:"name" binding:"required"`
+	Level           int16          `json:"level"`
+	ParentCode      string         `json:"parentCode"`
+	Description     string         `json:"description"`
+	Examples        IntentExamples `json:"examples"`
+	CollectionName  string         `json:"collectionName"`
+	CollectionNames []string       `json:"collectionNames"`
+	TopK            int            `json:"topK"`
+	McpToolID       string         `json:"mcpToolId"`
+	// RequireConfirm 执行前是否需要用户确认：0=否，1=是（仅对 kind=2 有意义）。
+	RequireConfirm      int16  `json:"requireConfirm"`
+	Kind                int16  `json:"kind"`
+	PromptSnippet       string `json:"promptSnippet"`
+	PromptTemplate      string `json:"promptTemplate"`
+	ParamPromptTemplate string `json:"paramPromptTemplate"`
+	SortOrder           int    `json:"sortOrder"`
+	Enabled             int16  `json:"enabled"`
+	TopKSet             bool   `json:"-"`
+	EnabledSet          bool   `json:"-"`
 }
 
 // UnmarshalJSON 记录 topK 是否由请求显式传入，同时兼容 collectionNames 数组。
@@ -118,6 +122,7 @@ func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 		CollectionNames     []string       `json:"collectionNames"`
 		TopK                *int           `json:"topK"`
 		McpToolID           string         `json:"mcpToolId"`
+		RequireConfirm      int16          `json:"requireConfirm"`
 		Kind                int16          `json:"kind"`
 		PromptSnippet       string         `json:"promptSnippet"`
 		PromptTemplate      string         `json:"promptTemplate"`
@@ -145,6 +150,7 @@ func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 		r.TopKSet = true
 	}
 	r.McpToolID = raw.McpToolID
+	r.RequireConfirm = raw.RequireConfirm
 	r.Kind = raw.Kind
 	r.PromptSnippet = raw.PromptSnippet
 	r.PromptTemplate = raw.PromptTemplate
@@ -164,23 +170,25 @@ func (r *CreateIntentReq) UnmarshalJSON(data []byte) error {
 
 // UpdateIntentReq 更新意图节点请求。
 type UpdateIntentReq struct {
-	KbID                *string         `json:"kbId"`
-	IntentCode          *string         `json:"intentCode"`
-	Name                *string         `json:"name"`
-	Level               *int16          `json:"level"`
-	ParentCode          *string         `json:"parentCode"`
-	Description         *string         `json:"description"`
-	Examples            *IntentExamples `json:"examples"`
-	CollectionName      *string         `json:"collectionName"`
-	CollectionNames     []string        `json:"collectionNames"`
-	TopK                *int            `json:"topK"`
-	McpToolID           *string         `json:"mcpToolId"`
-	Kind                *int16          `json:"kind"`
-	PromptSnippet       *string         `json:"promptSnippet"`
-	PromptTemplate      *string         `json:"promptTemplate"`
-	ParamPromptTemplate *string         `json:"paramPromptTemplate"`
-	SortOrder           *int            `json:"sortOrder"`
-	Enabled             *int16          `json:"enabled"`
+	KbID            *string         `json:"kbId"`
+	IntentCode      *string         `json:"intentCode"`
+	Name            *string         `json:"name"`
+	Level           *int16          `json:"level"`
+	ParentCode      *string         `json:"parentCode"`
+	Description     *string         `json:"description"`
+	Examples        *IntentExamples `json:"examples"`
+	CollectionName  *string         `json:"collectionName"`
+	CollectionNames []string        `json:"collectionNames"`
+	TopK            *int            `json:"topK"`
+	McpToolID       *string         `json:"mcpToolId"`
+	// RequireConfirm 执行前是否需要用户确认：0=否，1=是（仅对 kind=2 有意义）。
+	RequireConfirm      *int16  `json:"requireConfirm"`
+	Kind                *int16  `json:"kind"`
+	PromptSnippet       *string `json:"promptSnippet"`
+	PromptTemplate      *string `json:"promptTemplate"`
+	ParamPromptTemplate *string `json:"paramPromptTemplate"`
+	SortOrder           *int    `json:"sortOrder"`
+	Enabled             *int16  `json:"enabled"`
 }
 
 // TermMappingResp 关键词映射响应。

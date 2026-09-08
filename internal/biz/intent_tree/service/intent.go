@@ -82,7 +82,8 @@ func (s *IntentService) CreateNode(ctx context.Context, req dto.CreateIntentReq,
 		CollectionName:      collectionName,
 		CollectionNames:     collectionNames,
 		TopK:                topK,
-		McpToolID:           req.McpToolID,
+		McpToolID:           strings.TrimSpace(req.McpToolID),
+		RequireConfirm:      normalizeRequireConfirm(req.RequireConfirm, req.Kind),
 		Kind:                req.Kind,
 		PromptSnippet:       req.PromptSnippet,
 		PromptTemplate:      req.PromptTemplate,
@@ -397,6 +398,7 @@ func toIntentResp(node *model.IntentNode) *dto.IntentNodeResp {
 		CollectionNames:     effectiveCollectionNames(node),
 		TopK:                node.TopK,
 		McpToolID:           node.McpToolID,
+		RequireConfirm:      node.RequireConfirm,
 		Kind:                node.Kind,
 		PromptSnippet:       node.PromptSnippet,
 		PromptTemplate:      node.PromptTemplate,
@@ -457,13 +459,24 @@ func (s *IntentService) applyIntentUpdate(ctx context.Context, node *model.Inten
 		}
 		node.TopK = *req.TopK
 	}
+	if req.McpToolID != nil {
+		node.McpToolID = strings.TrimSpace(*req.McpToolID)
+	}
 	if req.Kind != nil {
 		node.Kind = *req.Kind
+	}
+	if req.RequireConfirm != nil {
+		node.RequireConfirm = normalizeRequireConfirm(*req.RequireConfirm, node.Kind)
 	}
 	if node.Kind != 0 {
 		node.CollectionNames = nil
 		node.CollectionName = ""
 		node.KbID = ""
+	}
+	// 确认标志与工具绑定同进退：节点改成非 MCP 后清掉，避免改回 MCP 时残留的确认标志突然生效。
+	if node.Kind != 2 {
+		node.McpToolID = ""
+		node.RequireConfirm = 0
 	}
 	if err := validateTopicKBNode(node.Level, node.Kind, effectiveCollectionNames(node)); err != nil {
 		return err
@@ -670,6 +683,18 @@ func normalizeCreateEnabled(enabled int16, enabledSet bool) int16 {
 		return 1
 	}
 	return enabled
+}
+
+// normalizeRequireConfirm 非 MCP 节点一律落 0：
+// 确认标志只在工具调用链路上被读取，留在别的类型上是无效数据。
+func normalizeRequireConfirm(requireConfirm int16, kind int16) int16 {
+	if kind != 2 {
+		return 0
+	}
+	if requireConfirm == 1 {
+		return 1
+	}
+	return 0
 }
 
 func (s *IntentService) resolveCollectionBinding(ctx context.Context, kbID, fallback string, requested []string) ([]string, string, string, error) {

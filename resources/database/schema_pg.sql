@@ -382,6 +382,7 @@ CREATE TABLE t_intent_node (
     collection_names      JSONB        NOT NULL DEFAULT '[]'::jsonb,
     top_k                 INTEGER,
     mcp_tool_id           VARCHAR(128),
+    require_confirm       SMALLINT     NOT NULL DEFAULT 0,
     kind                  SMALLINT     NOT NULL DEFAULT 0,
     prompt_snippet        TEXT,
     prompt_template       TEXT,
@@ -772,6 +773,7 @@ COMMENT ON COLUMN t_intent_node.collection_name IS '关联的Collection名称';
 COMMENT ON COLUMN t_intent_node.collection_names IS '关联的Collection名称列表；同一意图共享一个TopK总预算';
 COMMENT ON COLUMN t_intent_node.top_k IS '知识库检索TopK';
 COMMENT ON COLUMN t_intent_node.mcp_tool_id IS 'MCP工具ID';
+COMMENT ON COLUMN t_intent_node.require_confirm IS '执行前是否需要用户确认 1：需要 0：不需要';
 COMMENT ON COLUMN t_intent_node.kind IS '类型 0：RAG知识库类 1：SYSTEM系统交互类';
 COMMENT ON COLUMN t_intent_node.prompt_snippet IS '提示词片段';
 COMMENT ON COLUMN t_intent_node.prompt_template IS '提示词模板';
