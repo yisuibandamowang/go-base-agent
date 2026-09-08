@@ -24,6 +24,11 @@ type OpenAICompatibleChatClient struct {
 	// Defaults to true. Set to false for Ollama.
 	RequiresAPIKey bool
 
+	// SupportsEnableThinkingParam 声明提供商是否认识 enable_thinking 字段。
+	// 该字段是 DashScope 系（百炼/SiliconFlow）的私有扩展，OpenAI 兼容协议本身没有，
+	// 发给不认识它的网关会被判为 unknown_parameter 直接 400，因此默认不发。
+	SupportsEnableThinkingParam bool
+
 	// CustomizeBody allows provider-specific request body modifications.
 	CustomizeBody func(body map[string]interface{}, req Request)
 }
@@ -118,9 +123,9 @@ func (c *OpenAICompatibleChatClient) buildRequestBody(req Request, target model.
 
 	if c.CustomizeBody != nil {
 		c.CustomizeBody(body, req)
-	} else {
-		// Qwen3 系列在百炼 API 上默认 enable_thinking=true，
-		// 未开启思考时必须显式传 false，否则模型每次都默认深度思考
+	} else if c.SupportsEnableThinkingParam {
+		// 仅对认识该字段的提供商显式声明思考开关：
+		// Qwen3 系在百炼 API 上默认 enable_thinking=true，未开启思考时必须显式传 false
 		thinking := req.Thinking != nil && *req.Thinking
 		body["enable_thinking"] = thinking
 	}

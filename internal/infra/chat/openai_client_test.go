@@ -320,7 +320,9 @@ func TestDefaultFirstPacketProbe_Timeout(t *testing.T) {
 }
 
 func TestOpenAIClient_BuildRequestBodyDisablesThinkingExplicitly(t *testing.T) {
-	client := NewOpenAICompatibleChatClient("test", nil)
+	// 仅对声明认识该字段的提供商（百炼/SiliconFlow）发送 enable_thinking。
+	client := NewOpenAICompatibleChatClient("bailian", nil)
+	client.SupportsEnableThinkingParam = true
 	falseVal := false
 	req := SimpleRequest("hello")
 	req.Thinking = &falseVal
@@ -366,11 +368,12 @@ func TestStreamError_Error(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse 验证 Thinking 未显式设置时
-// 也显式传递 enable_thinking=false：Qwen3 系列在百炼 API 上默认开启思考，缺省会误触发深度思考。
-// 对齐 Java 修复：未开启思考时显式传递 enable_thinking=false。
+// TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse 验证声明认识该字段的提供商
+// 在 Thinking 未显式设置时也显式传递 enable_thinking=false：Qwen3 系列在百炼 API 上
+// 默认开启思考，缺省会误触发深度思考。
 func TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse(t *testing.T) {
-	client := NewOpenAICompatibleChatClient("test", nil)
+	client := NewOpenAICompatibleChatClient("bailian", nil)
+	client.SupportsEnableThinkingParam = true
 	req := SimpleRequest("hello")
 	if req.Thinking != nil {
 		t.Fatal("precondition: Thinking should be nil")
@@ -389,6 +392,27 @@ func TestOpenAIClient_BuildRequestBodyDefaultsThinkingToFalse(t *testing.T) {
 	}
 	if enabled, ok := value.(bool); !ok || enabled {
 		t.Fatalf("expected enable_thinking=false, got %#v", value)
+	}
+}
+
+// TestOpenAIClient_BuildRequestBodyOmitsEnableThinkingForUnknownProviders
+// 对齐 Java supportsEnableThinkingParam 默认 false：enable_thinking 是 DashScope 系
+// 私有扩展，发给不认识它的网关会被判为 unknown_parameter 直接 400，默认不发。
+func TestOpenAIClient_BuildRequestBodyOmitsEnableThinkingForUnknownProviders(t *testing.T) {
+	client := NewOpenAICompatibleChatClient("openai", nil)
+	falseVal := false
+	req := SimpleRequest("hello")
+	req.Thinking = &falseVal
+	target := model.Target{
+		ID: "test-model",
+		Candidate: config.AICandidateConfig{
+			Model: "test-model",
+		},
+	}
+
+	body := client.buildRequestBody(req, target, false)
+	if _, ok := body["enable_thinking"]; ok {
+		t.Fatalf("expected enable_thinking omitted for unknown provider, got %#v", body["enable_thinking"])
 	}
 }
 

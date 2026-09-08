@@ -1045,7 +1045,13 @@ func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
 	for name, provider := range aiCfg.Providers {
 		switch provider.Protocol {
 		case "openai-compatible":
-			clients = append(clients, chat.NewOpenAICompatibleChatClient(name, nil))
+			client := chat.NewOpenAICompatibleChatClient(name, nil)
+			// enable_thinking 是 DashScope 系私有扩展，只对声明认识它的提供商发送，
+			// 对齐 Java BaiLianChatClient/SiliconFlowChatClient 的 supportsEnableThinkingParam。
+			if supportsEnableThinkingParam(name) {
+				client.SupportsEnableThinkingParam = true
+			}
+			clients = append(clients, client)
 		case "anthropic":
 			clients = append(clients, chat.NewAnthropicChatClient(name, nil))
 		case "noop":
@@ -1054,6 +1060,17 @@ func buildChatClients(aiCfg config.AIConfig) []chat.ChatClient {
 		}
 	}
 	return clients
+}
+
+// supportsEnableThinkingParam 对齐 Java 覆写了 supportsEnableThinkingParam 的客户端：
+// 百炼（DashScope 兼容模式）与 SiliconFlow；其余网关收到该字段会被判为 unknown_parameter。
+func supportsEnableThinkingParam(providerName string) bool {
+	switch strings.TrimSpace(providerName) {
+	case "bailian", "siliconflow", "dashscope":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildEmbeddingClients(aiCfg config.AIConfig) []embedding.Client {
