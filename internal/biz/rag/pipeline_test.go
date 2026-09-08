@@ -1443,6 +1443,135 @@ func TestPipeline_StreamChat_SystemOnlyIntentUsesPreferredLLMWhenConfigured(t *t
 	}
 }
 
+func TestPipeline_StreamChat_MultipleSystemIntentsDoNotShortCircuit(t *testing.T) {
+	// 对齐 Java IntentResolver.isSystemOnly：严格单个 SYSTEM 意图才走系统闲聊；
+	// 一个子问题命中 2 个 SYSTEM 意图（如「你好，你是谁」）时必须继续走检索。
+	retriever := staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "助手介绍内容", Score: 0.9}}}
+	var llmCalls int
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			llmCalls++
+			cb.OnContent("回答")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "你好，你是谁",
+		NodeScores: []NodeScore{
+			{Node: IntentNode{ID: "sys-greeting", Kind: IntentKindSystem}, Score: 0.92},
+			{Node: IntentNode{ID: "sys-intro", Kind: IntentKindSystem}, Score: 0.88},
+		},
+	}}})
+
+	p.StreamChat(context.Background(), "你好，你是谁", "conv-1", "task-1", false, s)
+
+	if llmCalls != 1 {
+		t.Fatalf("expected rag answer path, got %d llm calls", llmCalls)
+	}
+}
+
+func TestPipeline_StreamChat_EmptyIntentScoresDoNotShortCircuit(t *testing.T) {
+	// 子问题未命中任何意图（NodeScores 为空）时不走系统闲聊，保持正常检索。
+	retriever := staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "业务内容", Score: 0.9}}}
+	var llmCalls int
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			llmCalls++
+			cb.OnContent("回答")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "随便问点啥",
+		NodeScores:  nil,
+	}}})
+
+	p.StreamChat(context.Background(), "随便问点啥", "conv-1", "task-1", false, s)
+
+	if llmCalls != 1 {
+		t.Fatalf("expected rag answer path for empty intent scores, got %d llm calls", llmCalls)
+	}
+}
+
+func TestPipeline_StreamChat_RagAnswerUsesJavaSamplingParams(t *testing.T) {
+	// 对齐 Java streamLLMResponse：纯 KB 场景 temperature 0 / topP 1，不设 maxTokens。
+	var capturedReq chat.Request
+	done := make(chan struct{})
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			go func() {
+				cb.OnContent("回答")
+				cb.OnComplete()
+				close(done)
+			}()
+			return &fakeHandle{}, nil
+		},
+	}
+	retriever := staticRetriever{chunks: []RetrievedChunk{{ID: "chunk-1", Text: "知识库片段", Score: 0.9}}}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, retriever, &NoopMemoryService{})
+	p.StreamChat(context.Background(), "会员权益", "conv-1", "task-1", false, s)
+
+	<-done
+	if capturedReq.Temperature == nil || *capturedReq.Temperature != 0 {
+		t.Fatalf("expected temperature 0 for kb-only answer, got %+v", capturedReq.Temperature)
+	}
+	if capturedReq.TopP == nil || *capturedReq.TopP != 1 {
+		t.Fatalf("expected topP 1 for kb-only answer, got %+v", capturedReq.TopP)
+	}
+	if capturedReq.MaxTokens != nil {
+		t.Fatalf("expected no maxTokens on answer request, got %d", *capturedReq.MaxTokens)
+	}
+}
+
+func TestPipeline_StreamChat_SystemOnlyRequestUsesJavaParams(t *testing.T) {
+	// 对齐 Java streamSystemResponse：temperature 0.7、thinking false、不设 maxTokens。
+	var capturedReq chat.Request
+	llm := &fakeLLMService{
+		streamFn: func(ctx context.Context, req chat.Request, cb chat.StreamCallback) (chat.StreamHandle, error) {
+			capturedReq = req
+			cb.OnContent("系统回复。")
+			cb.OnComplete()
+			return &fakeHandle{}, nil
+		},
+	}
+
+	s, _ := newTestSSESender(t)
+	p := NewPipeline(llm, NewDefaultPromptBuilder(), &NoopRewriter{}, staticRetriever{}, &NoopMemoryService{})
+	p.SetIntentResolver(staticIntentResolutionService{subIntents: []SubQuestionIntent{{
+		SubQuestion: "你是谁",
+		NodeScores: []NodeScore{{
+			Node:  IntentNode{ID: "system-intro", Kind: IntentKindSystem, PromptTemplate: "你是系统助手。"},
+			Score: 0.95,
+		}},
+	}}})
+
+	p.StreamChat(context.Background(), "你是谁", "conv-1", "task-1", false, s)
+
+	if capturedReq.Temperature == nil || *capturedReq.Temperature != 0.7 {
+		t.Fatalf("expected system-only temperature 0.7, got %+v", capturedReq.Temperature)
+	}
+	if capturedReq.Thinking == nil || *capturedReq.Thinking {
+		t.Fatalf("expected system-only thinking false, got %+v", capturedReq.Thinking)
+	}
+	if capturedReq.MaxTokens != nil {
+		t.Fatalf("expected no maxTokens on system-only request, got %d", *capturedReq.MaxTokens)
+	}
+	if len(capturedReq.Messages) != 2 {
+		t.Fatalf("expected system+user messages only, got %+v", capturedReq.Messages)
+	}
+}
+
 func TestPipeline_StreamChat_NewConversationFinishEventIncludesConversationTitle(t *testing.T) {
 	done := make(chan struct{})
 	llm := &fakeLLMService{

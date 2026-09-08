@@ -288,6 +288,14 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	})
 	thinkingVal := deepThinking
 	req.Thinking = &thinkingVal
+	// 对齐 Java streamLLMResponse：MCP 场景稍微放宽温度，纯 KB 场景追求稳定输出。
+	if strings.TrimSpace(mcpCtx) != "" {
+		req.Temperature = floatPtr(0.3)
+		req.TopP = floatPtr(0.8)
+	} else {
+		req.Temperature = floatPtr(0)
+		req.TopP = floatPtr(1)
+	}
 	answerLLM := p.llm
 	if len(chunks) == 0 && strings.TrimSpace(mcpCtx) == "" {
 		answerLLM = p.lightweightLLM()
@@ -923,40 +931,36 @@ func appendConversationMessage(ctx context.Context, memory MemoryService, conver
 	return "", nil
 }
 
+// systemOnlyPrompt 对齐 Java handleSystemOnly + IntentResolver.isSystemOnly：
+// 每个子问题必须严格命中唯一一个 SYSTEM 意图才走系统闲聊短路；
+// customPrompt 取所有命中节点中第一个非空 promptTemplate（不限 SYSTEM kind）。
+// Java 的意图解析总会为每个子问题生成条目；Go 在未配置意图链路时 subIntents 为空，
+// 此时不能判定为系统闲聊，保持走正常检索。
 func (p *Pipeline) systemOnlyPrompt(subIntents []SubQuestionIntent) (string, bool) {
 	if len(subIntents) == 0 {
 		return "", false
 	}
-	hasSystem := false
 	for _, si := range subIntents {
-		if len(si.NodeScores) == 0 {
+		if !isSystemOnlyNodeScores(si.NodeScores) {
 			return "", false
 		}
-		for _, ns := range si.NodeScores {
-			if ns.Node.Kind != IntentKindSystem {
-				return "", false
-			}
-			if hasSystem {
-				continue
-			}
-			if prompt := strings.TrimSpace(ns.Node.PromptTemplate); prompt != "" {
-				hasSystem = true
-			}
-		}
 	}
-	if !hasSystem {
-		return "", true
-	}
-	return firstSystemPromptTemplate(subIntents), true
+	return firstIntentPromptTemplate(subIntents), true
 }
 
-func firstSystemPromptTemplate(subIntents []SubQuestionIntent) string {
+// isSystemOnlyNodeScores 对齐 Java IntentResolver.isSystemOnly：
+// 严格单个节点且该节点为 SYSTEM，空列表或多个节点都不算。
+func isSystemOnlyNodeScores(scores []NodeScore) bool {
+	return len(scores) == 1 && scores[0].Node.Kind == IntentKindSystem
+}
+
+// firstIntentPromptTemplate 对齐 Java handleSystemOnly 的 flatMap：
+// 遍历所有命中节点的 promptTemplate，取第一个非空者，不限定意图类型。
+func firstIntentPromptTemplate(subIntents []SubQuestionIntent) string {
 	for _, si := range subIntents {
 		for _, ns := range si.NodeScores {
-			if ns.Node.Kind == IntentKindSystem {
-				if prompt := strings.TrimSpace(ns.Node.PromptTemplate); prompt != "" {
-					return prompt
-				}
+			if prompt := strings.TrimSpace(ns.Node.PromptTemplate); prompt != "" {
+				return prompt
 			}
 		}
 	}
@@ -1012,40 +1016,42 @@ func (p *Pipeline) streamSystemOnlyResponse(ctx, persistenceCtx context.Context,
 	llmSpan.finish(traceStatusSuccess, nil)
 }
 
+// buildSystemOnlyRequest 对齐 Java streamSystemResponse：
+// system 消息 = customPrompt（或槽位默认），消息 = system + history + user(问题)，
+// temperature 0.7、thinking false，不设 maxTokens，不注入检索上下文。
 func (p *Pipeline) buildSystemOnlyRequest(question string, history []chat.Message, customPrompt string) chat.Request {
-	req := p.prompt.Build(PromptContext{
-		Question:    question,
-		History:     history,
-		CodeContext: p.buildCodeContext(context.Background(), question),
-	})
-	if strings.TrimSpace(customPrompt) == "" {
-		if falseVal := false; req.Thinking == nil {
-			req.Thinking = &falseVal
-		} else {
-			*req.Thinking = false
-		}
-		return req
+	messages := make([]chat.Message, 0, len(history)+2)
+	messages = append(messages, chat.NewSystemMessage(p.resolveSystemChatPrompt(customPrompt)))
+	messages = append(messages, history...)
+	messages = append(messages, chat.NewUserMessage(question))
+	return chat.Request{
+		Messages:    messages,
+		Temperature: floatPtr(0.7),
+		Thinking:    boolPtr(false),
 	}
+}
 
-	messages := make([]chat.Message, 0, len(req.Messages)+1)
-	messages = append(messages, chat.NewSystemMessage(customPrompt))
-	if len(req.Messages) > 0 {
-		if req.Messages[0].Role == chat.RoleSystem {
-			messages = append(messages, req.Messages[1:]...)
-		} else {
-			messages = append(messages, req.Messages...)
+// resolveSystemChatPrompt systemOnly 场景的 system 提示词：
+// 有意图模板用模板，否则解析 SYSTEM_CHAT 槽位，槽位为空时回退默认系统提示词文件。
+func (p *Pipeline) resolveSystemChatPrompt(customPrompt string) string {
+	if prompt := strings.TrimSpace(customPrompt); prompt != "" {
+		return prompt
+	}
+	if p.prompt != nil {
+		if builder, ok := p.prompt.(*DefaultPromptBuilder); ok && builder.resolver != nil {
+			for _, slotKey := range []string{"SYSTEM_CHAT"} {
+				if prompt := strings.TrimSpace(builder.resolver.Resolve(slotKey)); prompt != "" {
+					return prompt
+				}
+			}
+		}
+		if builder, ok := p.prompt.(*DefaultPromptBuilder); ok && builder.loader != nil {
+			if sysPrompt, err := builder.loader.Render(builder.systemFile, nil); err == nil {
+				return strings.TrimSpace(sysPrompt)
+			}
 		}
 	}
-	if len(messages) == 0 {
-		messages = append(messages, chat.NewSystemMessage(customPrompt))
-	}
-	req.Messages = messages
-	if falseVal := false; req.Thinking == nil {
-		req.Thinking = &falseVal
-	} else {
-		*req.Thinking = false
-	}
-	return req
+	return "你是一个有帮助的AI助手。"
 }
 
 func runeLimit(s string, n int) string {

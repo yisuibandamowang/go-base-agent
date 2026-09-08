@@ -92,8 +92,10 @@ func (b *DefaultPromptBuilder) Build(ctx PromptContext) chat.Request {
 	messages = append(messages, ctx.History...)
 
 	messages = append(messages, chat.NewUserMessage(buildPromptUserContent(ctx)))
-	maxTokens := 1024
-	return chat.Request{Messages: messages, MaxTokens: &maxTokens}
+
+	// 对齐 Java streamLLMResponse/streamSystemResponse：回答请求不设 maxTokens，
+	// 交由提供商默认值控制，避免长回答被截断。
+	return chat.Request{Messages: messages}
 }
 
 func (b *DefaultPromptBuilder) resolveSystemPrompt(ctx PromptContext) string {
