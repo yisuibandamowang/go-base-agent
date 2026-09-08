@@ -16,6 +16,8 @@ type fakeMilvusClient struct {
 	upserted      int
 	deleted       int
 	searchResults []milvusclient.ResultSet
+	// searchOptions 非 nil 时记录每次 Search 的 option，供断言检索参数
+	searchOptions []milvusclient.SearchOption
 }
 
 func (c *fakeMilvusClient) HasCollection(context.Context, milvusclient.HasCollectionOption, ...grpc.CallOption) (bool, error) {
@@ -52,7 +54,10 @@ func (c *fakeMilvusClient) Delete(context.Context, milvusclient.DeleteOption, ..
 	return milvusclient.DeleteResult{}, nil
 }
 
-func (c *fakeMilvusClient) Search(context.Context, milvusclient.SearchOption, ...grpc.CallOption) ([]milvusclient.ResultSet, error) {
+func (c *fakeMilvusClient) Search(_ context.Context, opt milvusclient.SearchOption, _ ...grpc.CallOption) ([]milvusclient.ResultSet, error) {
+	if c.searchOptions != nil {
+		c.searchOptions = append(c.searchOptions, opt)
+	}
 	return c.searchResults, nil
 }
 
@@ -128,5 +133,32 @@ func TestMilvusVectorStore_SearchMapsMetadata(t *testing.T) {
 	}
 	if chunks[0].ChunkID != "chunk-1" || chunks[0].DocID != "doc-1" || chunks[0].Content == "" || chunks[0].Metadata["doc_name"] != "会员Agent说明.md" {
 		t.Fatalf("unexpected chunk: %+v", chunks[0])
+	}
+}
+
+func TestMilvusVectorStore_SearchCarriesMetricTypeAndEFParams(t *testing.T) {
+	// 对齐 Java MilvusVectorRetrieverService.searchShared：metric_type 与 ef=128 必须下发
+	client := &fakeMilvusClient{hasCollection: true, searchOptions: make([]milvusclient.SearchOption, 0, 1)}
+	store := NewMilvusVectorStore(client, 3, "COSINE")
+
+	if _, err := store.Search(context.Background(), "member_agent", []float32{0.1, 0.2, 0.3}, 1); err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(client.searchOptions) != 1 {
+		t.Fatalf("expected one search call, got %d", len(client.searchOptions))
+	}
+	req, err := client.searchOptions[0].Request()
+	if err != nil {
+		t.Fatalf("build search request: %v", err)
+	}
+	params := make(map[string]string, len(req.GetSearchParams()))
+	for _, kv := range req.GetSearchParams() {
+		params[kv.GetKey()] = kv.GetValue()
+	}
+	if params["metric_type"] != "COSINE" {
+		t.Fatalf("expected metric_type=COSINE, got %v", params)
+	}
+	if params["ef"] != "128" {
+		t.Fatalf("expected ef=128, got %v", params)
 	}
 }

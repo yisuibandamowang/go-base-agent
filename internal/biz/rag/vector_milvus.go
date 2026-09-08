@@ -133,7 +133,13 @@ func (s *MilvusVectorStore) Search(ctx context.Context, collectionName string, v
 		collectionName,
 		topK,
 		[]entity.Vector{entity.FloatVector(vec)},
-	).WithANNSField(milvusFieldEmbedding).WithOutputFields(milvusFieldContent, milvusFieldMetadata, milvusFieldDocID))
+	).
+		WithANNSField(milvusFieldEmbedding).
+		// 对齐 Java MilvusVectorRetrieverService.searchShared：metric_type 与 ef 是
+		// HNSW 检索调优参数，ef 不传走索引默认值，语义与标量过滤的 collection 侧解耦。
+		WithSearchParam("metric_type", string(s.metric)).
+		WithSearchParam("ef", "128").
+		WithOutputFields(milvusFieldContent, milvusFieldMetadata, milvusFieldDocID))
 	if err != nil {
 		return nil, fmt.Errorf("milvus vector search: %w", err)
 	}
