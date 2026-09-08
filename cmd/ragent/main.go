@@ -1078,7 +1078,12 @@ func buildEmbeddingClients(aiCfg config.AIConfig) []embedding.Client {
 	for name, provider := range aiCfg.Providers {
 		switch provider.Protocol {
 		case "openai-compatible":
-			clients = append(clients, embedding.NewOpenAICompatibleEmbeddingClient(name, nil))
+			client := embedding.NewOpenAICompatibleEmbeddingClient(name, nil)
+			// Ollama 本地服务无鉴权，对齐 Java OllamaEmbeddingClient.requiresApiKey=false。
+			if name == "ollama" {
+				client.RequiresAPIKey = false
+			}
+			clients = append(clients, client)
 		case "noop":
 		default:
 		}

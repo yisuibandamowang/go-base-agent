@@ -1389,12 +1389,22 @@ func (s *DocumentService) runChunkProcess(ctx context.Context, doc *model.Knowle
 	}
 	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
 	lineRanges := lineRangesForChunks(text, chunks)
+	// 批量向量化：一次 RPC 携带全部分块，客户端层按提供商批量上限自动分片。
+	embedTexts := make([]string, len(chunks))
 	for i, c := range chunks {
-		vec, embErr := s.emb.EmbedWithModel(ctx, c.Content, kb.EmbeddingModel)
-		if embErr != nil {
-			slog.Warn("chunk task: embed failed", "chunkId", c.ID, "err", embErr)
-			continue
-		}
+		embedTexts[i] = c.Content
+	}
+	embeddings, embedErr := s.emb.EmbedBatchWithModel(ctx, embedTexts, kb.EmbeddingModel)
+	if embedErr != nil {
+		return extractDuration, chunkDuration, 0, nil, fmt.Errorf("分块批量向量化失败: %w", embedErr)
+	}
+	// 对齐 Java ChunkEmbeddingService：向量条数必须与分块数一致，不匹配直接失败，
+	// 避免无向量的分块静默写进向量库。
+	if len(embeddings) != len(chunks) {
+		return extractDuration, chunkDuration, 0, nil, fmt.Errorf("分块批量向量化结果数量不匹配: 期望 %d, 实际 %d", len(chunks), len(embeddings))
+	}
+	for i, c := range chunks {
+		vec := embeddings[i]
 		lineRange := lineRanges[i]
 		vecChunks = append(vecChunks, rag.VectorChunk{
 			ChunkID:           c.ID,
@@ -2678,12 +2688,21 @@ func (s *DocumentService) rebuildDocumentChunksFromText(ctx context.Context, doc
 		return nil, fmt.Errorf("知识库不存在: %w", err)
 	}
 	vecChunks := make([]rag.VectorChunk, 0, len(chunks))
-	for _, chunk := range chunks {
+	// 批量向量化：一次 RPC 携带全部重建分块，客户端层按提供商批量上限自动分片。
+	embedTexts := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		embedTexts[i] = chunk.Content
+	}
+	embeddings, embedErr := s.emb.EmbedBatchWithModel(ctx, embedTexts, kb.EmbeddingModel)
+	if embedErr != nil {
+		return nil, fmt.Errorf("重建分块批量向量化失败: %w", embedErr)
+	}
+	if len(embeddings) != len(chunks) {
+		return nil, fmt.Errorf("重建分块向量化结果数量不匹配: 期望 %d, 实际 %d", len(chunks), len(embeddings))
+	}
+	for i, chunk := range chunks {
 		chunk.UpdatedBy = userID
-		vec, err := s.emb.EmbedWithModel(ctx, chunk.Content, kb.EmbeddingModel)
-		if err != nil {
-			return nil, fmt.Errorf("embed rebuilt chunk %d: %w", chunk.ChunkIndex, err)
-		}
+		vec := embeddings[i]
 		vecChunks = append(vecChunks, rag.VectorChunk{
 			DocID:             doc.ID,
 			Content:           chunk.Content,

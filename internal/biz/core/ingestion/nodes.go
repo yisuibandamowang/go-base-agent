@@ -644,8 +644,10 @@ func (n *IndexerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 	if err != nil {
 		return rag.NodeResult{Success: false, ErrorMessage: fmt.Sprintf("向量化失败: %v", err)}
 	}
-	if len(embeddings) == 0 {
-		return rag.NodeResult{Success: false, ErrorMessage: "向量结果缺失"}
+	// 对齐 Java ChunkEmbeddingService：向量条数必须与分块数一致，不匹配直接失败，
+	// 避免无向量的分块静默写进向量库。
+	if len(embeddings) != len(texts) {
+		return rag.NodeResult{Success: false, ErrorMessage: fmt.Sprintf("向量结果数量不匹配: 期望 %d, 实际 %d", len(texts), len(embeddings))}
 	}
 
 	embeddedChunks := make([]rag.VectorChunk, 0, len(texts))

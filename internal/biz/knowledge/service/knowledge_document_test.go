@@ -70,8 +70,12 @@ func (f fakeEmbeddingService) EmbedBatch(context.Context, []string) ([][]float32
 	return nil, nil
 }
 
-func (f fakeEmbeddingService) EmbedBatchWithModel(context.Context, []string, string) ([][]float32, error) {
-	return nil, nil
+func (f fakeEmbeddingService) EmbedBatchWithModel(_ context.Context, texts []string, _ string) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for i := range texts {
+		vectors[i] = []float32{0.1, 0.2}
+	}
+	return vectors, nil
 }
 
 func (f fakeEmbeddingService) Dimension() int {

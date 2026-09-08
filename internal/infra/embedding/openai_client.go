@@ -18,6 +18,10 @@ type OpenAICompatibleEmbeddingClient struct {
 	provider       string
 	client         *http.Client
 	RequiresAPIKey bool
+	// MaxBatchSize 单次请求最大批量大小，0 表示不限制。
+	// 百炼 compatible-mode 上限 10、SiliconFlow/AIHubMix 上限 32：
+	// 超限不是慢而是整批 400，摄取长文档必然踩到。
+	MaxBatchSize int
 }
 
 // NewOpenAICompatibleEmbeddingClient creates a new embedding client.
@@ -29,6 +33,19 @@ func NewOpenAICompatibleEmbeddingClient(provider string, httpClient *http.Client
 		provider:       provider,
 		client:         httpClient,
 		RequiresAPIKey: true,
+		MaxBatchSize:   defaultEmbeddingMaxBatchSize(provider),
+	}
+}
+
+// defaultEmbeddingMaxBatchSize 对齐 Java 各客户端覆写的批量上限。
+func defaultEmbeddingMaxBatchSize(provider string) int {
+	switch provider {
+	case "bailian":
+		return 10
+	case "siliconflow", "aihubmix":
+		return 32
+	default:
+		return 0
 	}
 }
 
@@ -47,8 +64,28 @@ func (c *OpenAICompatibleEmbeddingClient) Embed(ctx context.Context, text string
 	return results[0], nil
 }
 
+// EmbedBatch 批量向量化；超过单次请求批量上限时自动分片，按原顺序回填结果。
 func (c *OpenAICompatibleEmbeddingClient) EmbedBatch(ctx context.Context, texts []string, target model.Target) ([][]float32, error) {
-	return c.doEmbed(ctx, texts, target)
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	batch := c.MaxBatchSize
+	if batch <= 0 || len(texts) <= batch {
+		return c.doEmbed(ctx, texts, target)
+	}
+	results := make([][]float32, len(texts))
+	for i := 0; i < len(texts); i += batch {
+		end := i + batch
+		if end > len(texts) {
+			end = len(texts)
+		}
+		part, err := c.doEmbed(ctx, texts[i:end], target)
+		if err != nil {
+			return nil, err
+		}
+		copy(results[i:end], part)
+	}
+	return results, nil
 }
 
 func (c *OpenAICompatibleEmbeddingClient) doEmbed(ctx context.Context, texts []string, target model.Target) ([][]float32, error) {
@@ -61,8 +98,13 @@ func (c *OpenAICompatibleEmbeddingClient) doEmbed(ctx context.Context, texts []s
 		"model": target.Candidate.Model,
 		"input": texts,
 	}
-	if c.provider == "ollama" && target.Candidate.Dimension > 0 {
+	// dimensions 对所有 OpenAI 兼容提供商发送：Matryoshka 系模型（如 text-embedding-v4）
+	// 依赖该参数指定输出维度，缺省会输出默认维度，与向量库物理空间不符。
+	if target.Candidate.Dimension > 0 {
 		body["dimensions"] = target.Candidate.Dimension
+	}
+	if c.provider != "ollama" {
+		body["encoding_format"] = "float"
 	}
 
 	jsonBody, err := json.Marshal(body)
