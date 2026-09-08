@@ -143,6 +143,57 @@ func TestXLSXParserProducesTableBlock(t *testing.T) {
 	}
 }
 
+func TestXLSXParserAppliesStylesForDatesAndStrikethrough(t *testing.T) {
+	// xf0=普通数字；xf1=内置日期(14)；xf2=自定义日期 + 删除线字体(font1)；xf3=百分比
+	data := zipBytes(t, map[string]string{
+		"xl/styles.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1">
+    <numFmt numFmtId="176" formatCode="yyyy&quot;年&quot;m&quot;月&quot;d&quot;日&quot;"/>
+  </numFmts>
+  <fonts count="2">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><strike/><sz val="11"/><name val="Calibri"/></font>
+  </fonts>
+  <cellXfs count="4">
+    <xf numFmtId="0" fontId="0"/>
+    <xf numFmtId="14" fontId="0" applyNumberFormat="1"/>
+    <xf numFmtId="176" fontId="1" applyNumberFormat="1"/>
+    <xf numFmtId="10" fontId="0" applyNumberFormat="1"/>
+  </cellXfs>
+</styleSheet>`,
+		"xl/worksheets/sheet1.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c></row>
+    <row r="2"><c r="A2" t="n" s="1"><v>45301</v></c><c r="B2" t="n" s="2"><v>45301</v></c><c r="C2" t="n" s="3"><v>0.153</v></c><c r="D2" t="s" s="2"><v>4</v></c></row>
+  </sheetData>
+</worksheet>`,
+		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <si><t>内置日期</t></si><si><t>自定义日期带删除线</t></si><si><t>百分比</t></si><si><t>字符串删除线</t></si><si><t>下架商品</t></si>
+</sst>`,
+	})
+
+	parsed, err := (&XLSXParser{}).Parse(context.Background(), data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil)
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	rows := parsed.Blocks[0].Rows
+	if got := rows[0][0]; got != "1/10/24" {
+		t.Fatalf("expected builtin date rendering for serial 45301 (m/d/yy), got %q", got)
+	}
+	if got := rows[0][1]; got != "~~2024年1月10日~~" {
+		t.Fatalf("expected ~~yyyy年m月d日~~ rendering, got %q", got)
+	}
+	if got := rows[0][2]; got != "15.30%" {
+		t.Fatalf("expected percent rendering, got %q", got)
+	}
+	if got := rows[0][3]; got != "~~下架商品~~" {
+		t.Fatalf("expected strikethrough-wrapped shared string, got %q", got)
+	}
+}
+
 func TestXLSXParserCarriesSourceFileAndSheetProvenance(t *testing.T) {
 	data := zipBytes(t, map[string]string{
 		"xl/sharedStrings.xml": `<?xml version="1.0" encoding="UTF-8"?>
@@ -463,6 +514,57 @@ func TestMarkdownParserProducesStructuredBlocks(t *testing.T) {
 	}
 }
 
+func TestMarkdownParserPromotesStandaloneImageToImageBlock(t *testing.T) {
+	// 独占一行的图片按图片块产出，而不是压成一段只剩 alt 文本的文字（对齐 Java asStandaloneImage）
+	md := "# 标题\n\n![架构图](images/arch.png)\n\n正文段落。\n\n![内嵌](x.png) 与文字同行"
+	parsed, err := (&MarkdownParser{}).Parse(context.Background(), []byte(md), "text/markdown", nil)
+	if err != nil {
+		t.Fatalf("parse markdown: %v", err)
+	}
+	var imageBlocks, paragraphs int
+	for _, block := range parsed.Blocks {
+		if block.Type == rag.BlockImage {
+			imageBlocks++
+			if block.Caption != "架构图" || block.Asset.PublicURL != "images/arch.png" {
+				t.Fatalf("unexpected image block: %+v", block)
+			}
+		}
+		if block.Type == rag.BlockParagraph {
+			paragraphs++
+		}
+	}
+	if imageBlocks != 1 {
+		t.Fatalf("expected exactly one standalone image block, got %d: %+v", imageBlocks, parsed.Blocks)
+	}
+	if paragraphs != 2 {
+		t.Fatalf("expected two paragraphs (body + inline image line), got %d", paragraphs)
+	}
+}
+
+func TestMarkdownParserExtractsHtmlTableAsDedicatedBlock(t *testing.T) {
+	// MinerU 的表格以原始 HTML 嵌在 markdown 里：单拎出来按 HTML 表格块产出（对齐 Java UnpackVisitor）
+	md := "说明文字\n\n<table><tr><td>会员</td></tr><tr><td>积分</td></tr></table>\n\n后续段落"
+	parsed, err := (&MarkdownParser{}).Parse(context.Background(), []byte(md), "text/markdown", nil)
+	if err != nil {
+		t.Fatalf("parse markdown: %v", err)
+	}
+	var htmlTable bool
+	for _, block := range parsed.Blocks {
+		if block.Type == rag.BlockHtmlTable {
+			htmlTable = true
+			if !strings.Contains(block.Content, "<table>") || !strings.Contains(block.Content, "<td>会员</td>") {
+				t.Fatalf("unexpected html table content: %q", block.Content)
+			}
+		}
+	}
+	if !htmlTable {
+		t.Fatalf("expected html_table block, got %+v", parsed.Blocks)
+	}
+	if rendered := rag.RenderBlocks(parsed.Blocks); !strings.Contains(rendered, "<td>积分</td>") {
+		t.Fatalf("expected html table rendered intact, got %q", rendered)
+	}
+}
+
 func TestMarkdownParserClaimsPlainTextForStructuredParse(t *testing.T) {
 	// 对齐 Java MarkdownDocumentParser：text/plain 刻意交给 Markdown 解析器，
 	// txt 里的缩进段落与列表至少能拿到结构
@@ -648,7 +750,7 @@ func TestMinerUResultUnpackerRewritesImageLinks(t *testing.T) {
 		"images/fig1.png": "png-bytes",
 	})
 	uploader := &fakeUploader{url: "https://assets.example.com/fig1.png"}
-	unpacker := NewMinerUResultUnpacker(uploader)
+	unpacker := NewMinerUResultUnpacker(uploader, nil, MinerUUnpackerOptions{})
 
 	parsed, err := unpacker.Unpack(context.Background(), data, "会员能力说明.md", "doc-1")
 	if err != nil {
@@ -670,7 +772,7 @@ func TestMinerUResultUnpackerResolvesImagePathVariants(t *testing.T) {
 		"images/fig1.png": "png-bytes",
 	})
 	uploader := &fakeUploader{url: "https://assets.example.com/fig1.png"}
-	unpacker := NewMinerUResultUnpacker(uploader)
+	unpacker := NewMinerUResultUnpacker(uploader, nil, MinerUUnpackerOptions{})
 
 	parsed, err := unpacker.Unpack(context.Background(), data, "说明.md", "doc-1")
 	if err != nil {
@@ -694,6 +796,46 @@ func TestMinerUResultUnpackerResolvesImagePathVariants(t *testing.T) {
 	}
 	if uploader.calls != 2 {
 		t.Fatalf("expected 2 uploads, got %d", uploader.calls)
+	}
+}
+
+func TestMinerUResultUnpackerDescribesEmbeddedImages(t *testing.T) {
+	// 内嵌图逐张调 VLM 图生文，描述回填到对应 ImageBlock（对齐 Java describeImages + UnpackVisitor）
+	data := zipBytes(t, map[string]string{
+		"result.md":       "![图 1](images/fig1.png)",
+		"images/fig1.png": "png-bytes",
+	})
+	uploader := &fakeUploader{url: "https://assets.example.com/fig1.png"}
+	vlmService := &fakeVLMService{desc: "一张会员体系架构图，包含等级与积分"}
+	unpacker := NewMinerUResultUnpacker(uploader, vlmService, MinerUUnpackerOptions{EmbeddedDescribeEnabled: true})
+
+	parsed, err := unpacker.Unpack(context.Background(), data, "说明.md", "doc-1")
+	if err != nil {
+		t.Fatalf("unpack mineru zip: %v", err)
+	}
+	if vlmService.calls != 1 {
+		t.Fatalf("expected one vlm describe call, got %d", vlmService.calls)
+	}
+	var described int
+	for _, block := range parsed.Blocks {
+		if block.Type == rag.BlockImage && block.Description == vlmService.desc {
+			described++
+		}
+	}
+	if described != 1 {
+		t.Fatalf("expected image block with vlm description, got %+v", parsed.Blocks)
+	}
+	if parsed.Metadata["imagesDescribed"] != "1" {
+		t.Fatalf("expected imagesDescribed=1, got %+v", parsed.Metadata)
+	}
+
+	// 显式关闭内嵌描述时不调 VLM
+	unpacker = NewMinerUResultUnpacker(uploader, vlmService, MinerUUnpackerOptions{EmbeddedDescribeEnabled: false})
+	if _, err := unpacker.Unpack(context.Background(), data, "说明.md", "doc-2"); err != nil {
+		t.Fatalf("unpack with describe disabled: %v", err)
+	}
+	if vlmService.calls != 1 {
+		t.Fatalf("expected no additional vlm calls, got %d", vlmService.calls)
 	}
 }
 

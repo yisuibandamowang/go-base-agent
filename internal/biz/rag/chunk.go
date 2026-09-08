@@ -2,6 +2,7 @@ package rag
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -212,6 +213,11 @@ func (s *StructureAwareChunker) ChunkBlocks(blocks []Block, opts ChunkingOptions
 			chunks = append(chunks, chunkTableBlock(block, opts, len(chunks), outlinePath, blockSourceID(block, blockIndex))...)
 			continue
 		}
+		if block.Type == BlockHtmlTable {
+			flush()
+			chunks = append(chunks, chunkHtmlTableBlock(block, opts, len(chunks), outlinePath, blockSourceID(block, blockIndex))...)
+			continue
+		}
 		if block.Type == BlockList {
 			flush()
 			chunks = append(chunks, chunkListBlock(block, opts, len(chunks), outlinePath, blockSourceID(block, blockIndex))...)
@@ -321,6 +327,109 @@ func chunkTableBlock(block Block, opts ChunkingOptions, startIndex int, outlineP
 	}
 	flushGroup()
 	return result
+}
+
+// htmlTableRowPattern HTML 表格行边界（对齐 Java HtmlTableChunker.ROW）。
+var htmlTableRowPattern = regexp.MustCompile(`(?is)<tr\b[^>]*>.*?</tr>`)
+
+// htmlTableNoopSpanPattern 无意义的 colspan/rowspan=1 属性，切分前剥除避免干扰行预算。
+var htmlTableNoopSpanPattern = regexp.MustCompile(`(?i)\s+(?:colspan|rowspan)\s*=\s*["']?1["']?`)
+
+const htmlTableClose = "</table>"
+
+// chunkHtmlTableBlock 按 tr 边界切分 HTML 表格，每块重复表头行并包回完整 table
+//（对齐 Java HtmlTableChunker）：不转成管道表，合并单元格与单元格内的换行在展开成二维表时会失真。
+func chunkHtmlTableBlock(block Block, opts ChunkingOptions, startIndex int, outlinePath []string, sourceBlockID string) []VectorChunk {
+	html := strings.TrimSpace(block.Content)
+	if html == "" {
+		return nil
+	}
+	budget := opts.ChunkSize
+	if budget <= 0 {
+		budget = DefaultChunkingOptions().ChunkSize
+	}
+	tolerance := opts.ToleranceSize
+	if tolerance < budget {
+		tolerance = budget
+	}
+	maxRows := opts.RowsPerChunk
+	if maxRows <= 0 {
+		maxRows = DefaultChunkingOptions().RowsPerChunk
+	}
+
+	html = htmlTableNoopSpanPattern.ReplaceAllString(html, "")
+	rows := splitHtmlTableRows(html)
+	// 只有表头或压根扫不出行：没有可切的边界，原样落块，宁可超预算也不切在标签中间
+	if len(rows) < 2 {
+		return []VectorChunk{buildHtmlTableChunk(html, startIndex, outlinePath, sourceBlockID, block)}
+	}
+	open := htmlTableOpenTag(html)
+	header := rows[0]
+	// 整张表撑得住容忍上限就不切，切开后每块虽重带表头，跨块的行间对比仍然做不了
+	if len(rows)-1 <= maxRows && len([]rune(html)) <= tolerance {
+		budget = tolerance
+	}
+	// 外壳与表头每块都要重复，先从预算里扣掉，否则渲染出来必然超
+	overhead := len([]rune(open)) + len(htmlTableClose) + len([]rune(header))
+
+	result := make([]VectorChunk, 0, len(rows)/maxRows+1)
+	var group []string
+	groupLen := 0
+	flushGroup := func() {
+		if len(group) == 0 {
+			return
+		}
+		rendered := open + header + strings.Join(group, "") + htmlTableClose
+		result = append(result, buildHtmlTableChunk(rendered, startIndex+len(result), outlinePath, sourceBlockID, block))
+		group = nil
+		groupLen = 0
+	}
+	for _, row := range rows[1:] {
+		rowLen := len([]rune(row))
+		overCap := len(group) >= maxRows
+		overBudget := len(group) > 0 && overhead+groupLen+rowLen > budget
+		if overCap || overBudget {
+			flushGroup()
+		}
+		group = append(group, row)
+		groupLen += rowLen
+	}
+	flushGroup()
+	return result
+}
+
+func splitHtmlTableRows(html string) []string {
+	matches := htmlTableRowPattern.FindAllString(html, -1)
+	if matches == nil {
+		return nil
+	}
+	return matches
+}
+
+func htmlTableOpenTag(html string) string {
+	idx := strings.Index(strings.ToLower(html), "<table")
+	if idx < 0 {
+		return "<table>"
+	}
+	end := strings.Index(html[idx:], ">")
+	if end < 0 {
+		return "<table>"
+	}
+	return html[idx : idx+end+1]
+}
+
+func buildHtmlTableChunk(content string, index int, outlinePath []string, sourceBlockID string, block Block) VectorChunk {
+	return VectorChunk{
+		ChunkID:        fmt.Sprintf("chunk-%d", index),
+		Content:        content,
+		EmbeddingText:  content,
+		Index:          index,
+		BlockType:      string(BlockHtmlTable),
+		OutlinePath:    copyStrings(outlinePath),
+		SourceBlockIDs: []string{sourceBlockID},
+		Provenance:     block.Provenance,
+		Metadata:       chunkMetadataWithSourceIDs(string(BlockHtmlTable), outlinePath, "", []string{sourceBlockID}, block.Provenance),
+	}
 }
 
 func chunkListBlock(block Block, opts ChunkingOptions, startIndex int, outlinePath []string, sourceBlockID string) []VectorChunk {

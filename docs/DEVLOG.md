@@ -836,3 +836,11 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 - ChunkerNode 分块参数对齐 Java `ChunkerNode.toBudget` + `ChunkBudget`：显式 chunkSize 时容忍预算按块大小 ×3 并封顶 8192（新增 `rag.ToleranceCharsFor`/`MaxToleranceChars`/`DefaultToleranceFactor`）；重叠缺省按块大小 1/8 等比给；`overlap >= maxChars` 钳到 `maxChars-1` 保证切分推进；chunkSize 超 8192 直接拒绝。
 - `packMergeableChunks` 合并上限从容忍预算改为块大小 maxChars（对齐 Java `ChunkPacker.pack` 的「minChars 管下限、maxChars 管合并」职责分离），避免容忍预算放大后把用户显式按 `listItemsPerChunk` 拆小的列表块重新粘回整块。
 - 手动入库 legacy `chunkConfig` 路径同步对齐：容忍预算 ×3 封顶、重叠缺省等比、`overlap >= chunkSize` 钳制；ingestionSpec 主路径原有区间校验保持不变。
+
+# 2026-09-08 — 二轮对齐：Excel 样式渲染、VLM 图生文、ImageBlock 与 HtmlTableBlock
+
+- XLSX 解析器接入 `xl/styles.xml` 样式层（对齐 Java `ExcelValueFormatter` + `ExcelTableNormalizer`）：数字 cell 按数字格式码渲染——Excel 日期序列值转日期文本（内置格式 14-22/45-47 与自定义格式码，格式码翻译器支持 y/m/d/h/s 连串 token、AM/PM、引号字面量与中文年月日格式）、百分比、千分位、固定位小数；字体带删除线的非空 cell 用 GFM 删除线 `~~值~~` 包裹原值（软删除约定：保留文本并显式标注）。公式 cell 仍按缓存值优先，无求值引擎（与 Java 的 evaluator 求值差异记录在案，降级路径一致）。旧版 XLS 二进制格式（BIFF 的 FORMAT/FONT/XF record）未接入样式层，保留现状。
+- `rag` 块模型新增 `html_table` 块类型（对齐 Java `HtmlTableBlock`）：MinerU 的表格以原始 HTML 嵌在 markdown 里，单拎出来按 HTML 表格块产出，不转成管道表——合并单元格与单元格内的换行在展开成二维表时会失真，展示与检索都用同一份 HTML。
+- Markdown 解析器新增两条块提取规则（对齐 Java `MarkdownDocumentParser` / `UnpackVisitor`）：独占一行的图片提升为 `ImageBlock`（原样地址 + 按扩展名猜 MIME，行内图片留在段落文本）；行首 `<table` 的 HTML 块聚合为 `html_table` 块，其余 HTML 仍走段落保底不丢内容。
+- HTML 表格分块新增专属切分器（对齐 Java `HtmlTableChunker`）：按 `<tr>` 边界切分、剥除无意义的 `colspan/rowspan=1` 属性、每块重复外壳与表头并包回完整 `</table>`、行数与预算双上限（预算先扣外壳+表头开销）、整表行数与长度都在容忍内则不切。
+- MinerU 结果解包器接入 VLM 内嵌图图生文（对齐 Java `describeImages` + `imageParseProperties`）：逐张调 VLM 生成描述、单张失败只记日志不中断整篇入库；描述经「资产桶 URL → zip 内路径」映射回填到对应 `ImageBlock.Description`；新增 `rag.image-parse.embedded-describe-enabled` 开关（默认开启，对齐 Java 默认值），`description-prompt`/`max-output-tokens` 复用既有配置；解析 metadata 新增 `imagesDescribed` 计数。

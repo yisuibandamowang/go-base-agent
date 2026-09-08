@@ -241,6 +241,16 @@ type RAGParserConfig struct {
 type RAGImageParseConfig struct {
 	DescriptionPrompt string `mapstructure:"description-prompt"`
 	MaxOutputTokens   int    `mapstructure:"max-output-tokens"`
+	// EmbeddedDescribeEnabled 内嵌图（MinerU zip 里的插图）是否调 VLM 图生文，默认开启（对齐 Java embeddedDescribeEnabled）
+	EmbeddedDescribeEnabled *bool `mapstructure:"embedded-describe-enabled"`
+}
+
+// EffectiveEmbeddedDescribe 返回内嵌图生文开关的有效值：未配置时默认开启，显式 false 才关闭。
+func (c RAGImageParseConfig) EffectiveEmbeddedDescribe() bool {
+	if c.EmbeddedDescribeEnabled == nil {
+		return true
+	}
+	return *c.EmbeddedDescribeEnabled
 }
 
 type RAGSemaphoreConfig struct {

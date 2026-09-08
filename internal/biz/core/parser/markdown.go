@@ -2,10 +2,33 @@ package parser
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"go-base-agent/internal/biz/rag"
 )
+
+// markdownImagePattern markdown 图片语法；独立成段的图片提升为 ImageBlock 而不是压成文字段落。
+var markdownImagePattern = regexp.MustCompile(`^!\[([^\]]*)\]\(([^)]+)\)$`)
+
+// guessImageMimeFromURL 按地址后缀猜图片 MIME：图片地址不经过字节探测，只能按扩展名给一个合理值。
+func guessImageMimeFromURL(url string) string {
+	lower := strings.ToLower(url)
+	switch {
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(lower, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(lower, ".svg"):
+		return "image/svg+xml"
+	default:
+		return "image/png"
+	}
+}
 
 // MarkdownParser 解析 Markdown 文件。
 type MarkdownParser struct{}
@@ -35,9 +58,17 @@ func parseMarkdownBlocks(content string) []rag.Block {
 
 	flushPara := func() {
 		if paraBuf.Len() > 0 {
+			content := strings.TrimSpace(paraBuf.String())
+			// 独占一行的图片按图片块产出，而不是压成一段只剩 alt 文本的文字
+			//（对齐 Java MarkdownDocumentParser.asStandaloneImage）
+			if block, ok := standaloneImageBlock(content); ok {
+				blocks = append(blocks, block)
+				paraBuf.Reset()
+				return
+			}
 			blocks = append(blocks, rag.Block{
 				Type:    rag.BlockParagraph,
-				Content: strings.TrimSpace(paraBuf.String()),
+				Content: content,
 			})
 			paraBuf.Reset()
 		}
@@ -125,6 +156,23 @@ func parseMarkdownBlocks(content string) []rag.Block {
 			continue
 		}
 
+		// MinerU 的表格以原始 HTML 嵌在 markdown 里：单拎出来按 HTML 表格块产出，
+		// 落成段落会被按字符硬切、断面停在标签中间（对齐 Java UnpackVisitor.visit(HtmlBlock)）
+		if strings.HasPrefix(strings.ToLower(trimmed), "<table") {
+			flushPara()
+			flushList()
+			var htmlLines []string
+			for i < len(lines) && strings.TrimSpace(lines[i]) != "" {
+				htmlLines = append(htmlLines, lines[i])
+				i++
+			}
+			blocks = append(blocks, rag.Block{
+				Type:    rag.BlockHtmlTable,
+				Content: strings.Join(htmlLines, "\n"),
+			})
+			continue
+		}
+
 		flushList()
 		if paraBuf.Len() > 0 {
 			paraBuf.WriteString(" ")
@@ -134,6 +182,33 @@ func parseMarkdownBlocks(content string) []rag.Block {
 	flushPara()
 	flushList()
 	return blocks
+}
+
+// standaloneImageBlock 判断段落内容是否只是一张 markdown 图片（允许图片带 title），
+// 是则产出 ImageBlock（地址是作者写的原样地址，不经过资产上传，向量文本由分块阶段回落到链接本身）。
+func standaloneImageBlock(content string) (rag.Block, bool) {
+	if !strings.HasPrefix(content, "![") {
+		return rag.Block{}, false
+	}
+	match := markdownImagePattern.FindStringSubmatch(content)
+	if match == nil {
+		return rag.Block{}, false
+	}
+	altText := strings.TrimSpace(match[1])
+	dest := strings.TrimSpace(match[2])
+	// 带标题语法 ![alt](url "title") 的 dest 含空白，拆出纯地址部分
+	if idx := strings.IndexAny(dest, " \t"); idx >= 0 {
+		dest = strings.TrimSpace(dest[:idx])
+	}
+	if dest == "" {
+		return rag.Block{}, false
+	}
+	return rag.Block{
+		Type:    rag.BlockImage,
+		Caption: altText,
+		AltText: altText,
+		Asset:   rag.AssetRef{PublicURL: dest, Mime: guessImageMimeFromURL(dest)},
+	}, true
 }
 
 func parseMarkdownListItem(line string) (string, bool, bool) {

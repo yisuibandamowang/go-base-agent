@@ -1130,7 +1130,11 @@ func buildDocumentParserRegistryWithPermitRunner(cfg *config.Config, vlmService 
 		if assetUploader != nil {
 			uploader = assetUploader
 		}
-		unpacker := coreparser.NewMinerUResultUnpacker(uploader)
+		unpacker := coreparser.NewMinerUResultUnpacker(uploader, vlmService, coreparser.MinerUUnpackerOptions{
+			EmbeddedDescribeEnabled: cfg.RAG.ImageParse.EffectiveEmbeddedDescribe(),
+			DescriptionPrompt:       cfg.RAG.ImageParse.DescriptionPrompt,
+			MaxOutputTokens:         cfg.RAG.ImageParse.MaxOutputTokens,
+		})
 		opts := coreparser.MinerUOptions{
 			PollInterval:     time.Duration(cfg.MinerU.PollIntervalSecs) * time.Second,
 			Timeout:          time.Duration(cfg.MinerU.TimeoutSecs) * time.Second,

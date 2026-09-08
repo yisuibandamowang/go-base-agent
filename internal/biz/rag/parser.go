@@ -29,6 +29,10 @@ const (
 	BlockImage     BlockType = "image"
 	BlockCode      BlockType = "code"
 	BlockList      BlockType = "list"
+	// BlockHtmlTable 以原始 HTML 嵌在 markdown 里的表格（MinerU 产出形态）。
+	// 不转成管道表：合并单元格与单元格内的换行在展开成二维表时会失真，展示与检索都用同一份 HTML
+	//（对齐 Java HtmlTableBlock）。
+	BlockHtmlTable BlockType = "html_table"
 )
 
 // AssetRef is a reference to an external asset (e.g. extracted image).
@@ -151,6 +155,9 @@ func RenderBlocks(blocks []Block) string {
 			sb.WriteString("](")
 			sb.WriteString(b.Asset.PublicURL)
 			sb.WriteString(")\n\n")
+		case BlockHtmlTable:
+			sb.WriteString(b.Content)
+			sb.WriteString("\n\n")
 		}
 	}
 	return strings.TrimSpace(sb.String())

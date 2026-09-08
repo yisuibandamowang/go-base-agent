@@ -325,3 +325,38 @@ func TestDefaultOverlapFor(t *testing.T) {
 		}
 	}
 }
+
+func TestStructureAwareChunkerSplitsHtmlTableByRows(t *testing.T) {
+	// HTML 表格按 tr 边界切分，每块重复外壳与表头并包回完整 table（对齐 Java HtmlTableChunker）
+	rows := make([]string, 0, 5)
+	rows = append(rows, "<tr><th>能力</th><th>说明</th></tr>")
+	for i := 0; i < 4; i++ {
+		rows = append(rows, "<tr><td>能力"+string(rune('A'+i))+"</td><td>支持查询</td></tr>")
+	}
+	html := "<table>" + strings.Join(rows, "") + "</table>"
+	chunks := (&StructureAwareChunker{}).ChunkBlocks([]Block{{Type: BlockHtmlTable, Content: html}}, ChunkingOptions{
+		ChunkSize: 140, OverlapSize: 8, ToleranceSize: 200, RowsPerChunk: 2,
+	})
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 html table chunks (rowsPerChunk=2, 4 data rows), got %d: %+v", len(chunks), chunks)
+	}
+	for i, chunk := range chunks {
+		if chunk.BlockType != string(BlockHtmlTable) {
+			t.Fatalf("chunk %d: unexpected block type %s", i, chunk.BlockType)
+		}
+		if !strings.HasPrefix(chunk.Content, "<table><tr><th>能力</th>") {
+			t.Fatalf("chunk %d: expected repeated header after table open, got %q", i, chunk.Content)
+		}
+		if !strings.HasSuffix(chunk.Content, "</table>") {
+			t.Fatalf("chunk %d: expected closed table, got %q", i, chunk.Content)
+		}
+	}
+
+	// 撑得住容忍上限且行数不超上限就不切：整块输出
+	chunks = (&StructureAwareChunker{}).ChunkBlocks([]Block{{Type: BlockHtmlTable, Content: html}}, ChunkingOptions{
+		ChunkSize: 60, OverlapSize: 8, ToleranceSize: 8192, RowsPerChunk: 10,
+	})
+	if len(chunks) != 1 || chunks[0].Content != html {
+		t.Fatalf("expected whole html table kept intact within tolerance, got %d chunks", len(chunks))
+	}
+}
