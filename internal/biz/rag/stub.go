@@ -13,4 +13,4 @@ func (s *StubService) StreamChat(ctx context.Context, question, conversationID, 
 	sender.Close()
 }
 
-func (s *StubService) StopTask(taskID string) {}
+func (s *StubService) StopTask(taskID, requester string) error { return nil }

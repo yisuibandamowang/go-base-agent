@@ -19,7 +19,7 @@ import (
 // Service defines the RAG chat service interface.
 type Service interface {
 	StreamChat(ctx context.Context, question, conversationID, taskID string, deepThinking bool, sender *SSESender)
-	StopTask(taskID string)
+	StopTask(taskID, requester string) error
 }
 
 // Controller handles RAG chat HTTP endpoints.
@@ -89,6 +89,7 @@ func (ctl *Controller) Chat(c *gin.Context) {
 }
 
 // Stop handles POST /rag/v3/stop — cancel a running task.
+// taskId 是时间有序可预测的雪花 ID，不是访问凭证：必须比对 Redis 属主后才能取消。
 func (ctl *Controller) Stop(c *gin.Context) {
 	taskID := c.Query("taskId")
 	if taskID == "" {
@@ -100,7 +101,14 @@ func (ctl *Controller) Stop(c *gin.Context) {
 		return
 	}
 	defer ctl.releaseSubmitLock(stopLockKey)
-	ctl.svc.StopTask(taskID)
+	requester := ""
+	if user := appctx.User(c.Request.Context()); user != nil {
+		requester = strings.TrimSpace(user.UserID)
+	}
+	if err := ctl.svc.StopTask(taskID, requester); err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": "A000001", "message": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, convention.Success[any](nil))
 }
 

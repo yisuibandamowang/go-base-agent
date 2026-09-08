@@ -130,7 +130,7 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	persistenceCtx := context.WithoutCancel(ctx)
-	task := p.tasks.register(taskID, sender, cancel)
+	task := p.tasks.register(taskID, streamTaskOwner(ctx), sender, cancel)
 	defer p.tasks.unregister(taskID)
 
 	traceRun := p.startTraceRun(ctx, conversationID, taskID)
@@ -679,10 +679,18 @@ func (p *Pipeline) buildCodeContext(ctx context.Context, question string) string
 	return codeqna.FormatEvidence(items)
 }
 
-// StopTask implements Service.StopTask.
-func (p *Pipeline) StopTask(taskID string) {
+// StopTask implements Service.StopTask：用户主动停止，必须比对属主。
+func (p *Pipeline) StopTask(taskID, requester string) error {
 	slog.Info("rag pipeline: stop task", "taskId", taskID)
-	p.tasks.cancel(taskID)
+	return p.tasks.cancelByUser(taskID, requester)
+}
+
+// streamTaskOwner 从请求上下文取属主用户 ID；未登录（如 eval 匿名模式）返回空串。
+func streamTaskOwner(ctx context.Context) string {
+	if user := appctx.User(ctx); user != nil {
+		return strings.TrimSpace(user.UserID)
+	}
+	return ""
 }
 
 // pipelineCallback converts LLM StreamCallback events to SSE events.

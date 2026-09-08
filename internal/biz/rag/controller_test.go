@@ -31,7 +31,7 @@ func (s *contextCaptureService) StreamChat(ctx context.Context, question, conver
 	sender.Close()
 }
 
-func (s *contextCaptureService) StopTask(taskID string) {}
+func (s *contextCaptureService) StopTask(taskID, requester string) error { return nil }
 
 func TestController_Chat_MissingQuestion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -376,7 +376,7 @@ func (s *blockingRagService) StreamChat(ctx context.Context, question, conversat
 	sender.Close()
 }
 
-func (s *blockingRagService) StopTask(taskID string) {
+func (s *blockingRagService) StopTask(taskID, requester string) error {
 	if s.stopStarted != nil {
 		select {
 		case s.stopStarted <- struct{}{}:
@@ -386,6 +386,7 @@ func (s *blockingRagService) StopTask(taskID string) {
 	if s.stopRelease != nil {
 		<-s.stopRelease
 	}
+	return nil
 }
 
 // TestController_EvalModeBypassesIdempotentGuard 验证评测模式下幂等提交被旁路：
@@ -419,4 +420,4 @@ func (r *chatServiceRecorder) StreamChat(ctx context.Context, question, conversa
 	}
 }
 
-func (r *chatServiceRecorder) StopTask(taskID string) {}
+func (r *chatServiceRecorder) StopTask(taskID, requester string) error { return nil }

@@ -99,7 +99,7 @@ func (r *queueInnerRecorder) StreamChat(ctx context.Context, question, conversat
 	}
 }
 
-func (r *queueInnerRecorder) StopTask(taskID string) {}
+func (r *queueInnerRecorder) StopTask(taskID, requester string) error { return nil }
 
 // TestQueuedChatService_AcquireCallbackKeepsUserContext 验证排队获取许可后的回调
 // 即使在新 goroutine 执行，携带的用户上下文仍然保留。

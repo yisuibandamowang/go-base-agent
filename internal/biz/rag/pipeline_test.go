@@ -1805,7 +1805,7 @@ func TestPipeline_StopTaskCancelsStreamAndClosesSender(t *testing.T) {
 		t.Fatal("expected stream handle to be created")
 	}
 
-	p.StopTask("task-stop")
+	p.StopTask("task-stop", systemRequester)
 
 	select {
 	case <-handle.cancelled:
@@ -1860,7 +1860,7 @@ func TestPipeline_StopTaskCancelEventIncludesAssistantMessageID(t *testing.T) {
 		t.Fatal("expected stream handle to be created")
 	}
 
-	p.StopTask("task-stop")
+	p.StopTask("task-stop", systemRequester)
 
 	select {
 	case <-handle.cancelled:

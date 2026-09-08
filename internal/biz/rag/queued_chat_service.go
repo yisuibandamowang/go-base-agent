@@ -66,11 +66,11 @@ func (s *QueuedChatService) StreamChat(ctx context.Context, question, conversati
 }
 
 // StopTask forwards cancellation to the underlying chat service.
-func (s *QueuedChatService) StopTask(taskID string) {
+func (s *QueuedChatService) StopTask(taskID, requester string) error {
 	if s == nil || s.inner == nil {
-		return
+		return nil
 	}
-	s.inner.StopTask(taskID)
+	return s.inner.StopTask(taskID, requester)
 }
 
 func (s *QueuedChatService) handleTimeout(ctx context.Context, question, conversationID string, sender *SSESender) {
