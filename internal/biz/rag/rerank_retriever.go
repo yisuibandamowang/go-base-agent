@@ -2,6 +2,8 @@ package rag
 
 import (
 	"context"
+	"log/slog"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,10 +15,17 @@ type RerankRetriever struct {
 	base    Retriever
 	rerank  rerank.Service
 	enabled bool
+	// minRerankScore 证据相关性闸门下限，<=0 关闭。对齐 Java EvidenceGatePostProcessor。
+	minRerankScore float64
 }
 
-func NewRerankRetriever(base Retriever, rerankSvc rerank.Service) *RerankRetriever {
-	return &RerankRetriever{base: base, rerank: rerankSvc, enabled: base != nil && rerankSvc != nil}
+func NewRerankRetriever(base Retriever, rerankSvc rerank.Service, minRerankScore float64) *RerankRetriever {
+	return &RerankRetriever{
+		base:           base,
+		rerank:         rerankSvc,
+		enabled:        base != nil && rerankSvc != nil,
+		minRerankScore: minRerankScore,
+	}
 }
 
 func (r *RerankRetriever) Retrieve(ctx context.Context, question string, topK int) ([]RetrievedChunk, error) {
@@ -47,9 +56,11 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, question string, topK in
 			continue
 		}
 		chunk.Score = item.Score
+		chunk.RerankScore = item.RerankScore
 		result = append(result, chunk)
 	}
-	return restoreStrongKeywordAnchors(result, chunks, topK), nil
+	logRerankScoreSpread(result)
+	return r.applyEvidenceGate(restoreStrongKeywordAnchors(result, chunks, topK)), nil
 }
 
 // RetrieveWithContext runs retrieval with the richer search context when supported.
@@ -102,10 +113,73 @@ func (r *RerankRetriever) RetrieveWithContextResult(ctx context.Context, sc Sear
 			continue
 		}
 		chunk.Score = item.Score
+		chunk.RerankScore = item.RerankScore
 		rerankedChunks = append(rerankedChunks, chunk)
 	}
-	result.Chunks = restoreStrongKeywordAnchors(rerankedChunks, result.Chunks, sc.TopK)
+	logRerankScoreSpread(rerankedChunks)
+	result.Chunks = r.applyEvidenceGate(restoreStrongKeywordAnchors(rerankedChunks, result.Chunks, sc.TopK))
 	return result, nil
+}
+
+// applyEvidenceGate 证据相关性闸门：检索只保证返回最像的 N 条，库里没答案时照样满额返回，
+// 下游又只看证据文本非空，噪声必然进提示词。闸门按整批最高精排分判定，不合格整批丢弃；
+// 只管批级去留，过线后弱证据一并保留。对齐 Java EvidenceGatePostProcessor。
+func (r *RerankRetriever) applyEvidenceGate(chunks []RetrievedChunk) []RetrievedChunk {
+	if r == nil || r.minRerankScore <= 0 || len(chunks) == 0 {
+		return chunks
+	}
+	topScore, ok := maxRerankScore(chunks)
+	if !ok {
+		// 无分可读一律放行：noop 降级只截断不打分，照拦等于在精排最不稳时关掉整条 KB 侧。
+		// 走到这里说明闸门在空转，精排正常时不该出现，按 warn 打。
+		slog.Warn("检索归因 - 证据闸门: 本批无精排分可读，闸门空转放行", "chunks", len(chunks))
+		return chunks
+	}
+	if topScore >= r.minRerankScore {
+		return chunks
+	}
+	slog.Info("检索归因 - 证据闸门: 最高精排分低于下限，丢弃全部证据",
+		"top_score", topScore, "min_rerank_score", r.minRerankScore, "chunks", len(chunks))
+	return nil
+}
+
+// maxRerankScore 全批缺分返回 false。按最高分而非逐条判：误丢比误放贵；
+// 不取首条：rerank 客户端未承诺返回序，回填条目也没分。
+func maxRerankScore(chunks []RetrievedChunk) (float64, bool) {
+	var max float64
+	found := false
+	for _, chunk := range chunks {
+		if chunk.RerankScore == nil || math.IsNaN(*chunk.RerankScore) || math.IsInf(*chunk.RerankScore, 0) {
+			continue
+		}
+		if !found || *chunk.RerankScore > max {
+			max = *chunk.RerankScore
+			found = true
+		}
+	}
+	return max, found
+}
+
+// logRerankScoreSpread 打本批精排分的高低两端，用于校准 rag.search.evidence.min-rerank-score。
+func logRerankScoreSpread(chunks []RetrievedChunk) {
+	var min, max float64
+	count := 0
+	for _, chunk := range chunks {
+		if chunk.RerankScore == nil || math.IsNaN(*chunk.RerankScore) || math.IsInf(*chunk.RerankScore, 0) {
+			continue
+		}
+		if count == 0 {
+			min, max = *chunk.RerankScore, *chunk.RerankScore
+		} else {
+			min = math.Min(min, *chunk.RerankScore)
+			max = math.Max(max, *chunk.RerankScore)
+		}
+		count++
+	}
+	if count == 0 {
+		return
+	}
+	slog.Info("检索归因 - 精排分布", "scored", count, "max", max, "min", min)
 }
 
 func restoreStrongKeywordAnchors(reranked, candidates []RetrievedChunk, topK int) []RetrievedChunk {

@@ -111,14 +111,25 @@ func parseRerankResponse(body []byte, candidates []Chunk, topN int, provider str
 		return nil, fmt.Errorf("%s rerank response has no results", provider)
 	}
 
-	reranked := make([]Chunk, 0, min(topN, len(results)))
+	reranked := make([]Chunk, 0, topN)
+	added := make(map[string]bool, topN)
 	for _, item := range results {
 		if item.Index < 0 || item.Index >= len(candidates) {
 			continue
 		}
 		chunk := candidates[item.Index]
-		chunk.Score = item.score()
+		if added[chunk.ID] {
+			continue
+		}
+		if score := item.score(); score != nil {
+			// 同一个分写两处：score 会被下游覆写，rerankScore 留给证据闸门。
+			chunk.Score = *score
+			chunk.RerankScore = score
+		} else {
+			chunk = unscoredRerankChunk(chunk)
+		}
 		reranked = append(reranked, chunk)
+		added[chunk.ID] = true
 		if len(reranked) == topN {
 			break
 		}
@@ -126,7 +137,27 @@ func parseRerankResponse(body []byte, candidates []Chunk, topN int, provider str
 	if len(reranked) == 0 {
 		return nil, fmt.Errorf("%s rerank response indexes are out of range", provider)
 	}
+	// API 返回不足 topN 时按原顺序回填未打分候选：
+	// 精排没出分的压零沉底，避免名次派生的 RRF 分压过被判弱相关的精排分。
+	for _, candidate := range candidates {
+		if len(reranked) >= topN {
+			break
+		}
+		if added[candidate.ID] {
+			continue
+		}
+		reranked = append(reranked, unscoredRerankChunk(candidate))
+		added[candidate.ID] = true
+	}
 	return reranked, nil
+}
+
+// unscoredRerankChunk 精排没出分的候选压到 0 沉底，不写 RerankScore，
+// 证据闸门据此认出这条没经过精排。对齐 Java BaiLianRerankClient.unscored。
+func unscoredRerankChunk(chunk Chunk) Chunk {
+	chunk.Score = 0
+	chunk.RerankScore = nil
+	return chunk
 }
 
 type rerankResult struct {
@@ -136,15 +167,14 @@ type rerankResult struct {
 	RelevanceText *float64 `json:"relevanceScore"`
 }
 
-func (r rerankResult) score() float64 {
+// score 返回精排分，nil 表示响应里根本没出分（relevance_score/score/relevanceScore 均缺）。
+// 证据闸门据此区分「没跑精排」和「被判 0 分」。对齐 Java BaiLianRerankClient 的 score 判空。
+func (r rerankResult) score() *float64 {
 	if r.Relevance != nil {
-		return *r.Relevance
+		return r.Relevance
 	}
 	if r.Score != nil {
-		return *r.Score
+		return r.Score
 	}
-	if r.RelevanceText != nil {
-		return *r.RelevanceText
-	}
-	return 0
+	return r.RelevanceText
 }

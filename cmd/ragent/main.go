@@ -459,7 +459,7 @@ func main() {
 	)
 	multiEngine.SetChannelTimeout(time.Duration(cfg.RAG.Search.Channels.TimeoutMs) * time.Millisecond)
 	multiRetriever := rag.NewMultiChannelRetriever(multiEngine)
-	retriever := maybeWrapRerankRetriever(multiRetriever, rerankService, cfg.RAG.Rerank.IsEnabledByDefault())
+	retriever := maybeWrapRerankRetriever(multiRetriever, rerankService, cfg.RAG.Rerank.IsEnabledByDefault(), cfg.RAG.Search.Evidence.EffectiveMinRerankScore())
 	enrichedRetriever := maybeWrapMetadataEnrichingRetriever(
 		retriever,
 		rag.NewDBChunkMetadataResolver(gormDB),
@@ -1318,11 +1318,11 @@ func maybeWrapMetadataEnrichingRetriever(base rag.Retriever, resolver rag.ChunkM
 	return rag.NewMetadataEnrichingRetriever(base, resolver)
 }
 
-func maybeWrapRerankRetriever(base rag.Retriever, rerankSvc rerank.Service, enabled bool) rag.Retriever {
+func maybeWrapRerankRetriever(base rag.Retriever, rerankSvc rerank.Service, enabled bool, minRerankScore float64) rag.Retriever {
 	if !enabled {
 		return base
 	}
-	return rag.NewRerankRetriever(base, rerankSvc)
+	return rag.NewRerankRetriever(base, rerankSvc, minRerankScore)
 }
 
 func keywordSearchChannelEnabled(cfg config.RAGSearchChannelConfig) bool {

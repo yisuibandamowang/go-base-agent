@@ -4,10 +4,13 @@ import "context"
 
 // RetrievedChunk represents a retrieved document chunk.
 type RetrievedChunk struct {
-	ID       string
-	Text     string
-	Score    float64
-	Metadata map[string]string
+	ID   string
+	Text string
+	// Score 被余弦/BM25/RRF 轮番覆写认不出写入方，与 Java 一致地把精排分单独存放：
+	// 只有真精排客户端会写 RerankScore，nil 表示该块没跑过精排。
+	Score       float64
+	RerankScore *float64
+	Metadata    map[string]string
 }
 
 // Retriever retrieves relevant chunks for a question.

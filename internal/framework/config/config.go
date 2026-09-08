@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -327,6 +328,7 @@ type RAGSearchConfig struct {
 	SupplementRatio float64                 `mapstructure:"supplement-ratio"`
 	Channels        RAGSearchChannelsConfig `mapstructure:"channels"`
 	Fusion          RAGSearchFusionConfig   `mapstructure:"fusion"`
+	Evidence        RAGSearchEvidenceConfig `mapstructure:"evidence"`
 }
 
 type RAGSearchChannelsConfig struct {
@@ -361,6 +363,21 @@ type RAGSearchChannelWeightsConfig struct {
 	Keyword   float64 `mapstructure:"keyword"`
 	Graph     float64 `mapstructure:"graph"`
 	WebSearch float64 `mapstructure:"web-search"`
+}
+
+// RAGSearchEvidenceConfig 证据相关性闸门参数，对齐 Java SearchChannelProperties.Evidence。
+type RAGSearchEvidenceConfig struct {
+	// MinRerankScore 整批最高精排分低于此值则整批丢弃证据，<=0 关闭闸门。
+	// 指针语义区分「未配置（默认 0.2）」与「显式 0（关闭）」，随 reranker 而变，换模型需按精排分布重测。
+	MinRerankScore *float64 `mapstructure:"min-rerank-score"`
+}
+
+// EffectiveMinRerankScore 返回生效的证据闸门下限，未配置时取 Java 默认 0.2。
+func (c RAGSearchEvidenceConfig) EffectiveMinRerankScore() float64 {
+	if c.MinRerankScore == nil {
+		return 0.2
+	}
+	return *c.MinRerankScore
 }
 
 // ChannelWeight returns a configured channel weight, falling back to the Java-compatible default.
@@ -839,6 +856,21 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf(
 			"validate rag.search.channels.graph: rag.search.channels.graph.enabled=true requires rag.graph.type=lightrag, got rag.graph.type=%q",
 			cfg.RAG.Graph.Type,
+		)
+	}
+	// 精排分按 0~1 输出，下限高于 1 则全部证据被丢，表现与「库里没料」一致，线上无从分辨
+	minRerankScore := cfg.RAG.Search.Evidence.EffectiveMinRerankScore()
+	if math.IsNaN(minRerankScore) || minRerankScore > 1 {
+		return fmt.Errorf(
+			"validate rag.search.evidence: min-rerank-score (%v) must be <= 1: 精排分按 0~1 输出，高于 1 会让全部证据被闸门丢弃、KB 侧恒为空；关闭闸门请填 0",
+			minRerankScore,
+		)
+	}
+	// 闸门的唯一判据来自精排：闸门开着却关了精排，判据永远读不到，启动即失败而不是上线后恒放行
+	if minRerankScore > 0 && !cfg.RAG.Rerank.IsEnabledByDefault() {
+		return fmt.Errorf(
+			"validate rag.search.evidence: min-rerank-score (%v) 需要精排出分，但 rag.rerank.enabled=false：闸门将无分可读、恒放行；请开启精排或把下限填 0",
+			minRerankScore,
 		)
 	}
 	if err := validateChatTiers(cfg.AI.Chat); err != nil {

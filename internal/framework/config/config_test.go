@@ -567,10 +567,14 @@ func TestRAGContextEnrichDefaultEnabled(t *testing.T) {
 }
 
 func TestLoadParsesRAGRerankEnabledConfig(t *testing.T) {
+	// 闸门开着却关了精排是启动错误，这里显式关闸门以单测 rerank 开关本身
 	yaml := `
 rag:
   rerank:
     enabled: false
+  search:
+    evidence:
+      min-rerank-score: 0
 `
 
 	tmpDir := t.TempDir()
@@ -973,5 +977,93 @@ ai:
 	_, err := Load(cfgPath)
 	if err == nil || !strings.Contains(err.Error(), "deep-thinking-tier") {
 		t.Fatalf("expected invalid chat tier reference error, got: %v", err)
+	}
+}
+
+func TestLoadEvidenceGateDefaultsAndExplicitOff(t *testing.T) {
+	writeCfg := func(yaml string) string {
+		tmpDir := t.TempDir()
+		cfgPath := filepath.Join(tmpDir, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+			t.Fatalf("write temp config: %v", err)
+		}
+		return cfgPath
+	}
+
+	// 未配置：取 Java 默认 0.2
+	cfg, err := Load(writeCfg("rag: {}"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Search.Evidence.MinRerankScore != nil {
+		t.Fatalf("expected unset min-rerank-score, got %v", *cfg.RAG.Search.Evidence.MinRerankScore)
+	}
+	if got := cfg.RAG.Search.Evidence.EffectiveMinRerankScore(); got != 0.2 {
+		t.Fatalf("unexpected default min-rerank-score: %v", got)
+	}
+
+	// 显式 0 是配置侧的关闭路径，不回退到默认值
+	cfg, err = Load(writeCfg(`
+rag:
+  search:
+    evidence:
+      min-rerank-score: 0
+`))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RAG.Search.Evidence.MinRerankScore == nil || *cfg.RAG.Search.Evidence.MinRerankScore != 0 {
+		t.Fatalf("expected explicit zero to be preserved, got %+v", cfg.RAG.Search.Evidence)
+	}
+	if got := cfg.RAG.Search.Evidence.EffectiveMinRerankScore(); got != 0 {
+		t.Fatalf("unexpected effective min-rerank-score: %v", got)
+	}
+}
+
+func TestLoadRejectsEvidenceFloorAboveOne(t *testing.T) {
+	yaml := `
+rag:
+  search:
+    evidence:
+      min-rerank-score: 1.5
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when min-rerank-score is above 1")
+	}
+	if !strings.Contains(err.Error(), "rag.search.evidence") || !strings.Contains(err.Error(), "min-rerank-score") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsEvidenceGateOnButRerankOff(t *testing.T) {
+	yaml := `
+rag:
+  rerank:
+    enabled: false
+  search:
+    evidence:
+      min-rerank-score: 0.2
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when gate is on but rerank is off")
+	}
+	if !strings.Contains(err.Error(), "rag.rerank.enabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -169,6 +169,9 @@ rag:
         keyword: 1.0
         graph: 0.8
         web-search: 0.5
+    # 证据相关性闸门：检索只保证返回最像的 N 条，库里没答案时照样满额返回，这里补一道相关度下限
+    evidence:
+      min-rerank-score: 0.2   # 整批最高精排分低于此值则整批丢弃，0=关闭；随 reranker 而变，换模型看「检索归因 - 精排分布」重测
 
   guidance:
     # 是否启用引导式问答（对齐 Java GuidanceProperties 默认 true）
