@@ -294,3 +294,28 @@ func TestRerankRetriever_EvidenceGateAppliesToContextRetrieval(t *testing.T) {
 		t.Fatalf("expected gate to drop the batch in context retrieval, got %+v", chunks)
 	}
 }
+
+func TestRerankRetriever_MultiChannelAttributionLogsSurvival(t *testing.T) {
+	// 多通道场景（对齐 Java RerankPostProcessor.logAttribution）：rerank 前后按通道统计，图谱在场时打存活率。
+	// 此用例主要保证归因路径在 rerank 链路里可执行且不影响结果顺序。
+	base := staticRetriever{chunks: []RetrievedChunk{
+		{ID: "g1", Text: "图谱证据", Score: 0.1, Metadata: map[string]string{"retrieval_channel": string(ChannelGraph)}},
+		{ID: "v1", Text: "向量证据", Score: 0.2, Metadata: map[string]string{"retrieval_channel": string(ChannelVectorGlobal)}},
+	}}
+	reranker := &fakeRerankService{result: []rerank.Chunk{
+		{ID: "v1", Text: "向量证据", Score: 0.95, RerankScore: rrScore(0.95)},
+		{ID: "g1", Text: "图谱证据", Score: 0.02, RerankScore: rrScore(0.02)},
+	}}
+	retriever := NewRerankRetriever(base, reranker, 0)
+
+	chunks, err := retriever.Retrieve(context.Background(), "query", 2)
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if len(chunks) != 2 || chunks[0].ID != "v1" {
+		t.Fatalf("unexpected reranked chunks: %+v", chunks)
+	}
+	if countChannelChunks(chunks, ChannelGraph) != 1 {
+		t.Fatalf("expected graph chunk to survive, got %+v", chunks)
+	}
+}

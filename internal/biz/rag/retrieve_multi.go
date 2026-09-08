@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -439,6 +440,14 @@ func (f *FusionPostProcessor) Process(chunks []RetrievedChunk, results []SearchC
 	if len(chunks) == 0 || len(results) == 0 {
 		return chunks
 	}
+	// 通道归属是检索归因（Rerank 存活率）的基础：RetrievedChunk 不携带来源通道字段，
+	// 按 chunk key 从通道结果反查标记，多路命中的证据取首个命中通道（对齐 Java ChannelAttribution 反查）。
+	channelIndex := indexChannels(results)
+	for i := range chunks {
+		if channels, ok := channelIndex[chunkKey(chunks[i])]; ok && len(channels) > 0 {
+			chunks[i].Metadata = withMetadataChannel(chunks[i].Metadata, channels[0])
+		}
+	}
 	if len(results) == 1 {
 		return f.truncateCandidates(chunks)
 	}
@@ -497,4 +506,86 @@ func chunkKey(chunk RetrievedChunk) string {
 	}
 	sum := sha256.Sum256([]byte(chunk.Text))
 	return hex.EncodeToString(sum[:])
+}
+
+// indexChannels 反查每个 chunk key 命中的通道集合（一条证据可被多路命中，故值为集合），
+// 对齐 Java ChannelAttribution.index。
+func indexChannels(results []SearchChannelResult) map[string][]SearchChannelType {
+	index := make(map[string][]SearchChannelType)
+	for _, result := range results {
+		for _, chunk := range result.Chunks {
+			key := chunkKey(chunk)
+			found := false
+			for _, existing := range index[key] {
+				if existing == result.ChannelType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				index[key] = append(index[key], result.ChannelType)
+			}
+		}
+	}
+	return index
+}
+
+// withMetadataChannel 在 metadata 上记录通道归属标记，返回新 map（不修改原 map）。
+func withMetadataChannel(metadata map[string]string, channel SearchChannelType) map[string]string {
+	next := make(map[string]string, len(metadata)+1)
+	for k, v := range metadata {
+		next[k] = v
+	}
+	next["retrieval_channel"] = string(channel)
+	return next
+}
+
+// channelAttributionLabel 通道可读标签，对齐 Java ChannelAttribution.label。
+func channelAttributionLabel(channel SearchChannelType) string {
+	switch channel {
+	case ChannelVectorGlobal, ChannelIntentDirected:
+		return "向量"
+	case ChannelKeyword:
+		return "关键词"
+	case ChannelGraph:
+		return "图谱"
+	case ChannelWebSearch:
+		return "联网"
+	default:
+		return string(channel)
+	}
+}
+
+// countChannelsByAttribution 统计给定 chunks 按通道的分布，多路命中的 chunk 在每个命中通道各计一次。
+// 归因来源是 fusion 阶段写入的 retrieval_channel metadata。返回的 map 键为通道标签。
+func countChannelsByAttribution(chunks []RetrievedChunk) map[string]int {
+	counts := make(map[string]int)
+	for _, chunk := range chunks {
+		channel := strings.TrimSpace(chunk.Metadata["retrieval_channel"])
+		if channel == "" {
+			continue
+		}
+		counts[channel]++
+	}
+	return counts
+}
+
+// formatChannelCounts 通道分布转中文可读串，如「向量=4 关键词=6」。
+func formatChannelCounts(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "无"
+	}
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(channelAttributionLabel(SearchChannelType(k)))
+		b.WriteString("=")
+		b.WriteString(strconv.Itoa(counts[k]))
+		b.WriteString(" ")
+	}
+	return strings.TrimSpace(b.String())
 }

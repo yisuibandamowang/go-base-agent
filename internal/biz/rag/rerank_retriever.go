@@ -60,6 +60,7 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, question string, topK in
 		result = append(result, chunk)
 	}
 	logRerankScoreSpread(result)
+	logRerankAttribution(chunks, result)
 	return r.applyEvidenceGate(restoreStrongKeywordAnchors(result, chunks, topK)), nil
 }
 
@@ -117,6 +118,7 @@ func (r *RerankRetriever) RetrieveWithContextResult(ctx context.Context, sc Sear
 		rerankedChunks = append(rerankedChunks, chunk)
 	}
 	logRerankScoreSpread(rerankedChunks)
+	logRerankAttribution(result.Chunks, rerankedChunks)
 	result.Chunks = r.applyEvidenceGate(restoreStrongKeywordAnchors(rerankedChunks, result.Chunks, sc.TopK))
 	return result, nil
 }
@@ -180,6 +182,35 @@ func logRerankScoreSpread(chunks []RetrievedChunk) {
 		return
 	}
 	slog.Info("检索归因 - 精排分布", "scored", count, "max", max, "min", min)
+}
+
+// logRerankAttribution 归因日志：对比 Rerank 前后各通道的候选分布，重点是「图谱证据存活率」。
+// 图谱大量进入 Rerank 却几乎不存活，说明其当前是纯成本（塞候选、占名额、被淘汰），
+// 应下调图谱权重或先优化其长证据的可排性。对齐 Java RerankPostProcessor.logAttribution，
+// 通道归属来自 fusion 阶段写入的 retrieval_channel metadata（多通道检索时才有标记）。
+func logRerankAttribution(before, after []RetrievedChunk) {
+	beforeCounts := countChannelsByAttribution(before)
+	if len(beforeCounts) <= 1 {
+		return
+	}
+	slog.Info("检索归因 - Rerank 输入按通道",
+		"input", formatChannelCounts(beforeCounts),
+		"output_top", len(after),
+		"output", formatChannelCounts(countChannelsByAttribution(after)))
+	if _, graphPresent := beforeCounts[string(ChannelGraph)]; graphPresent {
+		// 按图谱通道在场判断而非 >0：0/N 恰是最需要看见的形态——图谱召回了却在精排全军覆没
+		slog.Info("检索归因 - 图谱证据存活", "survived", countChannelChunks(after, ChannelGraph), "recalled", countChannelChunks(before, ChannelGraph))
+	}
+}
+
+func countChannelChunks(chunks []RetrievedChunk, channel SearchChannelType) int {
+	count := 0
+	for _, chunk := range chunks {
+		if chunk.Metadata["retrieval_channel"] == string(channel) {
+			count++
+		}
+	}
+	return count
 }
 
 func restoreStrongKeywordAnchors(reranked, candidates []RetrievedChunk, topK int) []RetrievedChunk {

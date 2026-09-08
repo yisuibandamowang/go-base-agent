@@ -360,3 +360,41 @@ func TestMultiChannelRetrievalEngine_EnforcesChannelTimeout(t *testing.T) {
 		t.Fatalf("expected timeout to finish quickly, got %s", elapsed)
 	}
 }
+
+func TestFusionPostProcessor_MarksChannelAttributionOnChunks(t *testing.T) {
+	// 对齐 Java ChannelAttribution：融合阶段按 chunk key 反查通道并标记归属，供 Rerank 存活率日志使用
+	pp := NewFusionPostProcessor(60)
+	chunks := []RetrievedChunk{
+		{ID: "a", Text: "alpha"},
+		{ID: "b", Text: "beta"},
+	}
+	results := []SearchChannelResult{
+		{ChannelType: ChannelVectorGlobal, Chunks: []RetrievedChunk{{ID: "a", Text: "alpha"}}},
+		{ChannelType: ChannelKeyword, Chunks: []RetrievedChunk{{ID: "a", Text: "alpha"}, {ID: "b", Text: "beta"}}},
+	}
+
+	result := pp.Process(chunks, results)
+	byID := make(map[string]RetrievedChunk, len(result))
+	for _, chunk := range result {
+		byID[chunk.ID] = chunk
+	}
+	if byID["a"].Metadata["retrieval_channel"] != string(ChannelVectorGlobal) {
+		t.Fatalf("expected vector attribution on a, got %+v", byID["a"].Metadata)
+	}
+	if byID["b"].Metadata["retrieval_channel"] != string(ChannelKeyword) {
+		t.Fatalf("expected keyword attribution on b, got %+v", byID["b"].Metadata)
+	}
+}
+
+func TestFormatChannelCountsRendersChineseLabels(t *testing.T) {
+	counts := map[string]int{
+		string(ChannelKeyword): 6,
+		string(ChannelGraph):   8,
+	}
+	if got := formatChannelCounts(counts); got != "图谱=8 关键词=6" {
+		t.Fatalf("unexpected formatted counts: %q", got)
+	}
+	if got := formatChannelCounts(nil); got != "无" {
+		t.Fatalf("expected empty marker, got %q", got)
+	}
+}
