@@ -45,6 +45,9 @@ type IntentNode struct {
 	ParamPromptTemplate string
 	SortOrder           int
 	Enabled             int16
+	// FullPath 根到叶的完整路径展示（如「业务系统 > OA系统 > 系统介绍」），
+	// 仅在歧义澄清链路按需填充，对齐 Java IntentNode.fullPath。
+	FullPath string
 }
 
 // EffectiveCollectionNames 返回当前意图实际参与检索的 Collection 集合。
@@ -97,7 +100,8 @@ type IntentGroup struct {
 	KBIntents  []NodeScore
 }
 
-// MergeIntentGroup 将多个子问题的意图候选合并分组。
+// MergeIntentGroup 将多个子问题的意图候选合并分组，对齐 Java NodeScoreFilters：
+// MCP 意图额外要求 mcpToolId 非空（未绑定工具的 MCP 节点无法执行）；SYSTEM 意图不参与检索分组。
 func MergeIntentGroup(subIntents []SubQuestionIntent) IntentGroup {
 	mcpIntents := make([]NodeScore, 0)
 	kbIntents := make([]NodeScore, 0)
@@ -105,9 +109,11 @@ func MergeIntentGroup(subIntents []SubQuestionIntent) IntentGroup {
 		for _, ns := range si.NodeScores {
 			switch ns.Node.Kind {
 			case IntentKindMCP:
-				mcpIntents = append(mcpIntents, ns)
-			case IntentKindKB:
-				kbIntents = append(kbIntents, ns)
+				if strings.TrimSpace(ns.Node.McpToolID) != "" {
+					mcpIntents = append(mcpIntents, ns)
+				}
+			case IntentKindSystem:
+				// SYSTEM 意图是纯交互应答，不参与 MCP/KB 检索分组。
 			default:
 				kbIntents = append(kbIntents, ns)
 			}
@@ -343,40 +349,53 @@ func (r *IntentResolver) classifyWithLLM(ctx context.Context, question string, l
 	return scores, true
 }
 
-// intentClassifierTemplateFile 对齐 Java prompt/intent-classifier.st，通过占位符注入叶子节点清单。
-const intentClassifierTemplateFile = "intent_classifier.txt"
+// promptTemplateCache 缓存已解析的内嵌提示词模板；value 为 *template.Template，
+// 加载失败时缓存 nil，避免每次调用重复读内嵌文件。
+var promptTemplateCache sync.Map
 
-var (
-	intentClassifierTemplateOnce sync.Once
-	intentClassifierTemplate     *template.Template
-)
-
-// loadIntentClassifierTemplate 惰性解析内嵌的意图分类提示词模板；模板缺失或非法时返回 nil，
-// 调用方回退到内联提示词，保证分类链路永不因模板问题中断。
-func loadIntentClassifierTemplate() *template.Template {
-	intentClassifierTemplateOnce.Do(func() {
-		content, err := prompts.FS.ReadFile(intentClassifierTemplateFile)
-		if err != nil {
-			slog.Warn("intent classifier prompt template missing, fallback to inline prompt", "err", err)
-			return
-		}
-		tmpl, err := template.New(intentClassifierTemplateFile).Parse(string(content))
-		if err != nil {
-			slog.Warn("intent classifier prompt template invalid, fallback to inline prompt", "err", err)
-			return
-		}
-		intentClassifierTemplate = tmpl
-	})
-	return intentClassifierTemplate
+// loadEmbeddedPromptTemplate 惰性解析内嵌提示词模板；文件缺失或非法时返回 nil。
+func loadEmbeddedPromptTemplate(name string) *template.Template {
+	if cached, ok := promptTemplateCache.Load(name); ok {
+		tmpl, _ := cached.(*template.Template)
+		return tmpl
+	}
+	content, err := prompts.FS.ReadFile(name)
+	if err != nil {
+		slog.Warn("prompt template missing, fallback to inline prompt", "name", name, "err", err)
+		promptTemplateCache.Store(name, (*template.Template)(nil))
+		return nil
+	}
+	tmpl, err := template.New(name).Parse(string(content))
+	if err != nil {
+		slog.Warn("prompt template invalid, fallback to inline prompt", "name", name, "err", err)
+		promptTemplateCache.Store(name, (*template.Template)(nil))
+		return nil
+	}
+	promptTemplateCache.Store(name, tmpl)
+	return tmpl
 }
+
+// renderEmbeddedPrompt 渲染内嵌提示词模板；模板不可用或渲染失败时返回 false。
+func renderEmbeddedPrompt(name string, data any) (string, bool) {
+	tmpl := loadEmbeddedPromptTemplate(name)
+	if tmpl == nil {
+		return "", false
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		slog.Warn("prompt template render failed, fallback to inline prompt", "name", name, "err", err)
+		return "", false
+	}
+	return buf.String(), true
+}
+
+// intentClassifierTemplateFile 对齐 Java prompt/intent-classifier.st。
+const intentClassifierTemplateFile = "intent_classifier.txt"
 
 func buildIntentClassifierPrompt(leafNodes []IntentNode, rawNodes []intentModel.IntentNode) string {
 	nodeList := buildIntentClassifierNodeList(leafNodes, rawNodes)
-	if tmpl := loadIntentClassifierTemplate(); tmpl != nil {
-		var buf bytes.Buffer
-		if err := tmpl.Execute(&buf, map[string]string{"IntentList": nodeList}); err == nil {
-			return buf.String()
-		}
+	if prompt, ok := renderEmbeddedPrompt(intentClassifierTemplateFile, map[string]string{"IntentList": nodeList}); ok {
+		return prompt
 	}
 	// 模板不可用时的内联兜底，规则与 intent_classifier.txt 保持同一语义的精简版。
 	var b strings.Builder
@@ -753,10 +772,12 @@ const (
 
 // GuidanceOptions controls ambiguity detection.
 type GuidanceOptions struct {
-	Enabled             bool
+	Enabled    bool
+	MaxOptions int
+	// AmbiguityScoreRatio / AmbiguityMargin 对齐 Java GuidanceProperties：
+	// 歧义判定已改为候选路径重名触发，这两个值当前不参与判定，保留以兼容既有 yaml。
 	AmbiguityScoreRatio float64
 	AmbiguityMargin     float64
-	MaxOptions          int
 }
 
 // GuidanceDecision describes whether the pipeline should ask a clarification question.
@@ -776,6 +797,8 @@ func NewGuidanceDecisionPrompt(prompt string) GuidanceDecision {
 }
 
 // IntentGuidanceService decides whether the user should be asked to clarify intent.
+// 意图树层级由用户自行配置，因此只按「根到叶的节点路径」找重名分叉，
+// 再由 LLM 确认是否真的需要用户选择，对齐 Java IntentGuidanceService。
 type IntentGuidanceService struct {
 	opts    GuidanceOptions
 	lister  IntentNodeLister
@@ -784,142 +807,271 @@ type IntentGuidanceService struct {
 
 // NewIntentGuidanceService creates a guidance service.
 func NewIntentGuidanceService(opts GuidanceOptions) *IntentGuidanceService {
-	if opts.AmbiguityScoreRatio <= 0 {
-		opts.AmbiguityScoreRatio = 0.8
-	}
-	if opts.AmbiguityMargin <= 0 {
-		opts.AmbiguityMargin = 0.15
-	}
 	if opts.MaxOptions <= 0 {
 		opts.MaxOptions = 6
 	}
 	return &IntentGuidanceService{opts: opts}
 }
 
-// SetIntentNodeLister injects an intent node lister for domain name resolution.
+// SetIntentNodeLister injects an intent node lister for path resolution.
 func (s *IntentGuidanceService) SetIntentNodeLister(lister IntentNodeLister) {
 	s.lister = lister
 }
 
-// SetAmbiguityChecker injects the optional LLM-based ambiguity checker.
+// SetAmbiguityChecker injects the LLM-based ambiguity checker.
 func (s *IntentGuidanceService) SetAmbiguityChecker(checker AmbiguityChecker) {
 	s.checker = checker
 }
 
-// DetectAmbiguity checks whether the top intents are ambiguous enough to prompt the user.
+// DetectAmbiguity 检查候选意图是否在路径上重名且需要用户澄清。
 func (s *IntentGuidanceService) DetectAmbiguity(ctx context.Context, question string, subIntents []SubQuestionIntent) GuidanceDecision {
 	if s == nil || !s.opts.Enabled || len(subIntents) != 1 {
 		return NewGuidanceDecisionNone()
 	}
 	nodeIndex := s.loadNodeIndex(ctx)
-	candidates := filterCandidates(subIntents[0].NodeScores, nodeIndex)
-	if len(candidates) < 2 {
+	ranked := rankCandidates(filterCandidates(subIntents[0].NodeScores))
+	if len(ranked) < 2 {
 		return NewGuidanceDecisionNone()
 	}
-	top := candidates[0].Score
-	second := candidates[1].Score
-	if top <= 0 {
+	conflict := collectPathConflicts(question, ranked, nodeIndex)
+	if conflict == nil {
 		return NewGuidanceDecisionNone()
 	}
-
-	ratio := second / top
-	if ratio < s.opts.AmbiguityScoreRatio-s.opts.AmbiguityMargin {
+	if s.checker == nil || !s.checker.CheckAmbiguity(ctx, question, conflict.ranked) {
+		slog.Info("LLM 判定候选路径不构成歧义, 跳过澄清", "question", question)
 		return NewGuidanceDecisionNone()
 	}
-	if s.shouldSkipGuidance(question, candidates, nodeIndex) {
-		return NewGuidanceDecisionNone()
-	}
-	if ratio < s.opts.AmbiguityScoreRatio {
-		if s.checker != nil && s.checker.CheckAmbiguity(ctx, question, candidates) {
-			return s.promptDecision(question, candidates)
-		}
-		return NewGuidanceDecisionNone()
-	}
-
-	return s.promptDecision(question, candidates)
+	return s.promptDecision(conflict.topicName, conflict.ranked)
 }
 
-func (s *IntentGuidanceService) shouldSkipGuidance(question string, ranked []NodeScore, nodeIndex map[string]IntentNode) bool {
-	domainNames := make([]string, 0)
-	seenDomain := make(map[string]bool)
-	for _, candidate := range ranked {
-		if domain := resolveDomainName(candidate.Node, nodeIndex); domain != "" && !seenDomain[domain] {
-			seenDomain[domain] = true
-			domainNames = append(domainNames, domain)
-		}
-	}
-	if len(domainNames) == 0 {
-		return false
-	}
-
-	normalizedQuestion := normalizeText(question)
-	for _, name := range domainNames {
-		for _, alias := range buildSystemAliases(name) {
-			if len(alias) >= 2 && strings.Contains(normalizedQuestion, alias) {
-				return true
-			}
-		}
-	}
-	return false
+// pathConflict 待 LLM 确认的路径重名候选组。
+type pathConflict struct {
+	topicName string
+	ranked    []NodeScore
 }
 
-func (s *IntentGuidanceService) promptDecision(question string, ranked []NodeScore) GuidanceDecision {
-	trimmed := ranked
-	if len(trimmed) > s.opts.MaxOptions {
-		trimmed = trimmed[:s.opts.MaxOptions]
-	}
-	var b strings.Builder
-	b.WriteString("问题“")
-	b.WriteString(strings.TrimSpace(question))
-	b.WriteString("”有歧义，请选择更接近的方向：")
-	for i, candidate := range trimmed {
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("%d. %s", i+1, candidate.Node.Name))
-		if candidate.Node.Description != "" {
-			b.WriteString(" - ")
-			b.WriteString(candidate.Node.Description)
+// collectPathConflicts 以最高分候选为主候选，收集与它构成路径重名的其它候选。
+func collectPathConflicts(question string, ranked []NodeScore, nodeIndex map[string]IntentNode) *pathConflict {
+	primaryPath := buildGuidanceNodePath(ranked[0].Node, nodeIndex)
+	ranked[0].Node.FullPath = guidancePathString(primaryPath)
+	normalizedQuestion := normalizeGuidanceName(question)
+
+	conflicts := make([]NodeScore, 0, len(ranked))
+	conflicts = append(conflicts, ranked[0])
+	topicName := ""
+	for _, other := range ranked[1:] {
+		otherPath := buildGuidanceNodePath(other.Node, nodeIndex)
+		hitName := detectConflictName(primaryPath, otherPath, normalizedQuestion)
+		if hitName == "" {
+			continue
+		}
+		other.Node.FullPath = guidancePathString(otherPath)
+		conflicts = append(conflicts, other)
+		if topicName == "" {
+			topicName = hitName
 		}
 	}
-	return NewGuidanceDecisionPrompt(b.String())
-}
-
-func filterCandidates(scores []NodeScore, nodeIndex map[string]IntentNode) []NodeScore {
-	if len(scores) == 0 {
+	if len(conflicts) < 2 {
 		return nil
 	}
+	slog.Info("候选意图路径重名, 调 LLM 确认是否需要澄清", "topicName", topicName, "question", question)
+	return &pathConflict{topicName: topicName, ranked: conflicts}
+}
+
+// detectConflictName 返回两条路径的冲突名称，无冲突返回空串。
+// 叶子重名直接算冲突；分叉后的中间节点重名还要求用户问题里提到了这个名称，
+// 否则用户问的并不是这个岔路口；公共前缀是同一批真实节点，共享它不构成歧义。
+func detectConflictName(primaryPath, otherPath []IntentNode, normalizedQuestion string) string {
+	if len(primaryPath) == 0 || len(otherPath) == 0 {
+		return ""
+	}
+	primaryLeaf := primaryPath[len(primaryPath)-1]
+	leafName := normalizeGuidanceName(primaryLeaf.Name)
+	if isComparableName(leafName) && leafName == normalizeGuidanceName(otherPath[len(otherPath)-1].Name) {
+		return primaryLeaf.Name
+	}
+	common := commonPrefixLength(primaryPath, otherPath)
+	otherNames := make(map[string]struct{})
+	for _, node := range otherPath[common:] {
+		if name := normalizeGuidanceName(node.Name); isComparableName(name) {
+			otherNames[name] = struct{}{}
+		}
+	}
+	for _, node := range primaryPath[common:] {
+		name := normalizeGuidanceName(node.Name)
+		if _, ok := otherNames[name]; ok && isComparableName(name) && strings.Contains(normalizedQuestion, name) {
+			return node.Name
+		}
+	}
+	return ""
+}
+
+// buildGuidanceNodePath 沿 ParentCode 上溯出「根 → ... → 候选」的完整节点路径。
+// visited 兜住配置错误形成的父子环，父节点缺失时停在已取到的链路上。
+func buildGuidanceNodePath(node IntentNode, nodeIndex map[string]IntentNode) []IntentNode {
+	path := make([]IntentNode, 0, 4)
+	visited := make(map[string]struct{})
+	current := node
+	for {
+		path = append(path, current)
+		visited[current.ID] = struct{}{}
+		parentCode := strings.TrimSpace(current.ParentCode)
+		if parentCode == "" {
+			break
+		}
+		if _, ok := visited[parentCode]; ok {
+			break
+		}
+		parent, ok := nodeIndex[parentCode]
+		if !ok {
+			break
+		}
+		current = parent
+	}
+	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+		path[i], path[j] = path[j], path[i]
+	}
+	return path
+}
+
+// commonPrefixLength 按节点 ID 计算最长公共前缀长度。
+func commonPrefixLength(left, right []IntentNode) int {
+	max := len(left)
+	if len(right) < max {
+		max = len(right)
+	}
+	index := 0
+	for index < max && left[index].ID != "" && left[index].ID == right[index].ID {
+		index++
+	}
+	return index
+}
+
+// guidancePathString 把根到叶的节点路径拼接为展示用完整路径。
+func guidancePathString(path []IntentNode) string {
+	names := make([]string, 0, len(path))
+	for _, node := range path {
+		if name := strings.TrimSpace(node.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, " > ")
+}
+
+// normalizeGuidanceName 统一名称比较形态：小写并剔除全部标点与空白。
+func normalizeGuidanceName(name string) string {
+	cleaned := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	b.Grow(len(cleaned))
+	for _, r := range cleaned {
+		if unicode.IsPunct(r) || unicode.IsSymbol(r) || unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// isComparableName 参与重名比较的最短名称长度为 2，避免单字名把无关路径判成冲突。
+func isComparableName(normalizedName string) bool {
+	return len([]rune(normalizedName)) >= minComparableNameLength
+}
+
+// guidanceIntentMinScore 歧义候选准入分数，对齐 Java RAGConstant.INTENT_MIN_SCORE。
+const guidanceIntentMinScore = 0.35
+
+// minComparableNameLength 参与重名比较的最短名称长度。
+const minComparableNameLength = 2
+
+// guidancePromptTemplateFile 对齐 Java prompt/guidance-prompt.st。
+const guidancePromptTemplateFile = "guidance_prompt.txt"
+
+// filterCandidates 只保留达到准入分数的 KB 意图，对齐 Java NodeScoreFilters.kb(scores, INTENT_MIN_SCORE)。
+func filterCandidates(scores []NodeScore) []NodeScore {
 	out := make([]NodeScore, 0, len(scores))
 	for _, score := range scores {
 		if score.Node.Kind != IntentKindKB {
 			continue
 		}
-		if score.Score <= 0 {
+		if score.Score < guidanceIntentMinScore {
 			continue
 		}
 		out = append(out, score)
 	}
-	if len(nodeIndex) > 0 {
-		dedup := make(map[string]NodeScore, len(out))
-		for _, score := range out {
-			key := resolveSystemNodeID(score.Node, nodeIndex)
-			if existing, ok := dedup[key]; ok {
-				if existing.Score >= score.Score {
-					continue
-				}
-			}
-			dedup[key] = score
-		}
-		out = make([]NodeScore, 0, len(dedup))
-		for _, score := range dedup {
-			out = append(out, score)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Score == out[j].Score {
-			return out[i].Node.ID < out[j].Node.ID
-		}
-		return out[i].Score > out[j].Score
-	})
 	return out
+}
+
+// rankCandidates 按节点去重并按分数降序，同一节点重复命中时保留高分那条。
+func rankCandidates(candidates []NodeScore) []NodeScore {
+	if len(candidates) == 0 {
+		return nil
+	}
+	bestByNode := make(map[string]NodeScore, len(candidates))
+	for _, candidate := range candidates {
+		key := strings.TrimSpace(candidate.Node.ID)
+		if key == "" {
+			key = strings.TrimSpace(candidate.Node.Name)
+		}
+		if existing, ok := bestByNode[key]; ok && existing.Score >= candidate.Score {
+			continue
+		}
+		bestByNode[key] = candidate
+	}
+	ranked := make([]NodeScore, 0, len(bestByNode))
+	for _, candidate := range bestByNode {
+		ranked = append(ranked, candidate)
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].Score == ranked[j].Score {
+			return ranked[i].Node.ID < ranked[j].Node.ID
+		}
+		return ranked[i].Score > ranked[j].Score
+	})
+	return ranked
+}
+
+func (s *IntentGuidanceService) promptDecision(topicName string, ranked []NodeScore) GuidanceDecision {
+	trimmed := ranked
+	if len(trimmed) > s.opts.MaxOptions {
+		trimmed = trimmed[:s.opts.MaxOptions]
+	}
+	options := renderGuidanceOptions(trimmed)
+	if prompt, ok := renderEmbeddedPrompt(guidancePromptTemplateFile, map[string]string{
+		"TopicName": strings.TrimSpace(topicName),
+		"Options":   options,
+	}); ok {
+		return NewGuidanceDecisionPrompt(prompt)
+	}
+	// 模板不可用时的内联兜底，文案与 guidance_prompt.txt 同义。
+	var b strings.Builder
+	b.WriteString("关于")
+	b.WriteString(strings.TrimSpace(topicName))
+	b.WriteString("，在知识库中检索到了以下内容：\n")
+	b.WriteString(options)
+	b.WriteString("\n\n请问你具体想了解哪个？请回复数字选择（可多选，如 1,2），或回复“都/全部”")
+	return NewGuidanceDecisionPrompt(b.String())
+}
+
+// renderGuidanceOptions 渲染澄清选项，展示优先使用完整路径，兜底节点名或 ID。
+func renderGuidanceOptions(ranked []NodeScore) string {
+	var b strings.Builder
+	for i, candidate := range ranked {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(fmt.Sprintf("%d) %s", i+1, resolveGuidanceOptionDisplay(candidate.Node)))
+	}
+	return b.String()
+}
+
+func resolveGuidanceOptionDisplay(node IntentNode) string {
+	if fullPath := strings.TrimSpace(node.FullPath); fullPath != "" {
+		return fullPath
+	}
+	if name := strings.TrimSpace(node.Name); name != "" {
+		return name
+	}
+	return node.ID
 }
 
 func (s *IntentGuidanceService) loadNodeIndex(ctx context.Context) map[string]IntentNode {
@@ -938,35 +1090,6 @@ func (s *IntentGuidanceService) loadNodeIndex(ctx context.Context) map[string]In
 	return index
 }
 
-func resolveSystemNodeID(node IntentNode, nodeIndex map[string]IntentNode) string {
-	current := node
-	parent := fetchParentNode(current, nodeIndex)
-	for {
-		if current.Level == 1 && (parent.ID == "" || parent.Level == 0) {
-			return current.ID
-		}
-		if parent.ID == "" {
-			return current.ID
-		}
-		current = parent
-		parent = fetchParentNode(current, nodeIndex)
-	}
-}
-
-func resolveDomainName(node IntentNode, nodeIndex map[string]IntentNode) string {
-	current := node
-	for {
-		if current.Level == 0 {
-			return strings.TrimSpace(current.Name)
-		}
-		parent := fetchParentNode(current, nodeIndex)
-		if parent.ID == "" {
-			return ""
-		}
-		current = parent
-	}
-}
-
 func fetchParentNode(node IntentNode, nodeIndex map[string]IntentNode) IntentNode {
 	if len(nodeIndex) == 0 {
 		return IntentNode{}
@@ -982,19 +1105,9 @@ func fetchParentNode(node IntentNode, nodeIndex map[string]IntentNode) IntentNod
 	return parent
 }
 
-func buildSystemAliases(systemName string) []string {
-	systemName = strings.TrimSpace(systemName)
-	if systemName == "" {
-		return nil
-	}
-	alias := normalizeText(systemName)
-	if alias == "" {
-		return nil
-	}
-	return []string{alias}
-}
-
-// LLMAmbiguityChecker uses an LLM to confirm borderline ambiguity cases.
+// LLMAmbiguityChecker uses an LLM to confirm whether ambiguous candidates truly need clarification.
+// 规则层只能发现候选路径重名，是否真的要用户二选一由 LLM 判断；
+// 纯 RAG 是只读流程，判不出来时一律放行联合检索，不能因为模型异常反复阻断用户。
 type LLMAmbiguityChecker struct {
 	llm chat.LLMService
 }
@@ -1004,60 +1117,78 @@ func NewLLMAmbiguityChecker(llm chat.LLMService) *LLMAmbiguityChecker {
 	return &LLMAmbiguityChecker{llm: llm}
 }
 
-// CheckAmbiguity calls the LLM and returns true when clarification is needed.
+// CheckAmbiguity 调用 LLM 确认是否存在歧义，响应非法、缺字段或调用失败时返回 false。
 func (c *LLMAmbiguityChecker) CheckAmbiguity(ctx context.Context, question string, ranked []NodeScore) bool {
 	if c == nil || c.llm == nil || len(ranked) == 0 {
-		return true
+		return false
 	}
+	prompt := buildAmbiguityCheckPrompt(question, ranked)
 	req := chat.Request{
-		Messages: []chat.Message{
-			chat.NewSystemMessage("你是一个歧义确认器。只返回严格 JSON 对象，例如 {\"ambiguous\":true,\"reason\":\"...\"}。"),
-			chat.NewUserMessage(buildAmbiguityCheckPrompt(question, ranked)),
-		},
+		Messages:    []chat.Message{chat.NewUserMessage(prompt)},
 		Temperature: floatPtr(0.1),
 		TopP:        floatPtr(0.3),
 		Thinking:    boolPtr(false),
 	}
 	raw, err := chat.ChatWithTier(ctx, c.llm, req, "fast")
 	if err != nil {
-		slog.Warn("ambiguity check llm failed, fallback to clarify", "err", err)
-		return true
+		slog.Warn("歧义确认 LLM 调用失败, 降级为跳过澄清", "question", question, "err", err)
+		return false
 	}
 	cleaned := stripCodeFence(strings.TrimSpace(raw))
-	if cleaned == "" {
-		return true
-	}
 	var result struct {
-		Ambiguous bool   `json:"ambiguous"`
+		Ambiguous *bool  `json:"ambiguous"`
 		Reason    string `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
-		slog.Warn("ambiguity check llm returned invalid json, fallback to clarify", "raw", raw, "err", err)
-		return true
+		slog.Warn("歧义确认 LLM 返回非 JSON 对象, 降级为跳过澄清", "raw", raw, "err", err)
+		return false
 	}
-	return result.Ambiguous
+	if result.Ambiguous == nil {
+		slog.Warn("歧义确认 LLM 返回缺少 ambiguous 字段, 降级为跳过澄清", "raw", raw)
+		return false
+	}
+	slog.Info("LLM 歧义确认结果", "ambiguous", *result.Ambiguous, "reason", result.Reason, "question", question)
+	return *result.Ambiguous
 }
 
+// guidanceAmbiguityCheckTemplateFile 对齐 Java prompt/guidance-ambiguity-check.st。
+const guidanceAmbiguityCheckTemplateFile = "guidance_ambiguity_check.txt"
+
+// buildAmbiguityCheckPrompt 渲染歧义确认提示词；模板不可用时回退内联精简版。
 func buildAmbiguityCheckPrompt(question string, ranked []NodeScore) string {
-	var b strings.Builder
-	b.WriteString("问题：")
-	b.WriteString(strings.TrimSpace(question))
-	b.WriteString("\n候选：\n")
-	for _, candidate := range ranked {
-		b.WriteString("- 品类ID: ")
-		b.WriteString(candidate.Node.ID)
-		b.WriteString(", 名称: ")
-		b.WriteString(candidate.Node.Name)
-		if candidate.Node.Description != "" {
-			b.WriteString(", 描述: ")
-			b.WriteString(candidate.Node.Description)
-		}
-		b.WriteString(", 分数: ")
-		b.WriteString(fmt.Sprintf("%.2f", candidate.Score))
-		b.WriteString("\n")
+	candidates := buildAmbiguityCandidatesText(ranked)
+	if prompt, ok := renderEmbeddedPrompt(guidanceAmbiguityCheckTemplateFile, map[string]string{
+		"Question":   strings.TrimSpace(question),
+		"Candidates": candidates,
+	}); ok {
+		return prompt
 	}
-	b.WriteString("请判断是否存在明显歧义，只返回 JSON。")
+	var b strings.Builder
+	b.WriteString("用户问题：")
+	b.WriteString(strings.TrimSpace(question))
+	b.WriteString("\n\n以下是意图分类命中的候选意图及其完整路径：\n")
+	b.WriteString(candidates)
+	b.WriteString("\n\n请判断：用户是否必须先在这些候选路径中选定一个，我们才能正确检索？拿不准时返回 false，让检索照常进行。\n")
+	b.WriteString("以 JSON 格式输出：{\"ambiguous\": true/false, \"category_ids\": [\"最匹配或需要选择的候选意图ID\"], \"reason\": \"判断理由\"}")
 	return b.String()
+}
+
+func buildAmbiguityCandidatesText(ranked []NodeScore) string {
+	lines := make([]string, 0, len(ranked))
+	for _, candidate := range ranked {
+		node := candidate.Node
+		fullPath := strings.TrimSpace(node.FullPath)
+		if fullPath == "" {
+			fullPath = strings.TrimSpace(node.Name)
+		}
+		line := fmt.Sprintf("- 意图ID: %s, 名称: %s, 完整路径: %s", node.ID, node.Name, fullPath)
+		if description := strings.TrimSpace(node.Description); description != "" {
+			line += ", 说明: " + description
+		}
+		line += fmt.Sprintf(", 匹配分数: %.2f", candidate.Score)
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func boolPtr(v bool) *bool {

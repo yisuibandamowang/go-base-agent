@@ -207,7 +207,11 @@ func (p *Pipeline) StreamChat(ctx context.Context, question, conversationID, tas
 	}
 
 	if p.guidance != nil {
+		guidanceSpan := p.startTraceNode(ctx, traceRun, "", "guidance-detect", "GUIDANCE", 0)
 		decision := p.guidance.DetectAmbiguity(ctx, q, resolvedSubIntents)
+		if guidanceSpan != nil {
+			guidanceSpan.finish(traceStatusSuccess, nil)
+		}
 		if decision.Action == GuidanceActionPrompt && strings.TrimSpace(decision.Prompt) != "" {
 			sendTitleOnComplete := shouldSendTitleOnComplete(persistenceCtx, p.memory, conversationID)
 			_, _ = appendConversationMessage(persistenceCtx, p.memory, conversationID, chat.NewUserMessage(question))

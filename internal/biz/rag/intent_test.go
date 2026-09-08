@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -212,102 +213,141 @@ func totalNodeScores(subIntents []SubQuestionIntent) int {
 	return total
 }
 
-func TestIntentGuidanceServicePromptsOnAmbiguousScores(t *testing.T) {
-	guide := NewIntentGuidanceService(GuidanceOptions{
-		Enabled:             true,
-		AmbiguityScoreRatio: 0.8,
-		AmbiguityMargin:     0.15,
-		MaxOptions:          3,
-	})
-	decision := guide.DetectAmbiguity(context.Background(), "会员怎么查", []SubQuestionIntent{{
-		SubQuestion: "会员怎么查",
+func TestIntentGuidanceServicePromptsOnSameLeafNameAcrossSystems(t *testing.T) {
+	guide := NewIntentGuidanceService(GuidanceOptions{Enabled: true, MaxOptions: 6})
+	guide.SetIntentNodeLister(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
+		{BaseModel: db.BaseModel{ID: "1"}, IntentCode: "group", Name: "集团信息化", Level: 0, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "2"}, IntentCode: "oa", ParentCode: "group", Name: "OA系统", Level: 1, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "3"}, IntentCode: "ins", ParentCode: "group", Name: "保险系统", Level: 1, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "4"}, IntentCode: "oa_security", ParentCode: "oa", Name: "数据安全", Level: 2, Kind: int16(IntentKindKB), Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "5"}, IntentCode: "ins_security", ParentCode: "ins", Name: "数据安全", Level: 2, Kind: int16(IntentKindKB), Enabled: 1},
+	}})
+	guide.SetAmbiguityChecker(&recordingAmbiguityChecker{ambiguous: true})
+
+	decision := guide.DetectAmbiguity(context.Background(), "数据安全方案有哪些", []SubQuestionIntent{{
+		SubQuestion: "数据安全方案有哪些",
 		NodeScores: []NodeScore{
-			{Node: IntentNode{ID: "a", Name: "会员等级"}, Score: 0.9},
-			{Node: IntentNode{ID: "b", Name: "会员积分"}, Score: 0.82},
+			{Node: IntentNode{ID: "oa_security", ParentCode: "oa", Name: "数据安全", Kind: IntentKindKB}, Score: 0.62},
+			{Node: IntentNode{ID: "ins_security", ParentCode: "ins", Name: "数据安全", Kind: IntentKindKB}, Score: 0.60},
 		},
 	}})
 
 	if decision.Action != GuidanceActionPrompt {
 		t.Fatalf("expected prompt decision, got %+v", decision)
 	}
-	if !strings.Contains(decision.Prompt, "会员等级") || !strings.Contains(decision.Prompt, "会员积分") {
-		t.Fatalf("expected prompt to include candidates, got %q", decision.Prompt)
+	for _, fragment := range []string{
+		"关于数据安全",
+		"1) 集团信息化 > OA系统 > 数据安全",
+		"2) 集团信息化 > 保险系统 > 数据安全",
+		"请回复数字选择（可多选，如 1,2）",
+	} {
+		if !strings.Contains(decision.Prompt, fragment) {
+			t.Fatalf("expected guidance prompt to contain %q, got %q", fragment, decision.Prompt)
+		}
 	}
 }
 
-func TestIntentGuidanceServiceSkipsWhenQuestionContainsDomainName(t *testing.T) {
-	guide := NewIntentGuidanceService(GuidanceOptions{
-		Enabled:             true,
-		AmbiguityScoreRatio: 0.8,
-		AmbiguityMargin:     0.15,
-		MaxOptions:          3,
-	})
-	guide.SetIntentNodeLister(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
-		{BaseModel: db.BaseModel{ID: "domain"}, IntentCode: "member", Name: "会员系统", Level: 0, Enabled: 1},
-		{BaseModel: db.BaseModel{ID: "cat-a"}, IntentCode: "member_level", ParentCode: "member", Name: "等级", Level: 1, Enabled: 1},
-		{BaseModel: db.BaseModel{ID: "cat-b"}, IntentCode: "member_points", ParentCode: "member", Name: "积分", Level: 1, Enabled: 1},
-	}})
+func TestIntentGuidanceServiceSkipsWhenNoPathNameConflict(t *testing.T) {
+	guide := NewIntentGuidanceService(GuidanceOptions{Enabled: true, MaxOptions: 6})
+	guide.SetAmbiguityChecker(&recordingAmbiguityChecker{ambiguous: true})
 
-	decision := guide.DetectAmbiguity(context.Background(), "会员系统怎么查", []SubQuestionIntent{{
-		SubQuestion: "会员系统怎么查",
-		NodeScores: []NodeScore{
-			{Node: IntentNode{ID: "topic-a", IntentCode: "member_level_detail", Name: "会员等级", ParentCode: "member_level", Level: 2, Kind: IntentKindKB}, Score: 0.9},
-			{Node: IntentNode{ID: "topic-b", IntentCode: "member_points_detail", Name: "会员积分", ParentCode: "member_points", Level: 2, Kind: IntentKindKB}, Score: 0.82},
-		},
-	}})
-
-	if decision.Action != GuidanceActionNone {
-		t.Fatalf("expected domain name to skip guidance, got %+v", decision)
-	}
-}
-
-func TestIntentGuidanceServiceUsesCheckerForBorderlineRatio(t *testing.T) {
-	checker := &recordingAmbiguityChecker{ambiguous: true}
-	guide := NewIntentGuidanceService(GuidanceOptions{
-		Enabled:             true,
-		AmbiguityScoreRatio: 0.8,
-		AmbiguityMargin:     0.15,
-		MaxOptions:          3,
-	})
-	guide.SetAmbiguityChecker(checker)
-
+	// 分数接近但叶子名称与中间节点名称均不同，不构成路径重名，不应触发澄清。
 	decision := guide.DetectAmbiguity(context.Background(), "会员怎么查", []SubQuestionIntent{{
 		SubQuestion: "会员怎么查",
 		NodeScores: []NodeScore{
 			{Node: IntentNode{ID: "a", Name: "会员等级", Kind: IntentKindKB}, Score: 0.9},
-			{Node: IntentNode{ID: "b", Name: "会员积分", Kind: IntentKindKB}, Score: 0.7},
+			{Node: IntentNode{ID: "b", Name: "会员积分", Kind: IntentKindKB}, Score: 0.82},
+		},
+	}})
+
+	if decision.Action != GuidanceActionNone {
+		t.Fatalf("expected no conflict without path name collision, got %+v", decision)
+	}
+}
+
+func TestIntentGuidanceServiceMidPathConflictRequiresQuestionMention(t *testing.T) {
+	guide := NewIntentGuidanceService(GuidanceOptions{Enabled: true, MaxOptions: 6})
+	guide.SetIntentNodeLister(fakeIntentNodeLister{nodes: []intentModel.IntentNode{
+		{BaseModel: db.BaseModel{ID: "1"}, IntentCode: "group", Name: "集团信息化", Level: 0, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "2"}, IntentCode: "oa", ParentCode: "group", Name: "OA系统", Level: 1, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "3"}, IntentCode: "ins", ParentCode: "group", Name: "保险系统", Level: 1, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "4"}, IntentCode: "oa_rule", ParentCode: "oa", Name: "数据制度", Level: 2, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "5"}, IntentCode: "ins_rule", ParentCode: "ins", Name: "数据制度", Level: 2, Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "6"}, IntentCode: "oa_rule_doc", ParentCode: "oa_rule", Name: "制度文档", Level: 3, Kind: int16(IntentKindKB), Enabled: 1},
+		{BaseModel: db.BaseModel{ID: "7"}, IntentCode: "ins_rule_doc", ParentCode: "ins_rule", Name: "制度清单", Level: 3, Kind: int16(IntentKindKB), Enabled: 1},
+	}})
+	checker := &recordingAmbiguityChecker{ambiguous: true}
+	guide.SetAmbiguityChecker(checker)
+
+	scores := []NodeScore{
+		{Node: IntentNode{ID: "oa_rule_doc", ParentCode: "oa_rule", Name: "制度文档", Kind: IntentKindKB}, Score: 0.72},
+		{Node: IntentNode{ID: "ins_rule_doc", ParentCode: "ins_rule", Name: "制度清单", Kind: IntentKindKB}, Score: 0.70},
+	}
+
+	// 中间节点「数据制度」重名，但问题没有提到该名称，用户并不在这个岔路口上。
+	decision := guide.DetectAmbiguity(context.Background(), "制度文档包含什么", []SubQuestionIntent{{
+		SubQuestion: "制度文档包含什么",
+		NodeScores:  scores,
+	}})
+	if decision.Action != GuidanceActionNone {
+		t.Fatalf("expected mid-path conflict to require question mention, got %+v", decision)
+	}
+	if checker.calls != 0 {
+		t.Fatalf("expected no checker call without mention, got %d", checker.calls)
+	}
+
+	// 问题明确提到「数据制度」时，中间节点重名升级为冲突并交由 LLM 确认。
+	decision = guide.DetectAmbiguity(context.Background(), "数据制度有哪些要求", []SubQuestionIntent{{
+		SubQuestion: "数据制度有哪些要求",
+		NodeScores:  scores,
+	}})
+	if decision.Action != GuidanceActionPrompt {
+		t.Fatalf("expected prompt decision when question mentions mid-path name, got %+v", decision)
+	}
+	if !strings.Contains(decision.Prompt, "关于数据制度") {
+		t.Fatalf("expected topic to be the conflicting mid-path name, got %q", decision.Prompt)
+	}
+}
+
+func TestIntentGuidanceServiceRequiresLLMConfirmation(t *testing.T) {
+	checker := &recordingAmbiguityChecker{ambiguous: false}
+	guide := NewIntentGuidanceService(GuidanceOptions{Enabled: true, MaxOptions: 6})
+	guide.SetAmbiguityChecker(checker)
+
+	decision := guide.DetectAmbiguity(context.Background(), "数据安全方案有哪些", []SubQuestionIntent{{
+		SubQuestion: "数据安全方案有哪些",
+		NodeScores: []NodeScore{
+			{Node: IntentNode{ID: "a", Name: "数据安全", Kind: IntentKindKB}, Score: 0.9},
+			{Node: IntentNode{ID: "b", Name: "数据安全", Kind: IntentKindKB}, Score: 0.88},
 		},
 	}})
 
 	if checker.calls != 1 {
 		t.Fatalf("expected checker to be called once, got %d", checker.calls)
 	}
-	if decision.Action != GuidanceActionPrompt {
-		t.Fatalf("expected checker-confirmed ambiguity to prompt, got %+v", decision)
+	if decision.Action != GuidanceActionNone {
+		t.Fatalf("expected LLM-rejected ambiguity to skip clarification, got %+v", decision)
 	}
 }
 
 func TestIntentGuidanceServiceDefaultsMaxOptionsLikeJava(t *testing.T) {
 	guide := NewIntentGuidanceService(GuidanceOptions{Enabled: true})
+	guide.SetAmbiguityChecker(&recordingAmbiguityChecker{ambiguous: true})
 
-	decision := guide.DetectAmbiguity(context.Background(), "会员怎么查", []SubQuestionIntent{{
-		SubQuestion: "会员怎么查",
-		NodeScores: []NodeScore{
-			{Node: IntentNode{ID: "a", Name: "候选1", Kind: IntentKindKB}, Score: 0.97},
-			{Node: IntentNode{ID: "b", Name: "候选2", Kind: IntentKindKB}, Score: 0.96},
-			{Node: IntentNode{ID: "c", Name: "候选3", Kind: IntentKindKB}, Score: 0.95},
-			{Node: IntentNode{ID: "d", Name: "候选4", Kind: IntentKindKB}, Score: 0.94},
-			{Node: IntentNode{ID: "e", Name: "候选5", Kind: IntentKindKB}, Score: 0.93},
-			{Node: IntentNode{ID: "f", Name: "候选6", Kind: IntentKindKB}, Score: 0.92},
-			{Node: IntentNode{ID: "g", Name: "候选7", Kind: IntentKindKB}, Score: 0.91},
-		},
+	scores := make([]NodeScore, 0, 7)
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		scores = append(scores, NodeScore{Node: IntentNode{ID: id, Name: "候选", Kind: IntentKindKB}, Score: 0.9})
+	}
+	decision := guide.DetectAmbiguity(context.Background(), "候选是什么", []SubQuestionIntent{{
+		SubQuestion: "候选是什么",
+		NodeScores:  scores,
 	}})
 
 	if decision.Action != GuidanceActionPrompt {
 		t.Fatalf("expected prompt decision, got %+v", decision)
 	}
-	if !strings.Contains(decision.Prompt, "候选6") || strings.Contains(decision.Prompt, "候选7") {
-		t.Fatalf("expected Java default max options 6, got %q", decision.Prompt)
+	if got := strings.Count(decision.Prompt, ") "); got != 6 {
+		t.Fatalf("expected Java default max options 6, got %d options in %q", got, decision.Prompt)
 	}
 }
 
@@ -323,6 +363,71 @@ func TestLLMAmbiguityCheckerParsesAmbiguousFlag(t *testing.T) {
 		{Node: IntentNode{ID: "b", Name: "会员积分"}, Score: 0.7},
 	}) {
 		t.Fatal("expected ambiguous=false to skip guidance")
+	}
+}
+
+// TestLLMAmbiguityCheckerFailsOpenOnErrors 验证调用失败、非法 JSON、缺 ambiguous 字段时
+// 一律放行检索（返回 false），对齐 Java AmbiguityLLMChecker 的降级方向。
+func TestLLMAmbiguityCheckerFailsOpenOnErrors(t *testing.T) {
+	ranked := []NodeScore{
+		{Node: IntentNode{ID: "a", Name: "数据安全"}, Score: 0.9},
+		{Node: IntentNode{ID: "b", Name: "数据安全"}, Score: 0.88},
+	}
+
+	failing := NewLLMAmbiguityChecker(&fakeLLMService{
+		chatFn: func(ctx context.Context, req chat.Request) (string, error) {
+			return "", fmt.Errorf("llm unavailable")
+		},
+	})
+	if failing.CheckAmbiguity(context.Background(), "数据安全方案", ranked) {
+		t.Fatal("expected llm error to fail open")
+	}
+
+	invalidJSON := NewLLMAmbiguityChecker(&fakeLLMService{
+		chatFn: func(ctx context.Context, req chat.Request) (string, error) {
+			return "not json", nil
+		},
+	})
+	if invalidJSON.CheckAmbiguity(context.Background(), "数据安全方案", ranked) {
+		t.Fatal("expected invalid json to fail open")
+	}
+
+	missingField := NewLLMAmbiguityChecker(&fakeLLMService{
+		chatFn: func(ctx context.Context, req chat.Request) (string, error) {
+			return `{"reason":"缺少判定字段"}`, nil
+		},
+	})
+	if missingField.CheckAmbiguity(context.Background(), "数据安全方案", ranked) {
+		t.Fatal("expected missing ambiguous field to fail open")
+	}
+}
+
+// TestLLMAmbiguityCheckerRendersJavaTemplate 验证歧义确认提示词渲染了 Java
+// guidance-ambiguity-check.st 的完整判定规则。
+func TestLLMAmbiguityCheckerRendersJavaTemplate(t *testing.T) {
+	var captured string
+	checker := NewLLMAmbiguityChecker(&fakeLLMService{
+		chatFn: func(ctx context.Context, req chat.Request) (string, error) {
+			captured = req.Messages[0].Content
+			return `{"ambiguous":true,"reason":"候选路径同名"}`, nil
+		},
+	})
+
+	if !checker.CheckAmbiguity(context.Background(), "数据安全方案", []NodeScore{
+		{Node: IntentNode{ID: "oa", Name: "数据安全", FullPath: "集团信息化 > OA系统 > 数据安全"}, Score: 0.62},
+	}) {
+		t.Fatal("expected ambiguous=true to require clarification")
+	}
+	for _, fragment := range []string{
+		"用户问题：数据安全方案",
+		"完整路径: 集团信息化 > OA系统 > 数据安全",
+		"判定规则：",
+		"拿不准时返回 false",
+		`{"ambiguous": true/false`,
+	} {
+		if !strings.Contains(captured, fragment) {
+			t.Fatalf("expected ambiguity check prompt to contain %q, got %q", fragment, captured)
+		}
 	}
 }
 

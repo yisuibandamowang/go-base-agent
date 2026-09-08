@@ -1,5 +1,6 @@
 # go-base-agent — Go 复刻开发日志
 
+- 2026-09-08：对齐 Java 5a8ee82c 的意图歧义澄清重构：判定不再看分数比例，改为「候选路径重名识别」——取唯一子问题达到准入分（0.35）的 KB 候选，按节点去重降序，以最高分候选为主沿 parentId 上溯构建根→叶路径（visited 兜住父子环），叶子重名直接算冲突，分叉后的中间节点重名还要求用户问题中提到该名称，公共前缀不算冲突，最短可比较名 2 字；找到冲突组后必须经 LLM 确认才出澄清。澄清文案与歧义确认提示词改为内嵌模板 `guidance_prompt.txt` / `guidance_ambiguity_check.txt`（与 Java 逐字一致），选项展示优先完整路径并引导多选/「都/全部」。LLM 歧义确认降级方向改为放行（调用失败、非法 JSON、缺 ambiguous 字段一律 false），与 Java「纯 RAG 只读流程不能因模型异常阻断用户」对齐。`ambiguity-score-ratio/ambiguity-margin` 停用（保留兼容 yaml），配置默认值对齐 `enabled=true`、`max-options=6`；pipeline 增加 guidance-detect 追踪节点；`MergeIntentGroup` 对齐 Java NodeScoreFilters（MCP 要求 toolId 非空、SYSTEM 不参与检索分组）。
 - 2026-09-08：对齐 Java 意图分类提示词；`buildIntentClassifierPrompt` 改为渲染内嵌模板 `prompts/intent_classifier.txt`（内容与 Java `prompt/intent-classifier.st` 逐字一致，占位符转为 Go text/template），补齐角色定义、实体/主题/交互三向判断流程、数量控制（默认 1 个最多 2 个、歧义同名分类最多 3 个）、评分区间表、0.4-0.7 歧义例外与输出示例等完整规则；模板缺失或渲染失败时回退原内联精简规则，分类链路不受影响。
 - 2026-08-23：补齐智能体提示词跨实例实时生效；提示词解析器将最终生效槽位写入 Redis，并在运行时优先读取共享缓存，后台修改后其他实例可立即看到最新提示词，Redis 异常时回退到本地内存提示词。
 - 2026-08-23：补齐旧版 `.xls` 导入；默认解析器注册表和主服务均支持 `application/vnd.ms-excel`，使用纯 Go BIFF 读取器解析工作表，并复用 XLSX 的表头、空行/列和来源规范化逻辑。

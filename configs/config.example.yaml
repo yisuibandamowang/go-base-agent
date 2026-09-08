@@ -171,10 +171,13 @@ rag:
         web-search: 0.5
 
   guidance:
-    enabled: false
+    # 是否启用引导式问答（对齐 Java GuidanceProperties 默认 true）
+    enabled: true
+    # 以下两项对齐 Java：歧义判定已改为候选路径重名触发，这两个值当前不参与判定，保留以兼容既有 yaml
     ambiguity-score-ratio: 0.8
     ambiguity-margin: 0.15
-    max-options: 3
+    # 单次最多展示的选项数量
+    max-options: 6
 
   answer-cache:
     enabled: true
