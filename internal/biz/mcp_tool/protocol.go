@@ -70,9 +70,18 @@ type listToolsResult struct {
 }
 
 type toolDesc struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	InputSchema inputSchema `json:"inputSchema"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema inputSchema     `json:"inputSchema"`
+	// Annotations 工具自报是读还是写：调用方按 readOnlyHint 决定要不要拦下来让用户确认。
+	// 对齐 Java McpToolAnnotations.READ_ONLY / WRITE。
+	Annotations *toolAnnotations `json:"annotations,omitempty"`
+}
+
+// toolAnnotations 对齐 MCP 工具注解约定；title 供写型工具展示用途。
+type toolAnnotations struct {
+	ReadOnlyHint bool   `json:"readOnlyHint"`
+	Title        string `json:"title,omitempty"`
 }
 
 type inputSchema struct {
@@ -102,6 +111,10 @@ type callToolResult struct {
 type toolContent struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	// IsError 标记本段内容是业务错误提示（参数校验失败、上游查询失败等），
+	// 不序列化进 MCP 响应；server 据此把整条结果置 isError=true。
+	// 对齐 Java McpToolResults.error 的 isError 语义。
+	IsError bool `json:"-"`
 }
 
 // pingResult returns an empty object.

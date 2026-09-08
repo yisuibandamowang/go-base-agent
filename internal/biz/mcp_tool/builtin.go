@@ -49,6 +49,7 @@ func newSalesQueryTool() *Tool {
 			"limit":       {Type: "integer", Description: "返回记录数限制，默认10", Default: 10},
 		},
 		Required: []string{},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			_ = ctx
 			region := strings.TrimSpace(stringArg(args, "region"))
@@ -97,6 +98,7 @@ func newWeatherQueryTool() *Tool {
 			"days":      {Type: "integer", Description: "预报天数，仅forecast模式有效，默认3天，最多7天", Default: 3},
 		},
 		Required: []string{"city"},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			_ = ctx
 			city := strings.TrimSpace(stringArg(args, "city"))
@@ -147,6 +149,7 @@ func newYouComSearchTool(apiURL, apiKey string, client *http.Client) *Tool {
 			"freshness": {Type: "string", Description: "结果时效过滤：day、week、month、year，不传则不限", Enum: []string{"day", "week", "month", "year"}},
 		},
 		Required: []string{"query"},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			query := strings.TrimSpace(stringArg(args, "query"))
 			count := intArg(args, "count")

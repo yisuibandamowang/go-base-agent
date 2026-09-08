@@ -19,7 +19,10 @@ type Tool struct {
 	Properties  map[string]propDesc
 	Required    []string
 	Domains     []string
-	Execute     func(ctx context.Context, args map[string]interface{}) ([]toolContent, error)
+	// ReadOnlyHint 必须显式声明（工具自报是读还是写，调用方按此决定是否拦下让用户确认）；
+	// nil 表示未声明，NewServer 会拒绝注册，对齐 Java requireReadOnlyHint 启动校验。
+	ReadOnlyHint *bool
+	Execute      func(ctx context.Context, args map[string]interface{}) ([]toolContent, error)
 }
 
 func (t *Tool) toDesc() toolDesc {
@@ -30,6 +33,9 @@ func (t *Tool) toDesc() toolDesc {
 			Type:       "object",
 			Properties: t.Properties,
 			Required:   t.Required,
+		},
+		Annotations: &toolAnnotations{
+			ReadOnlyHint: t.ReadOnlyHint != nil && *t.ReadOnlyHint,
 		},
 	}
 }
@@ -78,6 +84,7 @@ func searchKBTool(vectorDB *gorm.DB, emb embedding.Service, kbRepo *repo.Knowled
 			"top_k":    {Type: "integer", Description: "返回结果数量，默认5"},
 		},
 		Required: []string{"question"},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			question, _ := args["question"].(string)
 			if question == "" {
@@ -131,6 +138,7 @@ func searchDocsTool(docRepo *repo.KnowledgeDocumentRepo) *Tool {
 			"kb_id":   {Type: "string", Description: "可选：知识库ID"},
 		},
 		Required: []string{"keyword"},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			keyword, _ := args["keyword"].(string)
 			if keyword == "" {
@@ -168,6 +176,7 @@ func listKBsTool(kbRepo *repo.KnowledgeBaseRepo) *Tool {
 		Description: "列出所有可用的知识库。",
 		Properties:  map[string]propDesc{},
 		Required:    nil,
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			kbs, _, err := kbRepo.List(ctx, 1, 100, "")
 			if err != nil {
@@ -195,6 +204,7 @@ func listChunksTool(chunkRepo *repo.KnowledgeChunkRepo) *Tool {
 			"doc_id": {Type: "string", Description: "文档ID"},
 		},
 		Required: []string{"doc_id"},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			docID, _ := args["doc_id"].(string)
 			if docID == "" {
@@ -249,8 +259,13 @@ func searchVector(ctx context.Context, vectorDB *gorm.DB, collectionName string,
 }
 
 func errorContent(msg string) []toolContent {
-	return []toolContent{{Type: "text", Text: msg}}
+	// 业务错误（参数校验失败、上游查询失败）必须置错误标记，
+	// server 据此把结果置 isError=true，调用方才能把错误从事实数据中分离
+	return []toolContent{{Type: "text", Text: msg, IsError: true}}
 }
+
+// readOnlyHint 声明只读工具的便捷指针（Tool.ReadOnlyHint 需要显式非 nil）。
+func readOnlyHint(v bool) *bool { return &v }
 
 func vecToString(vec []float32) string {
 	if len(vec) == 0 {

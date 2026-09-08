@@ -77,6 +77,7 @@ func newTicketQueryTool() *Tool {
 			"limit":        {Type: "integer", Description: "返回记录数限制，默认10", Default: 10},
 		},
 		Required: []string{},
+		ReadOnlyHint: readOnlyHint(true),
 		Execute: func(ctx context.Context, args map[string]interface{}) ([]toolContent, error) {
 			_ = ctx
 			region := strings.TrimSpace(stringArg(args, "region"))

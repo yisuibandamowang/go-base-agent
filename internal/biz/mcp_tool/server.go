@@ -3,6 +3,7 @@ package mcp_tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,8 +18,19 @@ type Server struct {
 }
 
 // NewServer creates a new MCP server.
-func NewServer(tools []*Tool) *Server {
-	return &Server{tools: tools}
+// 工具必须自报是读还是写：调用方按 readOnlyHint 决定要不要拦下来让用户确认，
+// 未声明的工具拒绝启动（对齐 Java requireReadOnlyHint 启动校验）。
+func NewServer(tools []*Tool) (*Server, error) {
+	undeclared := make([]string, 0)
+	for _, t := range tools {
+		if t == nil || t.ReadOnlyHint == nil {
+			undeclared = append(undeclared, t.Name)
+		}
+	}
+	if len(undeclared) > 0 {
+		return nil, fmt.Errorf("以下 MCP 工具未声明 readOnlyHint，请在注册时显式写明只读或写操作: %s", strings.Join(undeclared, ", "))
+	}
+	return &Server{tools: tools}, nil
 }
 
 // ServeHTTP implements http.Handler, handles POST requests with JSON-RPC payloads.
@@ -102,14 +114,27 @@ func (s *Server) handleCallTool(ctx context.Context, id json.RawMessage, raw jso
 			if err != nil {
 				slog.Error("mcp tool execution failed", "tool", params.Name, "err", err)
 				return newSuccessResp(id, callToolResult{
-					Content: []toolContent{{Type: "text", Text: "工具执行失败: " + err.Error()}},
+					Content: []toolContent{{Type: "text", Text: "工具执行失败: " + err.Error(), IsError: true}},
 					IsError: true,
 				})
 			}
-			return newSuccessResp(id, callToolResult{Content: content})
+			// 业务错误以 errorContent 返回（带标记、err 为 nil），据此置 isError=true
+			return newSuccessResp(id, callToolResult{
+				Content: content,
+				IsError: hasErrorContent(content),
+			})
 		}
 	}
 	return newErrorResp(id, ErrMethod, "unknown tool: "+params.Name)
+}
+
+func hasErrorContent(content []toolContent) bool {
+	for _, item := range content {
+		if item.IsError {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

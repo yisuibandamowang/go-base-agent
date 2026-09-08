@@ -43,7 +43,11 @@ func main() {
 
 	tools := mcp_tool.RegisterTools(gormDB, embService, kbRepo, docRepo, chunkRepo)
 
-	mcpSrv := mcp_tool.NewServer(tools)
+	mcpSrv, err := mcp_tool.NewServer(tools)
+	if err != nil {
+		slog.Error("mcp-server 工具注册校验失败", "err", err)
+		os.Exit(1)
+	}
 
 	port := 9099
 	if len(cfg.RAG.MCP.Servers) > 0 {
