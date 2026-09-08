@@ -425,9 +425,10 @@ func main() {
 		searchChannels = append(searchChannels, vectorGlobalChannel)
 	}
 	webSearchCfg := cfg.RAG.Search.Channels.WebSearch
+	// API Key 优先取配置，为空回退环境变量 YDC_API_KEY（对齐 Java WebSearchChannel.resolveApiKey）
 	searchChannels = append(searchChannels, rag.NewYouComWebSearchChannel(
 		webSearchCfg.APIURL,
-		webSearchCfg.APIKey,
+		rag.ResolveWebSearchAPIKey(webSearchCfg.APIKey),
 		webSearchCfg.Count,
 		webSearchCfg.TimeoutSeconds,
 		webSearchCfg.Enabled,

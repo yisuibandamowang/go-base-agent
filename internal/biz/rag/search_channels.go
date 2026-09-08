@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -661,6 +662,12 @@ func firstSearchText(values ...string) string {
 	return ""
 }
 
+// webSearchMaxCount 单次检索返回结果数量上限（You.com API 约束），对齐 Java WebSearchChannel.MAX_COUNT。
+const webSearchMaxCount = 20
+
+// WebSearchEnvAPIKey API Key 环境变量名（团队约定，勿改），对齐 Java WebSearchChannel.ENV_API_KEY。
+const WebSearchEnvAPIKey = "YDC_API_KEY"
+
 // YouComWebSearchChannel recalls public web snippets from a You.com-compatible API.
 type YouComWebSearchChannel struct {
 	apiURL  string
@@ -675,6 +682,9 @@ func NewYouComWebSearchChannel(apiURL, apiKey string, count, timeoutSeconds int,
 	if count <= 0 {
 		count = 5
 	}
+	if count > webSearchMaxCount {
+		count = webSearchMaxCount
+	}
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 5
 	}
@@ -685,6 +695,15 @@ func NewYouComWebSearchChannel(apiURL, apiKey string, count, timeoutSeconds int,
 		enabled: enabled,
 		client:  &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second},
 	}
+}
+
+// ResolveWebSearchAPIKey 解析 API Key：优先取配置 api-key，为空回退环境变量 YDC_API_KEY。
+// 对齐 Java WebSearchChannel.resolveApiKey（启用条件要求可解析到 Key）。
+func ResolveWebSearchAPIKey(configured string) string {
+	if key := strings.TrimSpace(configured); key != "" {
+		return key
+	}
+	return strings.TrimSpace(os.Getenv(WebSearchEnvAPIKey))
 }
 
 func (c *YouComWebSearchChannel) Name() string            { return "YouComWebSearch" }
@@ -735,7 +754,7 @@ func parseWebSearchChunks(body []byte, max int) []RetrievedChunk {
 	items := append(payload.Results.Web, payload.Results.News...)
 	chunks := make([]RetrievedChunk, 0, len(items))
 	for _, item := range items {
-		text := strings.TrimSpace(strings.Join([]string{item.Title, item.Description, strings.Join(item.Snippets, "\n"), item.URL}, "\n"))
+		text := formatWebSearchText(item)
 		if text == "" {
 			continue
 		}
@@ -754,6 +773,32 @@ func parseWebSearchChunks(body []byte, max int) []RetrievedChunk {
 		chunks = chunks[:max]
 	}
 	return chunks
+}
+
+// formatWebSearchText 把标题、描述、摘录、来源链接编排进 text，保证下游拼接 Prompt 时引用信息不丢失。
+// 对齐 Java WebSearchChannel.toChunk：标题带【】、URL 带「来源: 」前缀，而非裸 join。
+func formatWebSearchText(item webSearchItem) string {
+	var b strings.Builder
+	if strings.TrimSpace(item.Title) != "" {
+		b.WriteString("【")
+		b.WriteString(item.Title)
+		b.WriteString("】\n")
+	}
+	if strings.TrimSpace(item.Description) != "" {
+		b.WriteString(item.Description)
+		b.WriteString("\n")
+	}
+	for _, snippet := range item.Snippets {
+		if strings.TrimSpace(snippet) != "" {
+			b.WriteString(snippet)
+			b.WriteString("\n")
+		}
+	}
+	if strings.TrimSpace(item.URL) != "" {
+		b.WriteString("来源: ")
+		b.WriteString(item.URL)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 type webSearchItem struct {

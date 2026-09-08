@@ -692,3 +692,44 @@ func TestSortRetrievedChunksByScore(t *testing.T) {
 	}
 	sortRetrievedChunksByScore(nil)
 }
+
+func TestParseWebSearchChunksFormatsEvidenceWithSourcePrefix(t *testing.T) {
+	// 对齐 Java WebSearchChannel.toChunk：标题带【】、URL 带「来源: 」前缀
+	body := []byte(`{"results":{"web":[{"url":"https://example.com/a","title":"会员Agent","description":"能力说明","snippets":["支持错误排查"]}]}}`)
+
+	chunks := parseWebSearchChunks(body, 5)
+	if len(chunks) != 1 {
+		t.Fatalf("expected one chunk, got %+v", chunks)
+	}
+	want := "【会员Agent】\n能力说明\n支持错误排查\n来源: https://example.com/a"
+	if chunks[0].Text != want {
+		t.Fatalf("unexpected formatted text: %q", chunks[0].Text)
+	}
+}
+
+func TestNewYouComWebSearchChannelClampsCount(t *testing.T) {
+	// 对齐 Java WebSearchChannel.resolveCount：超过上限 20 截断
+	channel := NewYouComWebSearchChannel("https://api.ydc-index.io/search", "key", 50, 5, true)
+	if channel.count != 20 {
+		t.Fatalf("expected count clamped to 20, got %d", channel.count)
+	}
+	// 配置非法时回退默认值
+	channel = NewYouComWebSearchChannel("https://api.ydc-index.io/search", "key", 0, 5, true)
+	if channel.count != 5 {
+		t.Fatalf("expected default count 5, got %d", channel.count)
+	}
+}
+
+func TestResolveWebSearchAPIKeyFallsBackToEnv(t *testing.T) {
+	// 对齐 Java WebSearchChannel.resolveApiKey：优先配置，为空回退 YDC_API_KEY
+	if key := ResolveWebSearchAPIKey("configured-key"); key != "configured-key" {
+		t.Fatalf("expected configured key to win, got %q", key)
+	}
+	t.Setenv(WebSearchEnvAPIKey, "env-key")
+	if key := ResolveWebSearchAPIKey("  "); key != "env-key" {
+		t.Fatalf("expected env fallback, got %q", key)
+	}
+	if key := ResolveWebSearchAPIKey(""); key != "env-key" {
+		t.Fatalf("expected env fallback for empty config, got %q", key)
+	}
+}
