@@ -853,3 +853,10 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 - 摘要压缩任务执行器从裸 `go fn()` 升级为 `NewSummaryTaskRunner`（对齐 Java `memorySummaryExecutor`：core=1 / 队列 200 / CallerRunsPolicy）：单 worker 串行消费保证单会话摘要有序，队列满时退化为调用方同步执行，不无界堆积 goroutine 也不丢任务。
 - TITLE_GEN trace 节点（Java `@RagTraceNode(name="conversation-title-gen", type="TITLE_GEN")`）暂不同步：Go 的 `TraceRecorder` 经 Pipeline 字段传播而非 Java AOP 切面自动注入，标题生成在 Pipeline 之外的存储层调用，接 trace 需跨层传递 trace 上下文，超出最小改动范围；已在清单记录。
 - 会话服务测试的 SQLite `:memory:` 库统一设置单连接（`SetMaxOpenConns(1)`），避免并行查询路由到不同内存库实例导致表丢失；生产 PostgreSQL 无此约束。
+
+# 2026-09-08 — 二轮对齐：Agent 管理面提示词槽位
+
+- 提示词槽位清单补齐 5 个 Agent 专属槽位（对齐 Java `AgentPromptSlot` 枚举与 `init_data_pg.sql` 种子）：`KNOWLEDGE_TOOL_DESCRIPTION`（知识库工具声明）、`AGENT_CONTEXT_COMPACTION`（Agent 上下文压缩，占位符 `{summary_max_chars}`）、`AGENT_MEMORY_EXTRACTION`（长期记忆抽取，`{existing_memories}/{recent_turns}/{memory_max_chars}`）、`AGENT_MEMORY_CONSOLIDATION`（长期记忆受限合并，`{existing_memories}/{target_chars}`）、`AGENT_MEMORY_TOOL_DESCRIPTION`（记忆整理工具声明），均为 AGENT 模式生效、WORKFLOW 模式置灰。
+- 种子提示词 `init_data_pg.sql` 同步追加 5 条（内容取自 Java 同名种子，含围栏校验串/防注入声明/JSON 数组产物约定等完整约束），槽位总数与 Java 的 12 个对齐。
+- `CONVERSATION_SUMMARY` 生效范围从「通用（双模式）」修正为「WORKFLOW 专属、仅 WORKFLOW 生效」（对齐 Java：Agent 模式的长会话由「Agent 上下文压缩」承接，两份产物职责不可合并——这份是话题索引不含结论，那份必须留结论）；运行时消费方（摘要生成器）当前仅在 WORKFLOW 链路存在，不受影响。
+- 槽位元数据与响应新增 `editorHint` 编辑器提示语（对齐 Java `AgentPromptSlot.editorHint` → `AgentPromptConfigVO.editorHint`）：告诉提示词作者这个槽位的产物去哪、怎么写才对，5 个新槽位各带一段；`/agent` 管理面槽位列表接口 `slots[]` 新增 `editorHint` 字段返回。

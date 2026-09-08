@@ -276,6 +276,7 @@ func (s *AgentService) LoadPrompts(ctx context.Context, id string) (*agentDto.Ag
 			GroupName:            slot.GroupName,
 			Effective:            slot.EffectiveIn(s.mode),
 			InactiveReason:       inactiveReason(slot, s.mode),
+			EditorHint:           slot.EditorHint,
 			RequiredPlaceholders: append([]string(nil), slot.RequiredPlaceholders...),
 			Content:              content,
 		})

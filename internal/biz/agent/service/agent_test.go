@@ -73,7 +73,7 @@ func TestAgentServiceListAndPromptFallback(t *testing.T) {
 	if cfg.DefaultAgentName != "默认助手" {
 		t.Fatalf("unexpected default agent name: %s", cfg.DefaultAgentName)
 	}
-	if len(cfg.Slots) != 7 {
+	if len(cfg.Slots) != 12 {
 		t.Fatalf("unexpected slot count: %d", len(cfg.Slots))
 	}
 	if got := cfg.Slots[0].Content; got != "custom chat" {
@@ -81,6 +81,19 @@ func TestAgentServiceListAndPromptFallback(t *testing.T) {
 	}
 	if cfg.Slots[3].Effective {
 		t.Fatalf("agent main should be inactive in workflow mode")
+	}
+	// 新增的 Agent 专属槽位在 workflow 模式全部置灰（对齐 Java 槽位生效范围）
+	for _, slot := range cfg.Slots[4:9] {
+		if slot.Effective {
+			t.Fatalf("agent-only slot %s should be inactive in workflow mode", slot.SlotKey)
+		}
+		if slot.EditorHint == "" {
+			t.Fatalf("agent-only slot %s should carry editor hint", slot.SlotKey)
+		}
+	}
+	// CONVERSATION_SUMMARY 收窄为 WORKFLOW 专属：workflow 模式下仍生效
+	if !cfg.Slots[10].Effective || cfg.Slots[10].Group != "WORKFLOW" {
+		t.Fatalf("conversation summary should stay effective in workflow mode: %+v", cfg.Slots[10])
 	}
 	if got, err := svc.DefaultPrompt(context.Background(), "SYSTEM_CHAT"); err != nil || got != "builtin chat" {
 		t.Fatalf("default prompt = %q, err=%v", got, err)

@@ -60,6 +60,7 @@ type AgentPromptSlotResp struct {
 	GroupName            string   `json:"groupName"`
 	Effective            bool     `json:"effective"`
 	InactiveReason       string   `json:"inactiveReason"`
+	EditorHint           string   `json:"editorHint"`
 	RequiredPlaceholders []string `json:"requiredPlaceholders"`
 	Content              string   `json:"content"`
 }
