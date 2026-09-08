@@ -309,6 +309,35 @@ func TestChunkerNode_ChunksStructuredBlocks(t *testing.T) {
 	}
 }
 
+func TestChunkerNode_AppliesJavaBudgetSemantics(t *testing.T) {
+	node := NewChunkerNode()
+
+	// overlap >= maxChars 时钳到 maxChars-1，切分必须仍能推进（对齐 Java overlapChars 区间校验）
+	blocks := make([]rag.Block, 0, 6)
+	for i := 0; i < 6; i++ {
+		blocks = append(blocks, rag.Block{Type: rag.BlockParagraph, Content: strings.Repeat("甲", 40)})
+	}
+	ctx := &rag.IngestionContext{Document: &rag.ParsedDocument{Blocks: blocks}}
+	result := node.Execute(context.Background(), ctx, rag.NodeConfig{Settings: map[string]any{
+		"chunkSize":   64,
+		"overlapSize": 64,
+	}})
+	if !result.Success {
+		t.Fatalf("unexpected chunker result with clamped overlap: %+v", result)
+	}
+	// 40+2+40=82 > 64：整体装不下必然分块，钳制后切分仍能推进
+	if len(ctx.Chunks) < 2 {
+		t.Fatalf("expected chunking to progress with overlap clamped below maxChars, got %d chunks", len(ctx.Chunks))
+	}
+
+	// chunkSize 超上限直接拒绝（对齐 Java MAX_CHARS_LIMIT=8192）
+	ctx2 := &rag.IngestionContext{Document: &rag.ParsedDocument{Blocks: []rag.Block{{Type: rag.BlockParagraph, Content: "x"}}}}
+	result = node.Execute(context.Background(), ctx2, rag.NodeConfig{Settings: map[string]any{"chunkSize": 9000}})
+	if result.Success {
+		t.Fatalf("expected oversized chunkSize to be rejected, got %+v", result)
+	}
+}
+
 func TestChunkerNode_SplitsTableByRowsPerChunk(t *testing.T) {
 	node := NewChunkerNode()
 	ctx := &rag.IngestionContext{

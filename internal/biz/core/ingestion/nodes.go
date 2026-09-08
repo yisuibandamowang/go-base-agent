@@ -522,12 +522,24 @@ func (n *ChunkerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 	}
 	settings := chunkerSettingsFromConfig(config.Settings)
 	opts := rag.DefaultChunkingOptions()
-	if settings.ChunkSize != nil {
+	if settings.ChunkSize != nil && *settings.ChunkSize > 0 {
+		opts.ChunkSize = *settings.ChunkSize
+		// 容忍预算随块大小等比放大（×3）并封顶，防止明显填错的量级（对齐 Java toleranceChars）
+		opts.ToleranceSize = rag.ToleranceCharsFor(*settings.ChunkSize)
+	} else if settings.ChunkSize != nil {
+		// -1 哨兵（整篇不分块）与非正值原样透传，由 chunker 归一
 		opts.ChunkSize = *settings.ChunkSize
 		opts.ToleranceSize = *settings.ChunkSize
 	}
-	if settings.OverlapSize != nil {
+	// 重叠缺省按块大小等比给，而不是照搬默认预算里配的数（对齐 Java defaultOverlapFor）
+	if settings.OverlapSize != nil && *settings.OverlapSize >= 0 {
 		opts.OverlapSize = *settings.OverlapSize
+	} else {
+		opts.OverlapSize = rag.DefaultOverlapFor(opts.ChunkSize)
+	}
+	// 重叠必须小于块大小，否则切分无法推进
+	if opts.ChunkSize > 0 && opts.OverlapSize >= opts.ChunkSize {
+		opts.OverlapSize = max(0, opts.ChunkSize-1)
 	}
 	if settings.RowsPerChunk != nil && *settings.RowsPerChunk > 0 {
 		opts.RowsPerChunk = *settings.RowsPerChunk
@@ -541,6 +553,9 @@ func (n *ChunkerNode) Execute(ctx context.Context, nodeCtx *rag.IngestionContext
 	text := nodeCtx.EnhancedText
 	if strings.TrimSpace(text) == "" {
 		text = nodeCtx.RawText
+	}
+	if opts.ChunkSize > rag.MaxToleranceChars {
+		return rag.NodeResult{Success: false, ErrorMessage: fmt.Sprintf("chunkSize 不得超过 %d，实际 %d", rag.MaxToleranceChars, opts.ChunkSize)}
 	}
 	if opts.ChunkSize == -1 {
 		if nodeCtx.Document != nil && len(nodeCtx.Document.Blocks) > 0 {

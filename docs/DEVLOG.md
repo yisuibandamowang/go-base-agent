@@ -826,3 +826,13 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 
 - 对齐 Java `60436e3` 的意图分类和查询改写提示策略：将问候、身份询问、致谢和回答评价识别为交互导向，只允许选择 `SYSTEM` 意图；实体导向与主题导向继续分别按关键实体和分类路径/描述匹配，并保留低分返回空数组的规则；查询改写明确保持查询意图、原语言和历史用户上下文边界，不把 Assistant 答案写入改写结果。
 - 对齐 Java `5a1af64` 的系统设置展示：`/rag/settings` 的 `rag.features.citation` 改为返回当前 `rag.citation.enabled` 的实际生效值，不再固定展示为开启。
+
+# 2026-09-08 — 二轮对齐：解析链路档位路由与分块预算
+
+- 解析器注册表改为按 (MIME × 档位) 认领矩阵分派，对齐 Java `ParserRegistry` + `MinerUDocumentParser.supportedMimeTypes`：版面类 MIME（PDF/Word/PPT）无论快速/保真档都由 MinerU 优先承担（唯一路径）；表格类 MIME（Excel）仅保真档归 MinerU，快速档走本地 XLSX/XLS 解析器；档位为空按默认快速档处理；MinerU 未注册时降级本地解析器保可用性。此前 Go 两条入口语义相反：手动入库快速档 PDF 走本地 PDFParser、 ingestion 管道空档位 Excel 会被送 MinerU，均与 Java 相反。
+- `MinerUParser.Supports` 补齐 Java `LAYOUT_MIME_TYPES` 的三类别名认领（`application/x-pdf`、`application/vnd.ms-word`、`presentationml.slideshow`），`extFromMime` 同步补扩展名映射。
+- MinerU 结果解包的图片引用路径改为三级模糊匹配：精确命中 → 剥 `./` 前缀 → 文件名兜底（对齐 Java `resolveZipPath`），解决 markdown 引用与 zip 内条目名对不齐导致图片不落 OSS 的问题；上传 URL 缓存键同步改为解析后的 zip 路径。
+- `MarkdownParser` 认领 `text/plain`（对齐 Java `MarkdownDocumentParser`）：txt 的缩进段落与列表交给 Markdown 结构提取，至少拿到块结构，不再压成单段落。
+- ChunkerNode 分块参数对齐 Java `ChunkerNode.toBudget` + `ChunkBudget`：显式 chunkSize 时容忍预算按块大小 ×3 并封顶 8192（新增 `rag.ToleranceCharsFor`/`MaxToleranceChars`/`DefaultToleranceFactor`）；重叠缺省按块大小 1/8 等比给；`overlap >= maxChars` 钳到 `maxChars-1` 保证切分推进；chunkSize 超 8192 直接拒绝。
+- `packMergeableChunks` 合并上限从容忍预算改为块大小 maxChars（对齐 Java `ChunkPacker.pack` 的「minChars 管下限、maxChars 管合并」职责分离），避免容忍预算放大后把用户显式按 `listItemsPerChunk` 拆小的列表块重新粘回整块。
+- 手动入库 legacy `chunkConfig` 路径同步对齐：容忍预算 ×3 封顶、重叠缺省等比、`overlap >= chunkSize` 钳制；ingestionSpec 主路径原有区间校验保持不变。

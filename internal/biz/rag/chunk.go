@@ -247,11 +247,9 @@ func (s *StructureAwareChunker) ChunkBlocks(blocks []Block, opts ChunkingOptions
 		currentLen += contentLen
 	}
 	flush()
-	packSize := opts.ToleranceSize
-	if packSize <= 0 {
-		packSize = opts.ChunkSize
-	}
-	return packMergeableChunks(chunks, packSize, opts.OverlapSize)
+	// 合并上限取块大小 maxChars 而非容忍预算：tolerance 只管「整节是否需要内部再拆」，
+	// 块间合并用大预算会把用户显式拆小的列表块重新粘回去（对齐 Java ChunkPacker.pack）
+	return packMergeableChunks(chunks, opts.ChunkSize, opts.OverlapSize)
 }
 
 func chunkTableBlock(block Block, opts ChunkingOptions, startIndex int, outlinePath []string, sourceBlockID string) []VectorChunk {
@@ -895,6 +893,20 @@ func isAtomicBlock(typ BlockType) bool {
 
 // overlapDivisor 块重叠默认取块大小的几分之一。
 const overlapDivisor = 8
+
+// MaxToleranceChars 容忍上限：块大小与结构化块整体保留预算的封顶值（对齐 Java MAX_CHARS_LIMIT）。
+const MaxToleranceChars = 8192
+
+// DefaultToleranceFactor 容忍倍数默认值：结构化块整体保留预算按块大小的倍数（对齐 Java DEFAULT_TOLERANCE_FACTOR）。
+const DefaultToleranceFactor = 3
+
+// ToleranceCharsFor 返回块大小对应的容忍预算：块大小 × 容忍倍数，并封顶（对齐 Java toleranceChars）。
+func ToleranceCharsFor(maxChars int) int {
+	if maxChars <= 0 {
+		return maxChars
+	}
+	return min(maxChars*DefaultToleranceFactor, MaxToleranceChars)
+}
 
 // DefaultOverlapFor 返回给定块大小对应的默认重叠字符数。
 // 重叠不只为冗余，它同时是回退寻找句末标点的最大距离，取小了切口会落在句子中间——

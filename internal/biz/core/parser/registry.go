@@ -35,14 +35,45 @@ func (r *Registry) Register(p rag.DocumentParser) {
 	r.parsers = append(r.parsers, p)
 }
 
-// Parse 根据 MIME 类型自动选择解析器解析文档。
+// minerULayoutMIMEs 版面类 MIME（PDF/Word/PPT）：
+// 语义复杂，无论 FAST/FIDELITY 档都由 MinerU 认领（唯一路径，对齐 Java LAYOUT_MIME_TYPES）。
+var minerULayoutMIMEs = map[string]bool{
+	"application/pdf":                                                true,
+	"application/x-pdf":                                              true,
+	"application/msword":                                             true,
+	"application/vnd.ms-word":                                        true,
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   true,
+	"application/vnd.ms-powerpoint":                                  true,
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": true,
+	"application/vnd.openxmlformats-officedocument.presentationml.slideshow":    true,
+}
+
+// minerUSpreadsheetMIMEs 表格类 MIME（Excel）：仅保真档归 MinerU，快速档走本地 XLSX/XLS 解析器
+// （对齐 Java SPREADSHEET_MIME_TYPES：默认快速档走本地解析，用户选保真档才付 MinerU 的成本）。
+var minerUSpreadsheetMIMEs = map[string]bool{
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
+	"application/vnd.ms-excel": true,
+}
+
+// claimsMinerU 判断给定 (MIME × 档位) 是否由 MinerU 认领，档位为空按默认 FAST 档处理。
+func claimsMinerU(mimeType, profile string) bool {
+	mime := normalizeMIMEType(mimeType)
+	if minerULayoutMIMEs[mime] {
+		return true
+	}
+	return profile == "fidelity" && minerUSpreadsheetMIMEs[mime]
+}
+
+// Parse 根据 (MIME × 档位) 自动选择解析器解析文档。
+// 档位语义对齐 Java ParserRegistry：版面类文档恒走 MinerU（唯一路径）；表格类仅保真档归 MinerU；
+// 其余 MIME 按注册顺序匹配，MinerU 不参与兜底，避免快速档被高成本解析截胡。
 // 如果找不到匹配的解析器，使用 fallback；未配置 fallback 时返回不支持格式错误。
 func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	profile := strings.ToLower(strings.TrimSpace(options["parseProfile"]))
-	if profile == "fidelity" {
+	if claimsMinerU(mimeType, profile) {
 		for _, p := range r.parsers {
 			if p.Type() == rag.ParserMinerU && p.Supports(mimeType) {
 				return p.Parse(ctx, data, mimeType, options)
@@ -50,7 +81,7 @@ func (r *Registry) Parse(ctx context.Context, data []byte, mimeType string, opti
 		}
 	}
 	for _, p := range r.parsers {
-		if profile == "fast" && p.Type() == rag.ParserMinerU {
+		if p.Type() == rag.ParserMinerU {
 			continue
 		}
 		if p.Supports(mimeType) {

@@ -59,10 +59,13 @@ func (p *MinerUParser) Type() rag.ParserType { return rag.ParserMinerU }
 func (p *MinerUParser) Supports(mimeType string) bool {
 	switch normalizeMIMEType(mimeType) {
 	case "application/pdf",
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/x-pdf",
 		"application/msword",
-		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.ms-word",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		"application/vnd.ms-powerpoint",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.openxmlformats-officedocument.presentationml.slideshow",
 		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 		"application/vnd.ms-excel":
 		return true
@@ -218,13 +221,14 @@ func resolveMinerUFileName(sourceFile, mimeType, documentID string) string {
 
 func extFromMime(mimeType string) string {
 	switch normalizeMIMEType(mimeType) {
-	case "application/pdf":
+	case "application/pdf", "application/x-pdf":
 		return ".pdf"
 	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
 		return ".docx"
-	case "application/msword":
+	case "application/msword", "application/vnd.ms-word":
 		return ".doc"
-	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.openxmlformats-officedocument.presentationml.slideshow":
 		return ".pptx"
 	case "application/vnd.ms-powerpoint":
 		return ".ppt"

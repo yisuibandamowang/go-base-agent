@@ -129,12 +129,13 @@ func (u *MinerUResultUnpacker) rewriteImages(ctx context.Context, markdown strin
 		}
 		url, ok := uploadURLs[ref]
 		if !ok {
-			data, exists := images[ref]
-			if !exists {
+			zipPath, resolved := resolveMinerUZipPath(ref, images)
+			if !resolved {
 				return match
 			}
-			key := imageAssetKey(documentID, inferImageMime(ref))
-			publicURL, err := u.uploader.Upload(ctx, key, data, inferImageMime(ref))
+			data := images[zipPath]
+			key := imageAssetKey(documentID, inferImageMime(zipPath))
+			publicURL, err := u.uploader.Upload(ctx, key, data, inferImageMime(zipPath))
 			if err != nil {
 				uploadErr = err
 				return match
@@ -152,6 +153,33 @@ func (u *MinerUResultUnpacker) rewriteImages(ctx context.Context, markdown strin
 		return markdown, uploaded, fmt.Errorf("upload mineru image failed: %w", uploadErr)
 	}
 	return result, uploaded, nil
+}
+
+// resolveMinerUZipPath 把 markdown 里的图片地址还原成 zip 内路径。
+// 优先精确匹配；MinerU markdown 里可能写 ./images/xxx 也可能写 images/xxx，剥掉 ./ 前缀再匹配；
+// 最后用文件名兜底匹配（对齐 Java resolveZipPath）。
+func resolveMinerUZipPath(rawDest string, images map[string][]byte) (string, bool) {
+	if rawDest == "" {
+		return "", false
+	}
+	if _, ok := images[rawDest]; ok {
+		return rawDest, true
+	}
+	norm := strings.TrimPrefix(rawDest, "./")
+	if _, ok := images[norm]; ok {
+		return norm, true
+	}
+	idx := strings.LastIndex(norm, "/")
+	fileName := norm
+	if idx >= 0 {
+		fileName = norm[idx+1:]
+	}
+	for key := range images {
+		if key == fileName || strings.HasSuffix(key, "/"+fileName) {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 func inferImageMime(name string) string {

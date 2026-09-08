@@ -463,6 +463,40 @@ func TestMarkdownParserProducesStructuredBlocks(t *testing.T) {
 	}
 }
 
+func TestMarkdownParserClaimsPlainTextForStructuredParse(t *testing.T) {
+	// 对齐 Java MarkdownDocumentParser：text/plain 刻意交给 Markdown 解析器，
+	// txt 里的缩进段落与列表至少能拿到结构
+	if !(&MarkdownParser{}).Supports("text/plain") {
+		t.Fatal("expected markdown parser to claim text/plain")
+	}
+	txt := "介绍\n\n- 能力一\n- 能力二\n"
+	parsed, err := (&MarkdownParser{}).Parse(context.Background(), []byte(txt), "text/plain", nil)
+	if err != nil {
+		t.Fatalf("parse plain text: %v", err)
+	}
+	var hasList bool
+	for _, block := range parsed.Blocks {
+		if block.Type == rag.BlockList && len(block.Items) == 2 {
+			hasList = true
+		}
+	}
+	if !hasList {
+		t.Fatalf("expected list structure from plain text, got %+v", parsed.Blocks)
+	}
+
+	// 注册表路由：text/plain 应命中 Markdown 解析器而非 PlainText 的单段落
+	registry := NewRegistry(nil)
+	registry.Register(&MarkdownParser{})
+	registry.Register(&PlainTextParser{})
+	doc, err := registry.Parse(context.Background(), []byte(txt), "text/plain", nil)
+	if err != nil {
+		t.Fatalf("registry parse text/plain: %v", err)
+	}
+	if len(doc.Blocks) != len(parsed.Blocks) {
+		t.Fatalf("expected structured blocks via registry, got %+v", doc.Blocks)
+	}
+}
+
 func TestHTMLParserExtractsVisibleText(t *testing.T) {
 	htmlData := `<!doctype html><html><head><title>会员中心</title><style>.x{}</style></head><body><h1>权益总览</h1><p>支持积分查询</p><script>ignore()</script><table><tr><th>能力</th><th>说明</th></tr><tr><td>会员查询</td><td>实时</td></tr></table></body></html>`
 	parsed, err := (&HTMLParser{}).Parse(context.Background(), []byte(htmlData), "text/html", nil)
@@ -626,6 +660,40 @@ func TestMinerUResultUnpackerRewritesImageLinks(t *testing.T) {
 	}
 	if parsed.Metadata["imagesUploaded"] != "1" {
 		t.Fatalf("expected one uploaded image, got %+v", parsed.Metadata)
+	}
+}
+
+func TestMinerUResultUnpackerResolvesImagePathVariants(t *testing.T) {
+	// markdown 引用 ./images/fig1.png 而 zip 内键为 images/fig1.png，靠剥 ./ 前缀命中
+	data := zipBytes(t, map[string]string{
+		"result.md":       "![图 1](./images/fig1.png)",
+		"images/fig1.png": "png-bytes",
+	})
+	uploader := &fakeUploader{url: "https://assets.example.com/fig1.png"}
+	unpacker := NewMinerUResultUnpacker(uploader)
+
+	parsed, err := unpacker.Unpack(context.Background(), data, "说明.md", "doc-1")
+	if err != nil {
+		t.Fatalf("unpack mineru zip: %v", err)
+	}
+	if !strings.Contains(rag.RenderBlocks(parsed.Blocks), uploader.url) {
+		t.Fatalf("expected rewritten image url for ./-prefixed ref, got %q", rag.RenderBlocks(parsed.Blocks))
+	}
+
+	// 引用带无关前缀时靠文件名兜底命中
+	data = zipBytes(t, map[string]string{
+		"result.md":              "![图 2](assets/fig2.jpg)",
+		" MinerU输出/images/fig2.jpg": "jpg-bytes",
+	})
+	parsed, err = unpacker.Unpack(context.Background(), data, "说明.md", "doc-2")
+	if err != nil {
+		t.Fatalf("unpack mineru zip: %v", err)
+	}
+	if !strings.Contains(rag.RenderBlocks(parsed.Blocks), uploader.url) {
+		t.Fatalf("expected rewritten image url via filename fallback, got %q", rag.RenderBlocks(parsed.Blocks))
+	}
+	if uploader.calls != 2 {
+		t.Fatalf("expected 2 uploads, got %d", uploader.calls)
 	}
 }
 

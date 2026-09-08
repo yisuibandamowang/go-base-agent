@@ -15,7 +15,7 @@ func (p *MarkdownParser) Type() rag.ParserType { return rag.ParserMarkdown }
 func (p *MarkdownParser) Supports(mimeType string) bool {
 	mimeType = normalizeMIMEType(mimeType)
 	return mimeType == "text/markdown" || mimeType == "text/x-markdown" ||
-		strings.HasSuffix(mimeType, "/markdown")
+		mimeType == "text/plain" || strings.HasSuffix(mimeType, "/markdown")
 }
 
 func (p *MarkdownParser) Parse(ctx context.Context, data []byte, mimeType string, options map[string]string) (*rag.ParsedDocument, error) {

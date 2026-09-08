@@ -1625,13 +1625,18 @@ func chunkingOptionsForDocument(doc *model.KnowledgeDocument) rag.ChunkingOption
 	}
 	if v := intFromChunkConfig(raw, "chunkSize", "size", "targetChars"); v > 0 {
 		opts.ChunkSize = v
-		opts.ToleranceSize = v
+		// 容忍预算随块大小等比放大（×3）并封顶，与 ingestionSpec 主路径语义一致
+		opts.ToleranceSize = rag.ToleranceCharsFor(v)
 		// 重叠缺省按块大小等比给（1/8），而不是照搬默认预算里配 512 的 128：
 		// 重叠同时是回退寻找句末标点的最大距离，取小了切口会落在句子中间
 		opts.OverlapSize = rag.DefaultOverlapFor(v)
 	}
 	if v := intFromChunkConfig(raw, "overlapSize", "overlapChars", "overlap"); v >= 0 {
 		opts.OverlapSize = v
+	}
+	// 重叠必须小于块大小，否则切分无法推进（对齐 Java overlapChars 区间校验）
+	if opts.ChunkSize > 0 && opts.OverlapSize >= opts.ChunkSize {
+		opts.OverlapSize = max(0, opts.ChunkSize-1)
 	}
 	return opts
 }
