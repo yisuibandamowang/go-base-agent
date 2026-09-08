@@ -82,8 +82,18 @@ func (s *AdminService) GetDashboard(ctx context.Context, window string) (*adminD
 	if err != nil {
 		return nil, err
 	}
+	// activeSessions 按窗口内有消息的会话去重（对齐 Java countActiveSessions：distinct (conversation_id, user_id)）
+	activeSessions, err := s.countActiveSessionsByTimeRange(ctx, rangeInfo.Start, rangeInfo.End)
+	if err != nil {
+		return nil, err
+	}
+	activeSessionsPrev, err := s.countActiveSessionsByTimeRange(ctx, rangeInfo.PrevStart, rangeInfo.PrevEnd)
+	if err != nil {
+		return nil, err
+	}
 
 	return &adminDto.DashboardResp{
+		Engine:             "workflow",
 		KnowledgeBaseCount: stats.KnowledgeBaseCount,
 		DocumentCount:      stats.DocumentCount,
 		ChunkCount:         stats.ChunkCount,
@@ -95,12 +105,13 @@ func (s *AdminService) GetDashboard(ctx context.Context, window string) (*adminD
 		CompareWindow:      rangeInfo.CompareLabel,
 		UpdatedAt:          time.Now().UnixMilli(),
 		Kpis: &adminDto.DashboardKpisResp{
-			TotalUsers:    dashboardKpi(stats.UserCount, usersInWindow, nil),
-			ActiveUsers:   dashboardKpi(activeUsers, activeUsers-activeUsersPrev, dashboardPct(activeUsers, activeUsersPrev)),
-			TotalSessions: dashboardKpi(stats.ConversationCount, sessionsInWindow, nil),
-			Sessions24h:   dashboardKpi(sessionsInWindow, sessionsInWindow-sessionsPrevWindow, dashboardPct(sessionsInWindow, sessionsPrevWindow)),
-			TotalMessages: dashboardKpi(stats.MessageCount, messagesInWindow, nil),
-			Messages24h:   dashboardKpi(messagesInWindow, messagesInWindow-messagesPrevWindow, dashboardPct(messagesInWindow, messagesPrevWindow)),
+			TotalUsers:     dashboardKpi(stats.UserCount, usersInWindow, nil),
+			ActiveUsers:    dashboardKpi(activeUsers, activeUsers-activeUsersPrev, dashboardPct(activeUsers, activeUsersPrev)),
+			TotalSessions:  dashboardKpi(stats.ConversationCount, sessionsInWindow, nil),
+			Sessions24h:    dashboardKpi(sessionsInWindow, sessionsInWindow-sessionsPrevWindow, dashboardPct(sessionsInWindow, sessionsPrevWindow)),
+			TotalMessages:  dashboardKpi(stats.MessageCount, messagesInWindow, nil),
+			Messages24h:    dashboardKpi(messagesInWindow, messagesInWindow-messagesPrevWindow, dashboardPct(messagesInWindow, messagesPrevWindow)),
+			ActiveSessions: dashboardKpi(activeSessions, activeSessions-activeSessionsPrev, dashboardPct(activeSessions, activeSessionsPrev)),
 		},
 	}, nil
 }
@@ -339,9 +350,23 @@ func (s *AdminService) ListSampleQuestions(ctx context.Context, page, size int, 
 	return resp, total, nil
 }
 
+// sampleQuestionMaxRandomLimit 随机取数的条数上限，防调用方要一个大数把整表捞走（对齐 Java MAX_LIMIT）。
+const sampleQuestionMaxRandomLimit = 20
+
 // ListRandomSampleQuestions 随机查询欢迎页示例问题。
 func (s *AdminService) ListRandomSampleQuestions(ctx context.Context) ([]adminDto.SampleQuestionResp, error) {
-	items, err := s.sampleQRepo.ListRandom(ctx, defaultSampleQuestionLimit)
+	return s.ListRandomSampleQuestionsWithLimit(ctx, defaultSampleQuestionLimit)
+}
+
+// ListRandomSampleQuestionsWithLimit 随机查询指定条数的示例问题，limit 缺省 3、上限 20。
+func (s *AdminService) ListRandomSampleQuestionsWithLimit(ctx context.Context, limit int) ([]adminDto.SampleQuestionResp, error) {
+	if limit < 1 {
+		limit = defaultSampleQuestionLimit
+	}
+	if limit > sampleQuestionMaxRandomLimit {
+		limit = sampleQuestionMaxRandomLimit
+	}
+	items, err := s.sampleQRepo.ListRandom(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -748,6 +773,19 @@ func (s *AdminService) countDistinctUsersByTimeRange(ctx context.Context, start,
 	return count, nil
 }
 
+// countActiveSessionsByTimeRange 统计窗口内有消息的会话数（按 conversation_id+user_id 组合去重）。
+// 拼接法兼容 SQLite/PostgreSQL（行值 distinct 语法 PostgreSQL 独有）。
+func (s *AdminService) countActiveSessionsByTimeRange(ctx context.Context, start, end time.Time) (int64, error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Table("t_message").
+		Select("count(distinct conversation_id || ':' || user_id)").
+		Where("deleted = 0 AND create_time >= ? AND create_time < ?", start, end).
+		Scan(&count).Error; err != nil {
+		return 0, fmt.Errorf("count dashboard active sessions: %w", err)
+	}
+	return count, nil
+}
+
 func (s *AdminService) countAssistantMessages(ctx context.Context, start, end time.Time, exactContent string) (int64, error) {
 	query := s.db.WithContext(ctx).Table("t_message").
 		Where("deleted = 0 AND create_time >= ? AND create_time < ? AND role = ?", start, end, "assistant")
@@ -800,6 +838,7 @@ func (s *AdminService) GetPerformance(ctx context.Context, window string) (*admi
 	}
 
 	return &adminDto.PerformanceResp{
+		Engine:       "workflow",
 		Window:       rangeInfo.Label,
 		AvgLatencyMs: dashboardAverage(durations),
 		P95LatencyMs: dashboardPercentile(durations, 0.95),
@@ -807,7 +846,7 @@ func (s *AdminService) GetPerformance(ctx context.Context, window string) (*admi
 		ErrorRate:    dashboardRate(errorCount, total),
 		NoDocRate:    dashboardRate(noDocCount, assistantCount),
 		SlowRate:     dashboardRate(slowCount, int64(len(durations))),
-		TotalTraces:  total,
+		SampleCount:  total,
 	}, nil
 }
 

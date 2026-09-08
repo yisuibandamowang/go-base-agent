@@ -602,6 +602,7 @@ func main() {
 
 		// Sample questions — /rag/* for chat welcome, /sample-questions for Java-compatible admin page.
 		api.GET("/rag/sample-questions", adminH.ListRAGSampleQuestions)
+		api.GET("/sample-questions/random", adminH.ListRandomSampleQuestions)
 		api.GET("/sample-questions", adminH.ListSampleQuestions)
 		api.GET("/sample-questions/:id", adminH.GetSampleQuestion)
 		api.POST("/sample-questions", adminH.CreateSampleQuestion)

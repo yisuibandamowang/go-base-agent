@@ -121,6 +121,18 @@ func (h *AdminHandler) ListRAGSampleQuestions(c *gin.Context) {
 	c.JSON(http.StatusOK, convention.Success(items))
 }
 
+// ListRandomSampleQuestions GET /api/ragent/sample-questions/random
+// 前端欢迎页调用：条数由调用方决定，缺省 3、上限 20；字面量段优先于 /:id 模板匹配。
+func (h *AdminHandler) ListRandomSampleQuestions(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "3"))
+	items, err := h.svc.ListRandomSampleQuestionsWithLimit(c.Request.Context(), limit)
+	if err != nil {
+		c.JSON(http.StatusOK, convention.Failure("B000001", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, convention.Success(items))
+}
+
 // GetSampleQuestion GET /api/ragent/sample-questions/:id
 func (h *AdminHandler) GetSampleQuestion(c *gin.Context) {
 	resp, err := h.svc.GetSampleQuestion(c.Request.Context(), c.Param("id"))

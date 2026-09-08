@@ -4,6 +4,7 @@ import "time"
 
 // DashboardResp 仪表盘统计响应。
 type DashboardResp struct {
+	Engine             string             `json:"engine"`
 	KnowledgeBaseCount int64              `json:"knowledgeBaseCount"`
 	DocumentCount      int64              `json:"documentCount"`
 	ChunkCount         int64              `json:"chunkCount"`
@@ -19,12 +20,13 @@ type DashboardResp struct {
 
 // DashboardKpisResp 仪表盘 KPI 分组。
 type DashboardKpisResp struct {
-	TotalUsers    DashboardKpiResp `json:"totalUsers"`
-	ActiveUsers   DashboardKpiResp `json:"activeUsers"`
-	TotalSessions DashboardKpiResp `json:"totalSessions"`
-	Sessions24h   DashboardKpiResp `json:"sessions24h"`
-	TotalMessages DashboardKpiResp `json:"totalMessages"`
-	Messages24h   DashboardKpiResp `json:"messages24h"`
+	TotalUsers     DashboardKpiResp `json:"totalUsers"`
+	ActiveUsers    DashboardKpiResp `json:"activeUsers"`
+	TotalSessions  DashboardKpiResp `json:"totalSessions"`
+	Sessions24h    DashboardKpiResp `json:"sessions24h"`
+	TotalMessages  DashboardKpiResp `json:"totalMessages"`
+	Messages24h    DashboardKpiResp `json:"messages24h"`
+	ActiveSessions DashboardKpiResp `json:"activeSessions"`
 }
 
 // DashboardKpiResp 仪表盘单个 KPI。
@@ -137,14 +139,16 @@ type UserResp struct {
 
 // PerformanceResp RAG 性能统计响应。
 type PerformanceResp struct {
+	Engine       string  `json:"engine"`
+	Window       string  `json:"window,omitempty"`
 	AvgLatencyMs int64   `json:"avgLatencyMs"`
 	P95LatencyMs int64   `json:"p95LatencyMs"`
 	SuccessRate  float64 `json:"successRate"`
 	ErrorRate    float64 `json:"errorRate"`
 	NoDocRate    float64 `json:"noDocRate"`
 	SlowRate     float64 `json:"slowRate"`
-	TotalTraces  int64   `json:"totalTraces"`
-	Window       string  `json:"window,omitempty"`
+	// SampleCount 样本数，区分「没有采样」和真实的 0% 成功率（前端消费字段名与 Java 一致）。
+	SampleCount int64 `json:"sampleCount"`
 }
 
 // TrendsResp 趋势数据响应。
