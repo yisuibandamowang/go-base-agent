@@ -873,8 +873,52 @@ func validateConfig(cfg *Config) error {
 			minRerankScore,
 		)
 	}
+	if err := validateRAGSearchBudget(cfg.RAG.Search); err != nil {
+		return err
+	}
 	if err := validateChatTiers(cfg.AI.Chat); err != nil {
 		return err
+	}
+	return nil
+}
+
+// intentMinScoreFloor 与 rag.IntentMinScore（对齐 Java RAGConstant.INTENT_MIN_SCORE）保持一致。
+// 不直接引用 rag 包，避免 framework 配置层反向依赖业务层。
+const intentMinScoreFloor = 0.35
+
+// validateRAGSearchBudget 校验检索预算漏斗单调不变式与作用域闸门串联，对齐 Java
+// SearchChannelProperties.afterPropertiesSet：违反即配置矛盾，启动失败胜过线上悄悄少召回或死代码分支。
+func validateRAGSearchBudget(search RAGSearchConfig) error {
+	contextTopK := search.DefaultTopK
+	if contextTopK <= 0 {
+		return fmt.Errorf("validate rag.search: default-top-k (%d) 必须为正数", contextTopK)
+	}
+	if candidateLimit := search.Fusion.RerankCandidateLimit; candidateLimit > 0 && candidateLimit < contextTopK {
+		return fmt.Errorf(
+			"validate rag.search.fusion: 检索预算漏斗不变式被破坏：rerank-candidate-limit(%d) < default-top-k(%d)，送入 Rerank 的候选池不得小于最终条数，请调大 rag.search.fusion.rerank-candidate-limit 或调小 rag.search.default-top-k",
+			candidateLimit, contextTopK,
+		)
+	}
+	if minIntentScore := search.Channels.IntentDirected.MinIntentScore; minIntentScore > 0 && minIntentScore < intentMinScoreFloor {
+		return fmt.Errorf(
+			"validate rag.search.channels.intent-directed: min-intent-score (%v) 低于上游意图过滤下限 INTENT_MIN_SCORE(%v)，该配置不会产生任何效果，请调高此值，或先下调 INTENT_MIN_SCORE",
+			minIntentScore, intentMinScoreFloor,
+		)
+	}
+	// 作用域的两道闸门必须真的串联：意图先被 min-intent-score 过滤，存活的分数恒 >= 它，
+	// 阈值若不高于最低分，「低置信退化为全局」这条兜底路就永不触发
+	confidenceThreshold := search.Channels.VectorGlobal.ConfidenceThreshold
+	if confidenceThreshold > 0 && (confidenceThreshold <= search.Channels.IntentDirected.MinIntentScore || confidenceThreshold > 1) {
+		return fmt.Errorf(
+			"validate rag.search.channels.vector-global: confidence-threshold (%v) 必须落在 (min-intent-score(%v), 1] 内：不高于最低分则「低置信退化为全局」永不触发，大于 1 则「高置信收窄到命中库」永不触发（意图分按 0~1 输出）",
+			confidenceThreshold, search.Channels.IntentDirected.MinIntentScore,
+		)
+	}
+	if ratio := search.SupplementRatio; math.IsNaN(ratio) || ratio >= 1 {
+		return fmt.Errorf(
+			"validate rag.search: supplement-ratio (%v) 必须小于 1：该比例是从主路划给补充路的份额，取到 1 等于把高置信命中库的名额清零，与「定向优先、补充兜底」相反",
+			ratio,
+		)
 	}
 	return nil
 }

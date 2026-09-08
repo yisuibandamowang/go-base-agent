@@ -1067,3 +1067,99 @@ rag:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestLoadRejectsRerankCandidateLimitBelowDefaultTopK(t *testing.T) {
+	yaml := `
+rag:
+  search:
+    default-top-k: 10
+    fusion:
+      rerank-candidate-limit: 5
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when rerank candidate limit is below default top-k")
+	}
+	if !strings.Contains(err.Error(), "rerank-candidate-limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsMinIntentScoreBelowIntentMinScore(t *testing.T) {
+	yaml := `
+rag:
+  search:
+    channels:
+      intent-directed:
+        min-intent-score: 0.3
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when min-intent-score is below the upstream intent floor")
+	}
+	if !strings.Contains(err.Error(), "INTENT_MIN_SCORE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsConfidenceThresholdNotAboveMinIntentScore(t *testing.T) {
+	yaml := `
+rag:
+  search:
+    channels:
+      vector-global:
+        confidence-threshold: 0.4
+      intent-directed:
+        min-intent-score: 0.4
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when confidence-threshold does not exceed min-intent-score")
+	}
+	if !strings.Contains(err.Error(), "confidence-threshold") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsSupplementRatioNotBelowOne(t *testing.T) {
+	yaml := `
+rag:
+  search:
+    supplement-ratio: 1
+`
+
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected load to fail when supplement-ratio is not below 1")
+	}
+	if !strings.Contains(err.Error(), "supplement-ratio") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
