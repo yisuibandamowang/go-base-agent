@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-base-agent/internal/biz/conversation/model"
@@ -20,6 +21,28 @@ import (
 
 	"gorm.io/gorm"
 )
+
+// summaryTaskQueueCapacity 摘要压缩任务队列容量（对齐 Java memorySummaryExecutor 的 LinkedBlockingQueue(200)）。
+const summaryTaskQueueCapacity = 200
+
+// NewSummaryTaskRunner 返回摘要压缩任务执行器：单 worker 串行消费 + 容量 200 的队列，
+// 队列满时退化为调用方同步执行（对齐 Java core=1 / queue=200 / CallerRunsPolicy：
+// 摘要可以慢，但不能无界堆积 goroutine 也不能丢任务）。
+func NewSummaryTaskRunner() func(func()) {
+	queue := make(chan func(), summaryTaskQueueCapacity)
+	go func() {
+		for task := range queue {
+			task()
+		}
+	}()
+	return func(fn func()) {
+		select {
+		case queue <- fn:
+		default:
+			fn()
+		}
+	}
+}
 
 // ConversationService 会话业务服务。
 type ConversationService struct {
@@ -399,6 +422,8 @@ func (s *DBMemoryStore) SetTitleGenerator(generator ConversationTitleGenerator, 
 }
 
 // LoadHistory 加载会话消息历史，转换为 chat.Message 格式。
+// 摘要与历史并行加载（对齐 Java load 的 CompletableFuture 双任务）；查询失败由上层
+// （pipeline）降级容忍，不在此处吞错。
 func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) ([]chat.Message, error) {
 	var conv model.Conversation
 	err := s.db.WithContext(ctx).Scopes(db.NotDeletedScope()).
@@ -410,15 +435,31 @@ func (s *DBMemoryStore) LoadHistory(ctx context.Context, conversationID string) 
 	if s.historyKeepTurns > 0 {
 		historyLimit = s.historyKeepTurns * 2
 	}
-	msgs, err := s.msgRepo.LoadLatestHistory(ctx, conversationID, conv.UserID, historyLimit)
-	if err != nil {
-		return nil, err
+
+	var (
+		msgs       []model.Message
+		historyErr error
+		summary    *model.ConversationSummary
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		msgs, historyErr = s.msgRepo.LoadLatestHistory(ctx, conversationID, conv.UserID, historyLimit)
+	}()
+	go func() {
+		defer wg.Done()
+		summary = s.loadLatestSummary(ctx, conversationID, conv.UserID)
+	}()
+	wg.Wait()
+	if historyErr != nil {
+		return nil, historyErr
 	}
 	if len(msgs) == 0 {
 		return []chat.Message{}, nil
 	}
 	result := make([]chat.Message, 0, len(msgs)+1)
-	if summary := s.loadLatestSummary(ctx, conversationID, conv.UserID); summary != nil && summary.Content != "" {
+	if summary != nil && summary.Content != "" {
 		result = append(result, chat.NewSystemMessage(s.decorateSummary(summary.Content)))
 	}
 	for _, m := range normalizeMemoryMessages(msgs) {

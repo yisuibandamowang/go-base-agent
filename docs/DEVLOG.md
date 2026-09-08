@@ -844,3 +844,12 @@ NoopMemoryService ──→  DefaultMemoryService + DBMemoryStore (PostgreSQL)
 - Markdown 解析器新增两条块提取规则（对齐 Java `MarkdownDocumentParser` / `UnpackVisitor`）：独占一行的图片提升为 `ImageBlock`（原样地址 + 按扩展名猜 MIME，行内图片留在段落文本）；行首 `<table` 的 HTML 块聚合为 `html_table` 块，其余 HTML 仍走段落保底不丢内容。
 - HTML 表格分块新增专属切分器（对齐 Java `HtmlTableChunker`）：按 `<tr>` 边界切分、剥除无意义的 `colspan/rowspan=1` 属性、每块重复外壳与表头并包回完整 `</table>`、行数与预算双上限（预算先扣外壳+表头开销）、整表行数与长度都在容忍内则不切。
 - MinerU 结果解包器接入 VLM 内嵌图图生文（对齐 Java `describeImages` + `imageParseProperties`）：逐张调 VLM 生成描述、单张失败只记日志不中断整篇入库；描述经「资产桶 URL → zip 内路径」映射回填到对应 `ImageBlock.Description`；新增 `rag.image-parse.embedded-describe-enabled` 开关（默认开启，对齐 Java 默认值），`description-prompt`/`max-output-tokens` 复用既有配置；解析 metadata 新增 `imagesDescribed` 计数。
+
+# 2026-09-08 — 二轮对齐：记忆链路摘要编排与并行加载
+
+- 会话摘要生成的 LLM 调用改为多段消息编排（对齐 Java `summarizeMessages`）：system 槽位提示词 → 历史摘要以 assistant 角色注入（标注"仅用于合并去重，不得作为事实新增来源"）→ 待压缩对话原文 → user 合并指令（含 `≤maxChars 字符；仅一行`），采样参数固定 temperature 0.3 / topP 0.9 / 关闭思考。此前是把全部内容拼进单条 user 消息，历史摘要的指令注入语义丢失。
+- `CONVERSATION_SUMMARY` 种子提示词替换为 Java `init_data_pg.sql` 的完整版（角色/任务/只记什么不记什么/状态标注/输出格式/三个 few-shot 示例，约 1200 字符），`prompts/conversation_summary.txt` 同步重写为 system 指令版（历史对话不再内嵌进提示词，改由消息编排携带）。
+- `DBMemoryStore.LoadHistory` 摘要与历史改为并行加载（对齐 Java `DefaultConversationMemoryService.load` 的 CompletableFuture 双任务）：两条查询各起 goroutine、WaitGroup 汇合；查询失败仍向调用方返回错误由 pipeline 降级，不吞错。
+- 摘要压缩任务执行器从裸 `go fn()` 升级为 `NewSummaryTaskRunner`（对齐 Java `memorySummaryExecutor`：core=1 / 队列 200 / CallerRunsPolicy）：单 worker 串行消费保证单会话摘要有序，队列满时退化为调用方同步执行，不无界堆积 goroutine 也不丢任务。
+- TITLE_GEN trace 节点（Java `@RagTraceNode(name="conversation-title-gen", type="TITLE_GEN")`）暂不同步：Go 的 `TraceRecorder` 经 Pipeline 字段传播而非 Java AOP 切面自动注入，标题生成在 Pipeline 之外的存储层调用，接 trace 需跨层传递 trace 上下文，超出最小改动范围；已在清单记录。
+- 会话服务测试的 SQLite `:memory:` 库统一设置单连接（`SetMaxOpenConns(1)`），避免并行查询路由到不同内存库实例导致表丢失；生产 PostgreSQL 无此约束。

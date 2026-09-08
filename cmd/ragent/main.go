@@ -320,9 +320,7 @@ func main() {
 		cfg.RAG.Memory.HistoryKeepTurns,
 	)
 	dbMemStore.SetSummaryLock(redislock.New(rdb), 30*time.Second)
-	dbMemStore.SetSummaryTaskRunner(func(fn func()) {
-		go fn()
-	})
+	dbMemStore.SetSummaryTaskRunner(conversationService.NewSummaryTaskRunner())
 	dbMemStore.SetTitleGenerator(
 		conversationService.NewLLMTitleGenerator(preferredLLMService, "", cfg.RAG.Memory.TitleMaxLength),
 		cfg.RAG.Memory.TitleMaxLength,

@@ -32,7 +32,9 @@ func NewLLMSummaryGenerator(llm chat.LLMService, externalPromptDir string, promp
 	}
 }
 
-// Generate 生成会话摘要。
+// Generate 生成会话摘要。消息编排对齐 Java summarizeMessages：system 提示词 →
+// 历史摘要（assistant 角色，仅用于合并去重）→ 待压缩对话 → 合并指令（user），
+// 参数固定 temperature 0.3 / topP 0.9 / 关闭思考。
 func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Message, previousSummary string, maxChars int) (string, error) {
 	if len(history) == 0 {
 		return trimSummaryText(previousSummary, maxChars), nil
@@ -41,7 +43,7 @@ func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Messa
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
 	}
 
-	prompt, err := g.renderPrompt(maxChars, previousSummary, history)
+	prompt, err := g.renderPrompt(maxChars)
 	if err != nil {
 		slog.Warn("render conversation summary prompt failed", "err", err)
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
@@ -50,8 +52,27 @@ func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Messa
 		return trimSummaryText(fallbackConversationSummary(history, previousSummary, maxChars), maxChars), nil
 	}
 
+	messages := make([]chat.Message, 0, len(history)+3)
+	messages = append(messages, chat.NewSystemMessage(prompt))
+	if trimmed := strings.TrimSpace(previousSummary); trimmed != "" {
+		messages = append(messages, chat.Message{
+			Role: chat.RoleAssistant,
+			Content: "历史摘要（仅用于合并去重，不得作为事实新增来源；若与本轮对话冲突，以本轮对话为准）：\n" +
+				trimmed,
+		})
+	}
+	messages = append(messages, history...)
+	messages = append(messages, chat.NewUserMessage(fmt.Sprintf(
+		"合并以上对话与历史摘要，去重后输出更新摘要。要求：严格≤%d字符；仅一行。", maxChars)))
+
+	temperature := 0.3
+	topP := 0.9
+	thinking := false
 	summary, err := chat.ChatWithTier(ctx, g.llm, chat.Request{
-		Messages: []chat.Message{chat.NewUserMessage(prompt)},
+		Messages:    messages,
+		Temperature: &temperature,
+		TopP:        &topP,
+		Thinking:    &thinking,
 	}, "fast")
 	if err != nil {
 		slog.Warn("conversation summary llm failed", "err", err)
@@ -64,36 +85,17 @@ func (g *LLMSummaryGenerator) Generate(ctx context.Context, history []chat.Messa
 	return summary, nil
 }
 
-func (g *LLMSummaryGenerator) renderPrompt(maxChars int, previousSummary string, history []chat.Message) (string, error) {
+func (g *LLMSummaryGenerator) renderPrompt(maxChars int) (string, error) {
 	if g.prompt != nil {
 		if rendered, err := g.prompt.Render("CONVERSATION_SUMMARY", map[string]any{
 			"SummaryMaxChars": maxChars,
-			"PreviousSummary": previousSummary,
-			"History":         renderConversationHistory(history),
 		}); err == nil && strings.TrimSpace(rendered) != "" {
 			return rendered, nil
 		}
 	}
 	return g.loader.Render(conversationSummaryPromptFile, map[string]any{
 		"SummaryMaxChars": maxChars,
-		"PreviousSummary": previousSummary,
-		"History":         renderConversationHistory(history),
 	})
-}
-
-func renderConversationHistory(history []chat.Message) string {
-	var b strings.Builder
-	for _, msg := range history {
-		content := strings.TrimSpace(strings.ReplaceAll(msg.Content, "\n", " "))
-		if content == "" {
-			continue
-		}
-		b.WriteString(string(msg.Role))
-		b.WriteString("：")
-		b.WriteString(content)
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 func fallbackConversationSummary(history []chat.Message, previousSummary string, maxChars int) string {

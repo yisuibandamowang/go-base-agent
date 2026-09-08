@@ -19,6 +19,9 @@ import (
 
 func TestDBMemoryStore_AppendMessageCreatesConversation(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -57,6 +60,9 @@ func TestDBMemoryStore_AppendMessageCreatesConversation(t *testing.T) {
 
 func TestDBMemoryStore_AppendMessageUsesTitleGenerator(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -105,6 +111,9 @@ func (f *fakeConversationSummaryGenerator) Generate(ctx context.Context, history
 
 func TestDBMemoryStore_AppendsSummaryAndLoadsIt(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -173,6 +182,9 @@ func TestDBMemoryStore_AppendsSummaryAndLoadsIt(t *testing.T) {
 
 func TestDBMemoryStore_LoadHistory_NoMessagesReturnsEmptyEvenWithSummary(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -208,6 +220,9 @@ func TestDBMemoryStore_LoadHistory_NoMessagesReturnsEmptyEvenWithSummary(t *test
 
 func TestDBMemoryStore_LoadHistoryKeepsLatestTurnsLikeJava(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -262,6 +277,9 @@ func TestDBMemoryStore_LoadHistoryKeepsLatestTurnsLikeJava(t *testing.T) {
 
 func TestDBMemoryStore_LoadHistoryDropsLeadingAssistantLikeJava(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -317,6 +335,9 @@ func TestDBMemoryStore_LoadHistoryDropsLeadingAssistantLikeJava(t *testing.T) {
 
 func TestDBMemoryStore_SummaryDoesNotRefreshWhileCoverageStillOverlapsHistoryWindow(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -350,6 +371,9 @@ func TestDBMemoryStore_SummaryDoesNotRefreshWhileCoverageStillOverlapsHistoryWin
 
 func TestDBMemoryStore_SummaryRefreshesWhenCoverageFallsBehindHistoryWindow(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -402,6 +426,9 @@ func TestDBMemoryStore_SummaryRefreshesWhenCoverageFallsBehindHistoryWindow(t *t
 
 func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -487,6 +514,9 @@ func TestConversationService_DeleteConversationRemovesSummary(t *testing.T) {
 
 func TestConversationService_CreateFeedbackRejectsNonAssistantMessage(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -524,6 +554,9 @@ func TestConversationService_CreateFeedbackRejectsNonAssistantMessage(t *testing
 
 func TestConversationService_CreateFeedbackDerivesConversationIDFromMessage(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -570,6 +603,9 @@ func TestConversationService_CreateFeedbackDerivesConversationIDFromMessage(t *t
 
 func TestConversationService_UpdateTitleValidatesAndTrims(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if sqlDB, dbErr := gdb.DB(); dbErr == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
